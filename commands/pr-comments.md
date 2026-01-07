@@ -7,10 +7,11 @@ Fetch PR comments from Azure DevOps to review feedback.
 
 ## Usage
 
-`/aide:pr <pr-id>` - Load all comments from a PR
-`/aide:pr <pr-id> --latest 10` - Load latest 10 comments
-`/aide:pr <pr-id> --thread-status active` - Load only active/unresolved threads
-`/aide:pr <pr-url>` - Use full PR URL
+`/aide:pr` - Auto-detect PR from current branch
+`/aide:pr <pr-id>` - Load specific PR by ID
+`/aide:pr <pr-url>` - Load PR from full URL
+`/aide:pr --latest 10` - Load latest 10 comments
+`/aide:pr --thread-status active` - Load only active/unresolved threads
 
 ## Execution
 

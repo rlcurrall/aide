@@ -85,7 +85,9 @@ function extractTextFromContent(content: AdfInput): string {
     .map((item: AdfNode) => {
       if (item.text) return item.text;
       if (item.content && Array.isArray(item.content)) {
-        return item.content.map((subItem: AdfNode) => subItem.text || '').join('');
+        return item.content
+          .map((subItem: AdfNode) => subItem.text || '')
+          .join('');
       }
       return '';
     })

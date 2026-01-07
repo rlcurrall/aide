@@ -9,9 +9,9 @@ This is the **aide CLI** - a unified command-line tool for AI coding agents to i
 The CLI follows a hierarchical command structure: `aide <service> <action> [options]`
 
 **Services:**
+
 - `jira` - Jira ticket management (search, ticket, comment, comments, desc)
 - `ado` - Azure DevOps pull requests (prs, comments)
-- `docs` - Documentation management (update)
 - `plugin` - Claude Code plugin management (install, uninstall, status)
 
 ## Development Commands
@@ -31,7 +31,6 @@ bun run dev jira search "assignee = currentUser()"
 bun run dev jira ticket PROJ-123
 bun run dev ado prs --status active
 bun run dev ado comments 24094 --latest 5
-bun run dev docs update
 
 # Direct execution
 bun run src/cli/index.ts --help
@@ -57,6 +56,7 @@ bun run dev plugin uninstall --user
 ```
 
 Installation scopes:
+
 - `--user` (default): `~/.claude/plugins/aide/` - Personal, available in all projects
 - `--project`: `.claude/plugins/aide/` - Team-shared via git
 - `--local`: `.claude/plugins/aide/` - Project-specific, gitignored
@@ -97,7 +97,6 @@ src/
       types.ts            # Command and ServiceRouter interfaces
       jira/               # Jira service commands
       ado/                # Azure DevOps service commands
-      docs/               # Documentation commands
       plugin/             # Plugin management commands
   lib/                    # Shared libraries
     config.ts             # Configuration loading from env vars
@@ -128,11 +127,13 @@ skills/aide/SKILL.md      # Claude Code skill definition
 ### Command Architecture
 
 Each service has a **router** that implements the `ServiceRouter` interface:
+
 - Routes actions to appropriate command handlers
 - Displays service-level help
 - Handles unknown commands gracefully
 
 Each command implements the `Command` interface:
+
 - `name` - Command name
 - `description` - Short description for help text
 - `execute(ctx: CommandContext)` - Main execution function
@@ -145,17 +146,20 @@ The main entry point (`cli/index.ts`) parses the command line and routes to serv
 
 **Auto-Discovery:**
 Azure DevOps commands automatically discover organization, project, and repository from git remote URLs:
+
 - SSH format: `git@ssh.dev.azure.com:v3/{org}/{project}/{repo}`
 - HTTPS format: `https://dev.azure.com/{org}/{project}/_git/{repo}`
 
 **Multiple Output Formats:**
 All commands support `--format` flag:
+
 - `text` - Human-readable (default)
 - `json` - Structured data for AI/script processing
 - `markdown` - Documentation-friendly format
 
 **Environment Configuration:**
 Credentials are loaded from environment variables:
+
 - Jira: `JIRA_URL`, `JIRA_EMAIL`/`JIRA_USERNAME`, `JIRA_API_TOKEN`/`JIRA_TOKEN`
 - Azure DevOps: `AZURE_DEVOPS_ORG_URL`, `AZURE_DEVOPS_PAT`, `AZURE_DEVOPS_AUTH_METHOD`
 
@@ -178,14 +182,16 @@ export const newCmdCommand: Command = {
   async execute(ctx: CommandContext): Promise<number> {
     // Handle --help flag
     if (ctx.flags.has('help')) {
-      console.log(formatCommandHelp({
-        name: 'jira new-cmd',
-        description: 'Detailed description',
-        usage: 'jira new-cmd <args> [options]',
-        arguments: [{ name: 'arg', description: 'Argument description' }],
-        flags: [{ name: '--flag', description: 'Flag description' }],
-        examples: ['jira new-cmd example1', 'jira new-cmd example2 --flag'],
-      }));
+      console.log(
+        formatCommandHelp({
+          name: 'jira new-cmd',
+          description: 'Detailed description',
+          usage: 'jira new-cmd <args> [options]',
+          arguments: [{ name: 'arg', description: 'Argument description' }],
+          flags: [{ name: '--flag', description: 'Flag description' }],
+          examples: ['jira new-cmd example1', 'jira new-cmd example2 --flag'],
+        })
+      );
       return 0;
     }
 

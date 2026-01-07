@@ -1,6 +1,6 @@
 /**
- * ADO comments command - Get comments from a pull request
- * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads?view=azure-devops-rest-7.1
+ * ADO pr comment command - Post a comment on a pull request
+ * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/create?view=azure-devops-rest-7.1
  */
 
 import type { CommandModule, ArgumentsCamelCase } from 'yargs';
@@ -12,145 +12,110 @@ import {
   validatePRId,
   findPRByCurrentBranch,
 } from '@lib/ado-utils.js';
-import type { AdoFlattenedComment } from '@lib/types.js';
+import type { CreateThreadResponse } from '@lib/types.js';
 
 type OutputFormat = 'text' | 'json' | 'markdown';
 
-export interface CommentsArgv {
+export interface PrCommentArgv {
   prIdOrUrl?: string;
+  comment: string;
   project?: string;
   repo?: string;
   format: OutputFormat;
-  author?: string;
-  since?: string;
-  latest?: number;
-  includeSystem: boolean;
-  threadStatus?: string;
+  file?: string;
+  line?: number;
+  endLine?: number;
 }
 
 /**
- * Filter comments based on provided criteria
- */
-function filterComments(
-  comments: AdoFlattenedComment[],
-  filter: {
-    author?: string;
-    sinceDate?: string;
-    latest?: number;
-    includeSystem?: boolean;
-    threadStatus?: string;
-  }
-): AdoFlattenedComment[] {
-  let filtered = [...comments];
-
-  // Filter by comment type
-  if (!filter.includeSystem) {
-    filtered = filtered.filter((c) => c.comment.commentType !== 'system');
-  }
-
-  // Filter by thread status
-  if (filter.threadStatus) {
-    filtered = filtered.filter(
-      (c) => c.threadStatus.toLowerCase() === filter.threadStatus!.toLowerCase()
-    );
-  }
-
-  // Filter by author
-  if (filter.author) {
-    const authorLower = filter.author.toLowerCase();
-    filtered = filtered.filter((c) => {
-      const displayName = c.comment.author.displayName.toLowerCase();
-      const uniqueName = c.comment.author.uniqueName?.toLowerCase() || '';
-      return (
-        displayName.includes(authorLower) || uniqueName.includes(authorLower)
-      );
-    });
-  }
-
-  // Filter by date
-  if (filter.sinceDate) {
-    const sinceTime = new Date(filter.sinceDate).getTime();
-    filtered = filtered.filter(
-      (c) => new Date(c.comment.publishedDate).getTime() >= sinceTime
-    );
-  }
-
-  // Sort by date (newest first)
-  filtered.sort(
-    (a, b) =>
-      new Date(b.comment.publishedDate).getTime() -
-      new Date(a.comment.publishedDate).getTime()
-  );
-
-  // Limit to latest N
-  if (filter.latest && filter.latest > 0) {
-    filtered = filtered.slice(0, filter.latest);
-  }
-
-  return filtered;
-}
-
-/**
- * Format comments output based on format type
+ * Format the output based on format type
  */
 function formatOutput(
-  comments: AdoFlattenedComment[],
+  thread: CreateThreadResponse,
   format: OutputFormat,
-  prId: number
+  prId: number,
+  filePath?: string,
+  line?: number
 ): string {
   if (format === 'json') {
-    return JSON.stringify(comments, null, 2);
+    return JSON.stringify(thread, null, 2);
   }
 
-  if (comments.length === 0) {
-    return format === 'markdown'
-      ? `# PR #${prId} Comments\n\nNo comments found.`
-      : `No comments found for PR #${prId}.`;
-  }
+  const comment = thread.comments[0];
+  const date = new Date(thread.publishedDate).toISOString().split('T')[0];
+  const locationInfo = filePath
+    ? ` on ${filePath}${line ? `:${line}` : ''}`
+    : '';
 
   if (format === 'markdown') {
-    let output = `# PR #${prId} Comments\n\n`;
-    output += `Total: ${comments.length} comment${comments.length === 1 ? '' : 's'}\n\n`;
-
-    for (const item of comments) {
-      const c = item.comment;
-      const date = new Date(c.publishedDate).toISOString().split('T')[0];
-      const threadInfo = item.filePath
-        ? ` (${item.filePath}:${item.lineNumber || '?'})`
-        : '';
-
-      output += `## ${c.author.displayName}${threadInfo}\n`;
-      output += `**Date:** ${date} | **Status:** ${item.threadStatus}\n\n`;
-      output += `${c.content}\n\n`;
-      output += `---\n\n`;
+    let output = `# Comment Posted on PR #${prId}\n\n`;
+    output += `**Thread ID:** ${thread.id}\n`;
+    output += `**Status:** ${thread.status}\n`;
+    output += `**Date:** ${date}\n`;
+    if (filePath) {
+      output += `**Location:** \`${filePath}\``;
+      if (line) {
+        output += ` (line ${line}${thread.threadContext?.rightFileEnd?.line && thread.threadContext.rightFileEnd.line !== line ? `-${thread.threadContext.rightFileEnd.line}` : ''})`;
+      }
+      output += '\n';
     }
+    output += `\n---\n\n`;
+    output += `${comment?.content || ''}\n`;
 
     return output;
   }
 
   // Text format
-  let output = `PR #${prId} Comments (${comments.length} total)\n`;
+  let output = `Comment posted successfully${locationInfo}!\n`;
   output += '='.repeat(50) + '\n\n';
-
-  for (const item of comments) {
-    const c = item.comment;
-    const date = new Date(c.publishedDate).toLocaleString();
-    const threadInfo = item.filePath
-      ? `\n  File: ${item.filePath}:${item.lineNumber || '?'}`
-      : '';
-
-    output += `[${date}] ${c.author.displayName}`;
-    output += `\n  Thread Status: ${item.threadStatus}${threadInfo}\n`;
-    output += `  ${c.content}\n\n`;
+  output += `Thread ID: ${thread.id}\n`;
+  output += `PR: #${prId}\n`;
+  output += `Status: ${thread.status}\n`;
+  output += `Date: ${date}\n`;
+  if (filePath) {
+    output += `File: ${filePath}`;
+    if (line) {
+      output += `:${line}`;
+      if (
+        thread.threadContext?.rightFileEnd?.line &&
+        thread.threadContext.rightFileEnd.line !== line
+      ) {
+        output += `-${thread.threadContext.rightFileEnd.line}`;
+      }
+    }
+    output += '\n';
   }
+  output += `\nComment:\n  ${comment?.content || ''}\n`;
 
   return output;
 }
 
-async function handler(argv: ArgumentsCamelCase<CommentsArgv>): Promise<void> {
+async function handler(argv: ArgumentsCamelCase<PrCommentArgv>): Promise<void> {
   let prId: number | undefined;
   let { project, repo } = argv;
-  const { format, author, since, latest, includeSystem, threadStatus } = argv;
+  const { format, comment, file, line, endLine } = argv;
+
+  // Validate file/line requirements
+  if (file && !line) {
+    console.error('Error: --line is required when --file is specified.');
+    console.error(
+      'To comment on a specific file location, provide both --file and --line.'
+    );
+    process.exit(1);
+  }
+
+  if (line && !file) {
+    console.error('Error: --file is required when --line is specified.');
+    console.error(
+      'To comment on a specific file location, provide both --file and --line.'
+    );
+    process.exit(1);
+  }
+
+  if (endLine && !line) {
+    console.error('Error: --line is required when --end-line is specified.');
+    process.exit(1);
+  }
 
   // Auto-discover project/repo from git remote first (needed for PR auto-detection)
   if (!project || !repo) {
@@ -251,28 +216,31 @@ async function handler(argv: ArgumentsCamelCase<CommentsArgv>): Promise<void> {
     const client = new AzureDevOpsClient(config);
 
     if (format !== 'json') {
-      console.log(`Fetching comments for PR #${prId}...`);
-      if (author) console.log(`Filtering by author: ${author}`);
-      if (since) console.log(`Since date: ${since}`);
-      if (latest) console.log(`Latest: ${latest} comments`);
-      if (threadStatus) console.log(`Thread status: ${threadStatus}`);
+      console.log(`Posting comment to PR #${prId}...`);
+      if (file) {
+        console.log(`File: ${file}`);
+        console.log(`Line: ${line}${endLine ? `-${endLine}` : ''}`);
+      }
       console.log('');
     }
 
-    // Fetch all comments
-    const allComments = await client.getAllComments(project, repo, prId);
-
-    // Apply filters
-    const filtered = filterComments(allComments, {
-      author,
-      sinceDate: since,
-      latest,
-      includeSystem,
-      threadStatus,
-    });
+    // Create the thread with the comment
+    const thread = await client.createPullRequestThread(
+      project,
+      repo,
+      prId,
+      comment,
+      file && line
+        ? {
+            filePath: file,
+            line,
+            endLine,
+          }
+        : undefined
+    );
 
     // Format and output
-    const output = formatOutput(filtered, format, prId);
+    const output = formatOutput(thread, format, prId, file, line);
     console.log(output);
   } catch (error) {
     if (error instanceof Error) {
@@ -284,14 +252,19 @@ async function handler(argv: ArgumentsCamelCase<CommentsArgv>): Promise<void> {
   }
 }
 
-export const commentsCommand: CommandModule<object, CommentsArgv> = {
-  command: 'comments [prIdOrUrl]',
-  describe: 'Get comments from an Azure DevOps pull request',
+export const prCommentCommand: CommandModule<object, PrCommentArgv> = {
+  command: 'comment [prIdOrUrl] <comment>',
+  describe: 'Post a comment on an Azure DevOps pull request',
   builder: {
     prIdOrUrl: {
       type: 'string',
       describe:
         'PR ID or full PR URL (auto-detected from current branch if omitted)',
+    },
+    comment: {
+      type: 'string',
+      demandOption: true,
+      describe: 'Comment text to post',
     },
     project: {
       type: 'string',
@@ -307,26 +280,17 @@ export const commentsCommand: CommandModule<object, CommentsArgv> = {
       default: 'text' as const,
       describe: 'Output format',
     },
-    author: {
+    file: {
       type: 'string',
-      describe: 'Filter comments by author name or email',
+      describe: 'File path for file-specific comment (requires --line)',
     },
-    since: {
-      type: 'string',
-      describe: 'Show comments since date (YYYY-MM-DD)',
-    },
-    latest: {
+    line: {
       type: 'number',
-      describe: 'Show only N most recent comments',
+      describe: 'Line number for file-specific comment (requires --file)',
     },
-    'include-system': {
-      type: 'boolean',
-      default: false,
-      describe: 'Include system comments',
-    },
-    'thread-status': {
-      type: 'string',
-      describe: 'Filter by thread status (active, fixed, wontFix, closed)',
+    'end-line': {
+      type: 'number',
+      describe: 'End line number for multi-line comment range',
     },
   },
   handler,

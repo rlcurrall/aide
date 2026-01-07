@@ -149,7 +149,7 @@ export interface JiraCommentsResponse {
 /**
  * Response from Jira's POST /issue/{issueKey}/comment endpoint
  */
-export interface JiraAddCommentResponse extends JiraComment {}
+export type JiraAddCommentResponse = JiraComment;
 
 // ============================================================================
 // Azure DevOps Types
@@ -193,6 +193,54 @@ export interface AzureDevOpsPRComment {
   commentType: 'text' | 'system';
 }
 
+/**
+ * Response from creating a comment in a PR thread
+ * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-thread-comments/create?view=azure-devops-rest-7.1
+ */
+export interface AzureDevOpsCreateCommentResponse {
+  id: number;
+  parentCommentId: number;
+  author: AzureDevOpsIdentity;
+  content: string;
+  publishedDate: string;
+  lastUpdatedDate: string;
+  lastContentUpdatedDate: string;
+  commentType: 'text' | 'system';
+}
+
+/**
+ * Options for creating a PR thread comment
+ * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/create?view=azure-devops-rest-7.1
+ */
+export interface CreateThreadOptions {
+  /** File path for file-specific comments (e.g., "/src/utils.ts") */
+  filePath?: string;
+  /** Starting line number for file comments */
+  line?: number;
+  /** Ending line number for file comments (defaults to line if not specified) */
+  endLine?: number;
+  /** Thread status: 1=active, 2=fixed, 3=wontFix, 4=closed, 5=byDesign, 6=pending */
+  status?: number;
+}
+
+/**
+ * Response from creating a PR thread
+ * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/create?view=azure-devops-rest-7.1
+ */
+export interface CreateThreadResponse {
+  id: number;
+  publishedDate: string;
+  lastUpdatedDate: string;
+  comments: AzureDevOpsPRComment[];
+  status: 'active' | 'fixed' | 'wontFix' | 'closed' | 'byDesign' | 'pending';
+  threadContext?: {
+    filePath?: string;
+    rightFileStart?: { line: number; offset: number };
+    rightFileEnd?: { line: number; offset: number };
+  };
+  properties?: unknown;
+}
+
 export interface AzureDevOpsRepository {
   id: string;
   name: string;
@@ -207,9 +255,29 @@ export interface AzureDevOpsPullRequest {
   title: string;
   description?: string;
   status: 'active' | 'abandoned' | 'completed';
+  isDraft?: boolean;
   createdBy: AzureDevOpsIdentity;
   creationDate: string;
   repository: AzureDevOpsRepository;
+  sourceRefName?: string; // e.g., "refs/heads/feature-branch"
+  targetRefName?: string; // e.g., "refs/heads/main"
+}
+
+/**
+ * Options for updating a pull request
+ * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/update?view=azure-devops-rest-7.1
+ */
+export interface PullRequestUpdateOptions {
+  /** New title for the PR */
+  title?: string;
+  /** New description for the PR */
+  description?: string;
+  /** Whether the PR is a draft */
+  isDraft?: boolean;
+  /** New status for the PR (active, abandoned, completed) */
+  status?: 'active' | 'abandoned' | 'completed';
+  /** New target branch (e.g., "refs/heads/main") */
+  targetRefName?: string;
 }
 
 /**

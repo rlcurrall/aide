@@ -1,5 +1,6 @@
 /**
  * ADO prs command - List Azure DevOps pull requests
+ * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/list?view=azure-devops-rest-7.1
  */
 
 import type { CommandModule, ArgumentsCamelCase } from 'yargs';

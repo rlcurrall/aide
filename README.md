@@ -7,6 +7,7 @@ A unified command-line tool designed for AI coding agents (like Claude Code) to 
 ### Option 1: Download Binary
 
 Download the pre-built binary for your platform from the releases page and add it to your PATH:
+
 - `aide.exe` - Windows
 - `aide-linux` - Linux
 - `aide-mac` - macOS (ARM)
@@ -58,28 +59,27 @@ aide <service> <action> [options]
 
 ### Services
 
-| Service | Description |
-|---------|-------------|
-| `jira`  | Jira ticket management |
+| Service | Description                |
+| ------- | -------------------------- |
+| `jira`  | Jira ticket management     |
 | `ado`   | Azure DevOps pull requests |
-| `docs`  | Documentation management |
 
 ### Jira Commands
 
-| Command | Description |
-|---------|-------------|
-| `aide jira search <jql>` | Search tickets using JQL |
-| `aide jira ticket <key>` | Get ticket details |
-| `aide jira comment <key> <text>` | Add comment to ticket |
-| `aide jira comments <key>` | Get ticket comments |
-| `aide jira desc <key> <text>` | Set ticket description |
+| Command                          | Description              |
+| -------------------------------- | ------------------------ |
+| `aide jira search <jql>`         | Search tickets using JQL |
+| `aide jira ticket <key>`         | Get ticket details       |
+| `aide jira comment <key> <text>` | Add comment to ticket    |
+| `aide jira comments <key>`       | Get ticket comments      |
+| `aide jira desc <key> <text>`    | Set ticket description   |
 
 ### Azure DevOps Commands
 
-| Command | Description |
-|---------|-------------|
-| `aide ado prs` | List pull requests |
-| `aide ado comments <pr-id>` | Get PR comments |
+| Command                     | Description        |
+| --------------------------- | ------------------ |
+| `aide ado prs`              | List pull requests |
+| `aide ado comments <pr-id>` | Get PR comments    |
 
 ## Usage Examples
 
@@ -120,6 +120,7 @@ aide ado comments 24094 --latest 5 --format json
 ### Output Formats
 
 All commands support `--format` flag:
+
 - `text` - Human-readable (default)
 - `json` - Structured data for AI/script processing
 - `markdown` - Documentation-friendly format
@@ -134,6 +135,7 @@ aide ado comments 24094 --format markdown
 ### Environment Variables
 
 **Jira:**
+
 ```bash
 export JIRA_URL="https://your-company.atlassian.net"
 export JIRA_EMAIL="your-email@company.com"
@@ -141,23 +143,27 @@ export JIRA_API_TOKEN="your-api-token-here"
 ```
 
 **Azure DevOps:**
+
 ```bash
 export AZURE_DEVOPS_ORG_URL="https://dev.azure.com/yourorg"
 export AZURE_DEVOPS_PAT="your-personal-access-token"
 ```
 
 You can store these in:
+
 - `~/.vars` and source it in your shell profile
 - A `.env` file in your project directory (automatically loaded by Bun)
 
 ## Auto-Discovery
 
 When running from within a git repository with an Azure DevOps remote, ADO commands automatically detect:
+
 - Organization
 - Project
 - Repository
 
 Supported remote formats:
+
 - SSH: `git@ssh.dev.azure.com:v3/org/project/repo`
 - HTTPS: `https://dev.azure.com/org/project/_git/repo`
 
@@ -222,32 +228,34 @@ aide plugin uninstall
 
 ### Installation Scopes
 
-| Scope | Flag | Location | Use Case |
-|-------|------|----------|----------|
-| User | `--user` (default) | `~/.claude/plugins/aide/` | Personal, all projects |
-| Project | `--project` | `.claude/plugins/aide/` | Team-shared via git |
-| Local | `--local` | `.claude/plugins/aide/` | Project-specific, gitignored |
+| Scope   | Flag               | Location                  | Use Case                     |
+| ------- | ------------------ | ------------------------- | ---------------------------- |
+| User    | `--user` (default) | `~/.claude/plugins/aide/` | Personal, all projects       |
+| Project | `--project`        | `.claude/plugins/aide/`   | Team-shared via git          |
+| Local   | `--local`          | `.claude/plugins/aide/`   | Project-specific, gitignored |
 
 ### Available Slash Commands
 
 After installation, these commands are available in Claude Code:
 
-| Command | Description |
-|---------|-------------|
-| `/aide:ticket KEY` | Load Jira ticket context |
-| `/aide:search "JQL"` | Search Jira tickets |
-| `/aide:comment KEY "text"` | Add comment to ticket |
-| `/aide:update KEY` | Update ticket description |
-| `/aide:pr PR-ID` | Load PR comments for review |
+| Command                    | Description                 |
+| -------------------------- | --------------------------- |
+| `/aide:ticket KEY`         | Load Jira ticket context    |
+| `/aide:search "JQL"`       | Search Jira tickets         |
+| `/aide:comment KEY "text"` | Add comment to ticket       |
+| `/aide:update KEY`         | Update ticket description   |
+| `/aide:pr PR-ID`           | Load PR comments for review |
 
 ### Workflows
 
 **Ticket-Driven Development:**
+
 1. `/aide:ticket PROJ-123` - Load ticket context
 2. Implement the feature/fix
 3. `/aide:comment PROJ-123 "Implemented X, Y, Z"` - Update ticket
 
 **PR Review:**
+
 1. `/aide:pr 24094 --thread-status active` - Load active feedback
 2. Address each comment
 3. Push changes

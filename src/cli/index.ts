@@ -12,7 +12,6 @@ import { VERSION, CLI_NAME } from './help.js';
 // Import service command modules
 import { jiraCommands } from './commands/jira/index.js';
 import { adoCommands } from './commands/ado/index.js';
-import { docsCommands } from './commands/docs/index.js';
 import { pluginCommands } from './commands/plugin/index.js';
 
 async function main(): Promise<number> {
@@ -25,9 +24,8 @@ async function main(): Promise<number> {
       .alias('v', 'version')
       .command(jiraCommands)
       .command(adoCommands)
-      .command(docsCommands)
       .command(pluginCommands)
-      .demandCommand(1, 'Please specify a service (jira, ado, docs, plugin)')
+      .demandCommand(1, 'Please specify a service (jira, ado, plugin)')
       .strict()
       .wrap(Math.min(100, process.stdout.columns || 80))
       .fail((msg, err) => {
