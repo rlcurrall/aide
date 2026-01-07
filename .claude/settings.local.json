@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": ["Bash(bun run lint:*)", "Bash(./setup.sh:*)", "Bash(chmod:*)"],
-    "deny": [],
-    "ask": []
-  }
-}
-
