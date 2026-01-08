@@ -1,6 +1,6 @@
 {
   "name": "aide",
-  "version": "0.0.0-alpha",
+  "version": "0.0.0",
   "description": "AI agent integration with Jira and Azure DevOps",
   "author": {
     "name": "Robb Currall"

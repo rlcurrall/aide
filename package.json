@@ -1,6 +1,6 @@
 {
   "name": "aide",
-  "version": "2.0.0",
+  "version": "0.0.0",
   "description": "AI agent tools CLI for Jira and Azure DevOps",
   "module": "index.ts",
   "type": "module",
@@ -15,6 +15,7 @@
     "build:linux": "bun build --compile --target=bun-linux-x64 src/cli/index.ts --outfile dist/aide-linux",
     "build:mac": "bun build --compile --target=bun-darwin-arm64 src/cli/index.ts --outfile dist/aide-mac",
     "build:all": "bun run build:win && bun run build:linux && bun run build:mac",
+    "release": "bun run src/scripts/release.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
