@@ -26,23 +26,26 @@ export const adoCommands: CommandModule = {
       .example('$0 ado prs --status active', 'List active PRs')
       .example('$0 ado prs --created-by "your.email"', 'List your PRs')
       .example('$0 ado create --title "My PR" --target main', 'Create a PR')
-      .example('$0 ado update 123 --title "New title"', 'Update PR title')
-      .example('$0 ado update 123 --publish', 'Publish a draft PR')
-      .example('$0 ado comments 24094 --latest 5', 'Get recent PR comments')
+      .example('$0 ado update --pr 123 --title "New title"', 'Update PR title')
+      .example('$0 ado update --pr 123 --publish', 'Publish a draft PR')
       .example(
-        '$0 ado comment 123 "This looks good!"',
+        '$0 ado comments --pr 24094 --latest 5',
+        'Get recent PR comments'
+      )
+      .example(
+        '$0 ado comment "This looks good!" --pr 123',
         'Post a general comment on PR'
       )
       .example(
-        '$0 ado comment 123 "Use const" --file src/utils.ts --line 42',
+        '$0 ado comment "Use const" --pr 123 --file src/utils.ts --line 42',
         'Comment on specific file/line'
       )
       .example(
-        '$0 ado reply 123 --thread 456 "Thanks, I\'ll fix that"',
+        '$0 ado reply 456 "Thanks, I\'ll fix that" --pr 123',
         'Reply to a thread'
       )
       .example(
-        '$0 ado reply 123 --thread 456 --parent 2 "Good point"',
+        '$0 ado reply 456 "Good point" --parent 2 --pr 123',
         'Reply to a specific comment'
       ),
   handler: () => {

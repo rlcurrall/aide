@@ -25,14 +25,14 @@ The aide CLI provides AI coding agents with tools to interact with Jira and Azur
 
 ### Azure DevOps Commands
 
-| Command                           | Description        |
-| --------------------------------- | ------------------ |
-| `aide ado prs`                    | List pull requests |
-| `aide ado pr create`              | Create a PR        |
-| `aide ado pr update`              | Update a PR        |
-| `aide ado comments PR-ID`         | Get PR comments    |
-| `aide ado pr comment PR-ID "msg"` | Post PR comment    |
-| `aide ado pr reply PR-ID`         | Reply to thread    |
+| Command                              | Description        |
+| ------------------------------------ | ------------------ |
+| `aide ado prs`                       | List pull requests |
+| `aide ado create`                    | Create a PR        |
+| `aide ado update [--pr ID]`          | Update a PR        |
+| `aide ado comments [--pr ID]`        | Get PR comments    |
+| `aide ado comment "msg" [--pr ID]`   | Post PR comment    |
+| `aide ado reply <thread> "msg"`      | Reply to thread    |
 
 ## Ticket-Driven Development Workflow
 
@@ -97,7 +97,7 @@ aide ado comments 24094 --format json
 ### Creating a Pull Request
 
 1. **Prepare your branch**: Ensure all changes are committed and pushed
-2. **Create the PR**: Use `aide ado pr create --title "Title" --target main`
+2. **Create the PR**: Use `aide ado create --title "Title" --target main`
 3. **Add description**: Include context with `--description` flag or update later
 4. **Draft mode**: Use `--draft` flag for work-in-progress PRs
 
@@ -105,45 +105,48 @@ aide ado comments 24094 --format json
 
 ```bash
 # Create a draft PR
-aide ado pr create --title "WIP: Add authentication" --target develop --draft
+aide ado create --title "WIP: Add authentication" --target develop --draft
 
 # Update PR title or description
-aide ado pr update 24094 --title "Add OAuth authentication"
+aide ado update --pr 24094 --title "Add OAuth authentication"
 
 # Publish draft when ready for review
-aide ado pr update 24094 --publish
+aide ado update --pr 24094 --publish
 
 # Convert back to draft if more work needed
-aide ado pr update 24094 --draft
+aide ado update --pr 24094 --draft
 
 # Abandon PR if no longer needed
-aide ado pr update 24094 --abandon
+aide ado update --pr 24094 --abandon
 
 # Reactivate abandoned PR
-aide ado pr update 24094 --activate
+aide ado update --pr 24094 --activate
 ```
 
 ### Responding to PR Feedback
 
-1. **Load comments**: Use `aide ado comments PR-ID --thread-status active`
+1. **Load comments**: Use `aide ado comments --pr PR-ID --thread-status active`
 2. **Address code changes**: Implement requested changes
-3. **Reply to threads**: Use `aide ado pr reply PR-ID --thread THREAD-ID "message"`
-4. **Post updates**: Use `aide ado pr comment PR-ID "Ready for re-review"`
+3. **Reply to threads**: Use `aide ado reply THREAD-ID "message" --pr PR-ID`
+4. **Post updates**: Use `aide ado comment "Ready for re-review" --pr PR-ID`
 
 ### Commenting on PRs
 
 ```bash
-# Add general PR comment
-aide ado pr comment 24094 "Ready for re-review"
+# Add general PR comment (auto-detect PR from branch)
+aide ado comment "Ready for re-review"
+
+# Comment on specific PR
+aide ado comment "Ready for re-review" --pr 24094
 
 # Comment on specific file
-aide ado pr comment 24094 "Consider refactoring this" --file src/auth.ts
+aide ado comment "Consider refactoring this" --pr 24094 --file src/auth.ts
 
 # Comment on specific line
-aide ado pr comment 24094 "Add error handling here" --file src/auth.ts --line 42
+aide ado comment "Add error handling here" --pr 24094 --file src/auth.ts --line 42
 
 # Reply to existing thread
-aide ado pr reply 24094 --thread 156 "Fixed in latest commit"
+aide ado reply 156 "Fixed in latest commit" --pr 24094
 ```
 
 ## Best Practices
