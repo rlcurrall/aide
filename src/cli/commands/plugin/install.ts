@@ -24,7 +24,7 @@ interface InstallPaths {
 }
 
 // Marketplace name used to reference the local plugin installation
-const MARKETPLACE_NAME = 'aide';
+const MARKETPLACE_NAME = 'aide-marketplace';
 
 /**
  * Get the installation paths based on the specified scope

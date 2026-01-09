@@ -48,7 +48,7 @@ function getInstallPaths(scope: Scope): InstallPaths {
 }
 
 /**
- * Remove the ax plugin entry from a settings file
+ * Remove the aide plugin entry from a settings file
  * Returns true if the settings were modified
  */
 function removeFromSettings(settingsFile: string): boolean {
@@ -59,9 +59,9 @@ function removeFromSettings(settingsFile: string): boolean {
     if (
       settings.enabledPlugins &&
       typeof settings.enabledPlugins === 'object' &&
-      'aide@aide' in settings.enabledPlugins
+      'aide@aide-marketplace' in settings.enabledPlugins
     ) {
-      delete settings.enabledPlugins['aide@aide'];
+      delete settings.enabledPlugins['aide@aide-marketplace'];
       writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
       return true;
     }

@@ -47,7 +47,7 @@ function isPluginEnabled(settingsFile: string): boolean {
   if (!existsSync(settingsFile)) return false;
   try {
     const settings = JSON.parse(readFileSync(settingsFile, 'utf-8'));
-    return settings.enabledPlugins?.['aide@aide'] === true;
+    return settings.enabledPlugins?.['aide@aide-marketplace'] === true;
   } catch {
     return false;
   }
