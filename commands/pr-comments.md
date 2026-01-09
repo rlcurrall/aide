@@ -7,11 +7,11 @@ Fetch PR comments to review feedback.
 
 ## Usage
 
-`/aide:pr` - Auto-detect PR from current branch
-`/aide:pr <pr-id>` - Load specific PR by ID
-`/aide:pr <pr-url>` - Load PR from full URL
-`/aide:pr --latest 10` - Load latest 10 comments
-`/aide:pr --thread-status active` - Load only active/unresolved threads
+`/aide:pr-comments` - Auto-detect PR from current branch
+`/aide:pr-comments --pr <id>` - Load specific PR by ID
+`/aide:pr-comments --pr <url>` - Load PR from full URL
+`/aide:pr-comments --latest 10` - Load latest 10 comments
+`/aide:pr-comments --thread-status active` - Load only active/unresolved threads
 
 ## Execution
 

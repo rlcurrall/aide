@@ -49,6 +49,6 @@ Displays the created PR details including:
 After creating a PR:
 
 1. Share the PR URL with reviewers
-2. Use `/aide:pr <pr-id>` to monitor feedback
-3. Use `/aide:pr-update <pr-id> --publish` when ready to publish a draft
+2. Use `/aide:pr-comments --pr <pr-id>` to monitor feedback
+3. Use `/aide:pr-update --pr <pr-id> --publish` when ready to publish a draft
 4. Address reviewer comments with code changes

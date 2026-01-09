@@ -149,11 +149,13 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
   }
 
   // Parse PR ID or URL, or auto-detect from current branch
-  if (args.prIdOrUrl) {
-    if (args.prIdOrUrl.startsWith('http')) {
-      const parsed = parsePRUrl(args.prIdOrUrl);
+  if (args.pr) {
+    if (args.pr.startsWith('http')) {
+      const parsed = parsePRUrl(args.pr);
       if (!parsed) {
-        console.error(`Error: Invalid PR URL (expected Azure DevOps format): ${args.prIdOrUrl}`);
+        console.error(
+          `Error: Invalid PR URL (expected Azure DevOps format): ${args.pr}`
+        );
         console.error(
           'Expected format: https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id}'
         );
@@ -164,12 +166,12 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
       project = parsed.project;
       repo = parsed.repo;
     } else {
-      const validation = validatePRId(args.prIdOrUrl);
+      const validation = validatePRId(args.pr);
       if (validation.valid) {
         prId = validation.value;
       } else {
         console.error(
-          `Error: Could not parse '${args.prIdOrUrl}' as a PR ID. Expected a positive number or full PR URL.`
+          `Error: Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
         );
         process.exit(1);
       }
@@ -319,10 +321,10 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
 }
 
 export const prUpdateCommand: CommandModule<object, PrUpdateArgs> = {
-  command: 'update [prIdOrUrl]',
+  command: 'update',
   describe: 'Update a pull request',
   builder: {
-    prIdOrUrl: {
+    pr: {
       type: 'string',
       describe:
         'PR ID or full PR URL (auto-detected from current branch if omitted)',

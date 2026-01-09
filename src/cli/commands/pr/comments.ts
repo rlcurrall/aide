@@ -276,7 +276,9 @@ function formatText(
     if (!firstComment) continue;
 
     const authorName = firstComment.comment.author.displayName;
-    const rootDate = new Date(firstComment.comment.publishedDate).toLocaleString();
+    const rootDate = new Date(
+      firstComment.comment.publishedDate
+    ).toLocaleString();
 
     output += `Thread #${thread.threadId} - ${authorName}${fileInfo}\n`;
     output += `Date: ${rootDate} | Status: ${thread.threadStatus}\n\n`;

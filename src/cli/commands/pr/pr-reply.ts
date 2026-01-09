@@ -98,7 +98,9 @@ async function handler(argv: ArgumentsCamelCase<PrReplyArgs>): Promise<void> {
     if (args.pr.startsWith('http')) {
       const parsed = parsePRUrl(args.pr);
       if (!parsed) {
-        console.error(`Error: Invalid PR URL (expected Azure DevOps format): ${args.pr}`);
+        console.error(
+          `Error: Invalid PR URL (expected Azure DevOps format): ${args.pr}`
+        );
         console.error(
           'Expected format: https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id}'
         );

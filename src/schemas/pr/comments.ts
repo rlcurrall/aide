@@ -16,7 +16,7 @@ export type { OutputFormat };
  * Schema for PR comments command arguments
  */
 export const CommentsArgsSchema = v.object({
-  prIdOrUrl: v.optional(v.string()),
+  pr: v.optional(v.string()),
   project: v.optional(v.string()),
   repo: v.optional(v.string()),
   format: v.optional(OutputFormatSchema, 'text'),
