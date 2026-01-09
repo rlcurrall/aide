@@ -22,6 +22,18 @@ import {
 } from '@schemas/pr/comments.js';
 
 /**
+ * Represents a thread with its root comment and replies grouped together
+ */
+interface GroupedThread {
+  threadId: number;
+  threadStatus: string;
+  filePath?: string;
+  lineNumber?: number;
+  rootComment: AdoFlattenedComment | null;
+  replies: AdoFlattenedComment[];
+}
+
+/**
  * Filter comments based on provided criteria
  */
 function filterComments(
@@ -84,6 +96,88 @@ function filterComments(
 }
 
 /**
+ * Group comments by thread, separating root comments from replies
+ */
+function groupCommentsByThread(
+  comments: AdoFlattenedComment[]
+): GroupedThread[] {
+  const threadMap = new Map<number, GroupedThread>();
+
+  for (const comment of comments) {
+    const { threadId, threadStatus, filePath, lineNumber } = comment;
+
+    if (!threadMap.has(threadId)) {
+      threadMap.set(threadId, {
+        threadId,
+        threadStatus,
+        filePath,
+        lineNumber,
+        rootComment: null,
+        replies: [],
+      });
+    }
+
+    const thread = threadMap.get(threadId)!;
+
+    // In Azure DevOps, multiple comments can have parentCommentId === 0
+    // (top-level thread replies). The one with the lowest ID is the true root.
+    if (comment.comment.parentCommentId === 0) {
+      if (
+        thread.rootComment === null ||
+        comment.comment.id < thread.rootComment.comment.id
+      ) {
+        // This is the new root (either first or has lower ID)
+        if (thread.rootComment !== null) {
+          // Demote the old root to a reply
+          thread.replies.push(thread.rootComment);
+        }
+        thread.rootComment = comment;
+      } else {
+        // Another top-level comment, but not the root - treat as reply
+        thread.replies.push(comment);
+      }
+    } else {
+      thread.replies.push(comment);
+    }
+  }
+
+  // Sort replies within each thread by comment ID (chronological order)
+  for (const thread of threadMap.values()) {
+    thread.replies.sort((a, b) => a.comment.id - b.comment.id);
+  }
+
+  // Convert to array and sort threads by most recent activity
+  const threads = Array.from(threadMap.values());
+  threads.sort((a, b) => {
+    const aLatest = getLatestDate(a);
+    const bLatest = getLatestDate(b);
+    return bLatest - aLatest; // Newest first
+  });
+
+  return threads;
+}
+
+/**
+ * Get the latest comment date in a thread
+ */
+function getLatestDate(thread: GroupedThread): number {
+  let latest = 0;
+
+  if (thread.rootComment) {
+    latest = new Date(thread.rootComment.comment.publishedDate).getTime();
+  }
+
+  for (const reply of thread.replies) {
+    const replyTime = new Date(reply.comment.publishedDate).getTime();
+    if (replyTime > latest) {
+      latest = replyTime;
+    }
+  }
+
+  return latest;
+}
+
+/**
  * Format comments output based on format type
  */
 function formatOutput(
@@ -101,40 +195,110 @@ function formatOutput(
       : `No comments found for PR #${prId}.`;
   }
 
+  // Group comments by thread for structured output
+  const threads = groupCommentsByThread(comments);
+
   if (format === 'markdown') {
-    let output = `# PR #${prId} Comments\n\n`;
-    output += `Total: ${comments.length} comment${comments.length === 1 ? '' : 's'}\n\n`;
-
-    for (const item of comments) {
-      const c = item.comment;
-      const date = new Date(c.publishedDate).toISOString().split('T')[0];
-      const threadInfo = item.filePath
-        ? ` (${item.filePath}:${item.lineNumber || '?'})`
-        : '';
-
-      output += `## ${c.author.displayName}${threadInfo}\n`;
-      output += `**Date:** ${date} | **Status:** ${item.threadStatus}\n\n`;
-      output += `${c.content}\n\n`;
-      output += `---\n\n`;
-    }
-
-    return output;
+    return formatMarkdown(threads, comments.length, prId);
   }
 
   // Text format
-  let output = `PR #${prId} Comments (${comments.length} total)\n`;
-  output += '='.repeat(50) + '\n\n';
+  return formatText(threads, comments.length, prId);
+}
 
-  for (const item of comments) {
-    const c = item.comment;
-    const date = new Date(c.publishedDate).toLocaleString();
-    const threadInfo = item.filePath
-      ? `\n  File: ${item.filePath}:${item.lineNumber || '?'}`
+/**
+ * Format threads as markdown with heading hierarchy
+ */
+function formatMarkdown(
+  threads: GroupedThread[],
+  totalComments: number,
+  prId: number
+): string {
+  let output = `# PR #${prId} Comments\n\n`;
+  output += `Total: ${totalComments} comment${totalComments === 1 ? '' : 's'} in ${threads.length} thread${threads.length === 1 ? '' : 's'}\n\n`;
+
+  for (const thread of threads) {
+    const fileInfo = thread.filePath
+      ? ` (${thread.filePath}:${thread.lineNumber || '?'})`
       : '';
 
-    output += `[${date}] ${c.author.displayName}`;
-    output += `\n  Thread Status: ${item.threadStatus}${threadInfo}\n`;
-    output += `  ${c.content}\n\n`;
+    // Thread header with root comment author (or first reply if root is filtered out)
+    const firstComment = thread.rootComment || thread.replies[0];
+    if (!firstComment) continue;
+
+    const authorName = firstComment.comment.author.displayName;
+    const rootDate = new Date(firstComment.comment.publishedDate)
+      .toISOString()
+      .split('T')[0];
+
+    output += `## Thread #${thread.threadId} - ${authorName}${fileInfo}\n`;
+    output += `**Date:** ${rootDate} | **Status:** ${thread.threadStatus}\n\n`;
+
+    // Root comment content
+    if (thread.rootComment) {
+      output += `${thread.rootComment.comment.content}\n\n`;
+    }
+
+    // Replies
+    for (const reply of thread.replies) {
+      const replyDate = new Date(reply.comment.publishedDate)
+        .toISOString()
+        .split('T')[0];
+      output += `### Reply - ${reply.comment.author.displayName}\n`;
+      output += `**Date:** ${replyDate}\n\n`;
+      output += `${reply.comment.content}\n\n`;
+    }
+
+    output += `---\n\n`;
+  }
+
+  return output;
+}
+
+/**
+ * Format threads as plain text with indentation for replies
+ */
+function formatText(
+  threads: GroupedThread[],
+  totalComments: number,
+  prId: number
+): string {
+  let output = `PR #${prId} Comments (${totalComments} total in ${threads.length} thread${threads.length === 1 ? '' : 's'})\n`;
+  output += '='.repeat(50) + '\n\n';
+
+  for (const thread of threads) {
+    const fileInfo = thread.filePath
+      ? `\nFile: ${thread.filePath}:${thread.lineNumber || '?'}`
+      : '';
+
+    // Thread header with root comment author (or first reply if root is filtered out)
+    const firstComment = thread.rootComment || thread.replies[0];
+    if (!firstComment) continue;
+
+    const authorName = firstComment.comment.author.displayName;
+    const rootDate = new Date(firstComment.comment.publishedDate).toLocaleString();
+
+    output += `Thread #${thread.threadId} - ${authorName}${fileInfo}\n`;
+    output += `Date: ${rootDate} | Status: ${thread.threadStatus}\n\n`;
+
+    // Root comment content
+    if (thread.rootComment) {
+      output += `${thread.rootComment.comment.content}\n\n`;
+    }
+
+    // Replies (indented)
+    for (const reply of thread.replies) {
+      const replyDate = new Date(reply.comment.publishedDate).toLocaleString();
+      output += `    Reply - ${reply.comment.author.displayName} (${replyDate})\n`;
+      // Indent reply content
+      const indentedContent = reply.comment.content
+        .split('\n')
+        .map((line) => `    ${line}`)
+        .join('\n');
+      output += `${indentedContent}\n\n`;
+    }
+
+    output += '='.repeat(50) + '\n\n';
   }
 
   return output;
@@ -162,11 +326,13 @@ async function handler(argv: ArgumentsCamelCase<CommentsArgs>): Promise<void> {
   }
 
   // Parse PR ID or URL, or auto-detect from current branch
-  if (args.prIdOrUrl) {
-    if (args.prIdOrUrl.startsWith('http')) {
-      const parsed = parsePRUrl(args.prIdOrUrl);
+  if (args.pr) {
+    if (args.pr.startsWith('http')) {
+      const parsed = parsePRUrl(args.pr);
       if (!parsed) {
-        console.error(`Error: Invalid PR URL (expected Azure DevOps format): ${args.prIdOrUrl}`);
+        console.error(
+          `Error: Invalid PR URL (expected Azure DevOps format): ${args.pr}`
+        );
         console.error(
           'Expected format: https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id}'
         );
@@ -177,12 +343,12 @@ async function handler(argv: ArgumentsCamelCase<CommentsArgs>): Promise<void> {
       project = parsed.project;
       repo = parsed.repo;
     } else {
-      const validation = validatePRId(args.prIdOrUrl);
+      const validation = validatePRId(args.pr);
       if (validation.valid) {
         prId = validation.value;
       } else {
         console.error(
-          `Error: Could not parse '${args.prIdOrUrl}' as a PR ID. Expected a positive number or full PR URL.`
+          `Error: Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
         );
         process.exit(1);
       }
@@ -281,10 +447,10 @@ async function handler(argv: ArgumentsCamelCase<CommentsArgs>): Promise<void> {
 }
 
 export const commentsCommand: CommandModule<object, CommentsArgs> = {
-  command: 'comments [prIdOrUrl]',
+  command: 'comments',
   describe: 'Get comments from a pull request',
   builder: {
-    prIdOrUrl: {
+    pr: {
       type: 'string',
       describe:
         'PR ID or full PR URL (auto-detected from current branch if omitted)',
