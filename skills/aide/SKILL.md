@@ -2,7 +2,7 @@
 name: aide
 description: AI agent integration with Jira and Azure DevOps for ticket-driven development and PR review workflows
 allowed-tools: Bash(aide:*),Read
-version: 1.0.0
+version: 0.0.1
 author: Robb Currall
 license: MIT
 ---
@@ -27,7 +27,7 @@ The aide CLI provides AI coding agents with tools to interact with Jira and Azur
 
 | Command                            | Description        |
 | ---------------------------------- | ------------------ |
-| `aide pr prs`                     | List pull requests |
+| `aide pr list`                     | List pull requests |
 | `aide pr create`                  | Create a PR        |
 | `aide pr update [--pr ID]`        | Update a PR        |
 | `aide pr comments [--pr ID]`      | Get PR comments    |
@@ -61,7 +61,7 @@ The aide CLI provides AI coding agents with tools to interact with Jira and Azur
 
 ### Loading PR Feedback
 
-1. **Fetch comments**: Use `aide pr comments PR-ID` to load all PR comments
+1. **Fetch comments**: Use `aide pr comments --pr PR-ID` to load all PR comments
 2. **Filter active threads**: Use `--thread-status active` to focus on unresolved feedback
 3. **Get latest**: Use `--latest N` to see most recent comments
 4. **Filter by reviewer**: Use `--author "email"` to see specific reviewer feedback
@@ -77,19 +77,22 @@ The aide CLI provides AI coding agents with tools to interact with Jira and Azur
 
 ```bash
 # Get active PR feedback
-aide pr comments 24094 --thread-status active
+aide pr comments --pr 24094 --thread-status active
 
 # Get latest 10 comments
-aide pr comments 24094 --latest 10
+aide pr comments --pr 24094 --latest 10
 
 # Get comments from specific reviewer
-aide pr comments 24094 --author "reviewer@company.com"
+aide pr comments --pr 24094 --author "reviewer@company.com"
 
 # Use full PR URL (auto-extracts org/project/repo)
-aide pr comments https://dev.azure.com/org/project/_git/repo/pullrequest/24094
+aide pr comments --pr https://dev.azure.com/org/project/_git/repo/pullrequest/24094
 
 # JSON format for structured processing
-aide pr comments 24094 --format json
+aide pr comments --pr 24094 --format json
+
+# Auto-detect PR from current branch
+aide pr comments --latest 10
 ```
 
 ## PR Management Workflow
@@ -246,8 +249,8 @@ Supported remote formats:
 You can override with explicit flags:
 
 ```bash
-aide pr prs --project MyProject --repo MyRepo
-aide pr comments 24094 --project MyProject --repo MyRepo
+aide pr list --project MyProject --repo MyRepo
+aide pr comments --pr 24094 --project MyProject --repo MyRepo
 ```
 
 ## Error Handling
@@ -307,13 +310,13 @@ aide jira comment PROJ-123 "Technical note: Using OAuth 2.0 with PKCE flow for e
 
 ```bash
 # Get all active feedback
-aide pr comments 24094 --thread-status active
+aide pr comments --pr 24094 --thread-status active
 
 # Get specific reviewer's comments
-aide pr comments 24094 --author "senior.dev@company.com"
+aide pr comments --pr 24094 --author "senior.dev@company.com"
 
 # After addressing feedback, verify no remaining active threads
-aide pr comments 24094 --thread-status active
+aide pr comments --pr 24094 --thread-status active
 ```
 
 ### Cross-Reference Ticket and PR
@@ -323,7 +326,7 @@ aide pr comments 24094 --thread-status active
 aide jira ticket PROJ-123
 
 # Get PR comments for feedback
-aide pr comments 24094 --format json
+aide pr comments --pr 24094 --format json
 
 # Add closing comment to ticket
 aide jira comment PROJ-123 "Implementation complete. PR #24094 merged. Changes include:

@@ -11,8 +11,13 @@ The CLI follows a hierarchical command structure: `aide <service> <action> [opti
 **Services:**
 
 - `jira` - Jira ticket management (search, ticket, comment, comments, desc)
-- `pr` - Pull request management (GitHub/Azure DevOps) (prs, comments)
+- `pr` - Pull request management (list, create, update, comments, comment, reply)
 - `plugin` - Claude Code plugin management (install, uninstall, status)
+
+**Top-level Commands:**
+
+- `prime` - Output aide context for session start hook
+- `upgrade` - Upgrade aide to the latest version
 
 ## Development Commands
 
@@ -29,8 +34,8 @@ bun install
 bun run dev --help
 bun run dev jira search "assignee = currentUser()"
 bun run dev jira ticket PROJ-123
-bun run dev pr prs --status active
-bun run dev pr comments 24094 --latest 5
+bun run dev pr list --status active
+bun run dev pr comments --pr 24094 --latest 5
 
 # Direct execution
 bun run src/cli/index.ts --help

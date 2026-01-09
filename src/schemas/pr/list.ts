@@ -1,5 +1,5 @@
 /**
- * Valibot schema for PR prs command arguments
+ * Valibot schema for PR list command arguments
  */
 
 import * as v from 'valibot';
@@ -19,7 +19,7 @@ export const PrStatusSchema = v.picklist(
 export type PrStatus = v.InferOutput<typeof PrStatusSchema>;
 
 /**
- * Schema for PR prs command arguments
+ * Schema for PR list command arguments
  */
 export const PrsArgsSchema = v.object({
   project: v.optional(v.string()),

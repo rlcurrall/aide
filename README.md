@@ -4,19 +4,57 @@ A unified command-line tool designed for AI coding agents (like Claude Code) to 
 
 ## Installation
 
-### Option 1: Download Binary
+### Option 1: Quick Install (Recommended)
 
-Download the pre-built binary for your platform from the releases page and add it to your PATH:
+**Linux/macOS:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/rlcurrall/aide/main/install.sh | bash
+```
 
-- `aide.exe` - Windows
-- `aide-linux` - Linux
-- `aide-mac` - macOS (ARM)
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/rlcurrall/aide/main/install.ps1 | iex
+```
 
-### Option 2: Build from Source
+**Windows (Git Bash):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/rlcurrall/aide/main/install.sh | bash
+```
+
+The installation scripts will:
+- Download the latest release for your platform
+- Install to `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\Programs\aide` (Windows)
+- Add the installation directory to your PATH (Windows only)
+
+### Option 2: Manual Download
+
+Download the pre-built binary for your platform from the [releases page](https://github.com/rlcurrall/aide/releases/latest):
+
+**Linux:**
+```bash
+curl -fsSL https://github.com/rlcurrall/aide/releases/latest/download/aide-linux -o aide
+chmod +x aide
+sudo mv aide /usr/local/bin/
+```
+
+**macOS:**
+```bash
+curl -fsSL https://github.com/rlcurrall/aide/releases/latest/download/aide-mac -o aide
+chmod +x aide
+sudo mv aide /usr/local/bin/
+```
+
+**Windows (PowerShell):**
+```powershell
+Invoke-WebRequest -Uri "https://github.com/rlcurrall/aide/releases/latest/download/aide.exe" -OutFile "aide.exe"
+# Move aide.exe to a directory in your PATH
+```
+
+### Option 3: Build from Source
 
 ```bash
-git clone <repository>
-cd agent-plugin
+git clone https://github.com/rlcurrall/aide.git
+cd aide
 bun install
 bun run build       # Current platform
 # or
@@ -28,7 +66,7 @@ bun run build:all   # All platforms
 
 Binaries are output to the `dist/` directory.
 
-### Option 3: Run with Bun (Development)
+### Option 4: Run with Bun (Development)
 
 ```bash
 bun run dev <command>
@@ -47,8 +85,8 @@ aide jira search "assignee = currentUser()"
 aide jira ticket PROJ-123
 
 # List pull requests
-aide pr prs --status active
-aide pr comments 24094 --latest 5
+aide pr list --status active
+aide pr comments --pr 24094 --latest 5
 ```
 
 ## Command Structure
@@ -59,10 +97,13 @@ aide <service> <action> [options]
 
 ### Services
 
-| Service | Description            |
-| ------- | ---------------------- |
-| `jira`  | Jira ticket management |
-| `pr`    | Pull request management |
+| Service  | Description                |
+| -------- | -------------------------- |
+| `jira`   | Jira ticket management     |
+| `pr`     | Pull request management    |
+| `plugin` | Claude Code plugin manager |
+| `prime`  | Output aide context        |
+| `upgrade`| Upgrade aide to latest     |
 
 ### Jira Commands
 
@@ -76,10 +117,16 @@ aide <service> <action> [options]
 
 ### Pull Request Commands
 
-| Command                    | Description        |
-| -------------------------- | ------------------ |
-| `aide pr prs`              | List pull requests |
-| `aide pr comments <pr-id>` | Get PR comments    |
+| Command                                  | Description                    |
+| ---------------------------------------- | ------------------------------ |
+| `aide pr list`                            | List pull requests             |
+| `aide pr create`                         | Create a pull request          |
+| `aide pr update [--pr ID]`               | Update a pull request          |
+| `aide pr comments [--pr ID]`             | Get PR comments                |
+| `aide pr comment <text> [--pr ID]`       | Post a comment on a PR         |
+| `aide pr reply <thread> <text> [--pr ID]`| Reply to a comment thread      |
+
+Note: `--pr` flag is optional - aide auto-detects from current branch if omitted.
 
 ## Usage Examples
 
@@ -106,15 +153,30 @@ aide jira desc PROJ-123 "New description text"
 
 ```bash
 # List active PRs (auto-discovers project from git remote)
-aide pr prs
+aide pr list
 
 # List PRs with filters
-aide pr prs --status completed --limit 10
-aide pr prs --created-by "your.email@company.com"
+aide pr list --status completed --limit 10
+aide pr list --created-by "your.email@company.com"
 
-# Get PR comments
-aide pr comments 24094
-aide pr comments 24094 --latest 5 --format json
+# Get PR comments (--pr optional, auto-detects from current branch)
+aide pr comments --pr 24094
+aide pr comments --pr 24094 --latest 5 --format json
+aide pr comments --latest 10  # auto-detect PR from branch
+
+# Create a PR
+aide pr create --title "feat: add new feature" --base main
+
+# Update a PR
+aide pr update --pr 123 --title "Updated title"
+aide pr update --publish  # publish draft PR (auto-detect)
+
+# Post a comment
+aide pr comment "LGTM, approved!" --pr 123
+aide pr comment "Needs changes" --pr 123 --file src/app.ts --line 42
+
+# Reply to a thread
+aide pr reply 456 "Fixed the issue" --pr 123
 ```
 
 ### Output Formats
@@ -127,7 +189,7 @@ All commands support `--format` flag:
 
 ```bash
 aide jira search "status = Open" --format json
-aide pr comments 24094 --format markdown
+aide pr comments --pr 24094 --format markdown
 ```
 
 ## Configuration
@@ -238,13 +300,24 @@ aide plugin uninstall
 
 After installation, these commands are available in Claude Code:
 
-| Command                    | Description                 |
-| -------------------------- | --------------------------- |
-| `/aide:ticket KEY`         | Load Jira ticket context    |
-| `/aide:search "JQL"`       | Search Jira tickets         |
-| `/aide:comment KEY "text"` | Add comment to ticket       |
-| `/aide:update KEY`         | Update ticket description   |
-| `/aide:pr PR-ID`           | Load PR comments for review |
+**Jira Commands:**
+
+| Command                            | Description                 |
+| ---------------------------------- | --------------------------- |
+| `/aide:ticket KEY`                 | Load Jira ticket context    |
+| `/aide:ticket-search "JQL"`        | Search Jira tickets         |
+| `/aide:ticket-comment KEY "text"`  | Add comment to ticket       |
+| `/aide:ticket-update KEY`          | Update ticket description   |
+
+**PR Commands:**
+
+| Command                            | Description                 |
+| ---------------------------------- | --------------------------- |
+| `/aide:pr-comments --pr ID`        | Get PR comments             |
+| `/aide:pr-comment "text" --pr ID`  | Post comment on PR          |
+| `/aide:pr-create --title "..." `   | Create a pull request       |
+| `/aide:pr-update --pr ID`          | Update a pull request       |
+| `/aide:pr-reply THREAD "text"`     | Reply to PR thread          |
 
 ### Workflows
 
@@ -252,11 +325,11 @@ After installation, these commands are available in Claude Code:
 
 1. `/aide:ticket PROJ-123` - Load ticket context
 2. Implement the feature/fix
-3. `/aide:comment PROJ-123 "Implemented X, Y, Z"` - Update ticket
+3. `/aide:ticket-comment PROJ-123 "Implemented X, Y, Z"` - Update ticket
 
 **PR Review:**
 
-1. `/aide:pr 24094 --thread-status active` - Load active feedback
+1. `/aide:pr-comments --pr 24094 --thread-status active` - Load active feedback
 2. Address each comment
 3. Push changes
 

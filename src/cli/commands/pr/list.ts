@@ -14,7 +14,7 @@ import {
   PrsArgsSchema,
   type PrsArgs,
   type OutputFormat,
-} from '@schemas/pr/prs.js';
+} from '@schemas/pr/list.js';
 
 /**
  * Format PR list output based on format type
@@ -81,7 +81,7 @@ function formatOutput(
 }
 
 async function handler(argv: ArgumentsCamelCase<PrsArgs>): Promise<void> {
-  const args = validateArgs(PrsArgsSchema, argv, 'prs arguments');
+  const args = validateArgs(PrsArgsSchema, argv, 'list arguments');
   let { project, repo } = args;
   const { format, status, limit } = args;
   const createdBy = args.createdBy ?? args.author;
@@ -158,8 +158,8 @@ async function handler(argv: ArgumentsCamelCase<PrsArgs>): Promise<void> {
   }
 }
 
-export const prsCommand: CommandModule<object, PrsArgs> = {
-  command: 'prs',
+export const listCommand: CommandModule<object, PrsArgs> = {
+  command: 'list',
   describe: 'List pull requests',
   builder: {
     project: {

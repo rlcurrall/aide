@@ -68,7 +68,7 @@ export {
   type PrStatus,
   PrsArgsSchema,
   type PrsArgs,
-} from './pr/prs.js';
+} from './pr/list.js';
 
 export {
   CommentsArgsSchema as AdoCommentsArgsSchema,

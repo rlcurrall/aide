@@ -10,28 +10,65 @@
  * - Silent exit (code 0) on any error to not disrupt sessions
  */
 
-import type { CommandModule } from 'yargs';
+import { createCommandModule } from '@cli/utils';
 
-const PRIME_OUTPUT = `# aide - Jira & Git Hosting Integration
+const PRIME_OUTPUT = `
+# aide - Jira & Git Hosting Integration
 
-Use aide instead of az/gh/jira CLI tools:
-- **Jira**: \`aide jira search|ticket|comment|desc\` - Search tickets, view details, add comments
-- **Pull Requests**: \`aide ado create|update|comment|reply|prs\` - Full PR lifecycle
+Use aide instead of az/gh/jira CLI tools. Auto-discovers org/project/repo from git remote.
 
-Auto-discovers org/project/repo from git remote. Prefer aide over az/gh for these operations.`;
+## Jira Commands
 
-async function handler(): Promise<void> {
-  try {
-    console.log(PRIME_OUTPUT);
-  } catch {
-    // Silent exit on any error - don't disrupt session
-    process.exit(0);
-  }
-}
+\`\`\`bash
+# Search tickets
+aide jira search "assignee = currentUser() AND status = 'In Progress'"
 
-export const primeCommand: CommandModule = {
+# Get ticket details
+aide jira ticket PROJ-123
+
+# Add comment
+aide jira comment PROJ-123 "Work completed, ready for review"
+
+# Get recent comments
+aide jira comments PROJ-123 --latest 5
+
+# Update description
+aide jira desc PROJ-123 "Updated requirements..."
+\`\`\`
+
+## Pull Request Commands
+
+Note: \`--pr\` flag is optional - auto-discovers from current branch if omitted.
+
+\`\`\`bash
+# List active PRs
+aide pr list --status active
+
+# Get PR comments (with explicit PR ID)
+aide pr comments --pr 24094 --latest 10
+aide pr comments --latest 10  # auto-detect from branch
+
+# Create PR
+aide pr create --title "feat: add new feature" --base main
+
+# Update PR
+aide pr update --pr 123 --title "Updated title"
+aide pr update --publish  # auto-detect, publish draft
+
+# Post comment
+aide pr comment "LGTM, approved" --pr 123
+aide pr comment "Needs work"  # auto-detect from branch
+
+# Reply to thread
+aide pr reply 456 "Fixed the issue" --pr 123
+\`\`\`
+`.trim();
+
+export default createCommandModule({
   command: 'prime',
   describe: 'Output aide context for session start hook',
   builder: {},
-  handler,
-};
+  handler() {
+    console.log(PRIME_OUTPUT);
+  },
+});

@@ -11,9 +11,13 @@ The CLI follows a hierarchical command structure: `aide <service> <action> [opti
 **Services:**
 
 - `jira` - Jira ticket management (search, ticket, comment, comments, desc)
-- `pr` - Azure DevOps pull requests (prs, comments)
-- `docs` - Documentation management (update)
+- `pr` - Pull request management (list, create, update, comments, comment, reply)
 - `plugin` - Claude Code plugin management (install, uninstall, status)
+
+**Top-level Commands:**
+
+- `prime` - Output aide context for session start hook
+- `upgrade` - Upgrade aide to the latest version
 
 ## Development Commands
 
@@ -30,9 +34,8 @@ bun install
 bun run dev --help
 bun run dev jira search "assignee = currentUser()"
 bun run dev jira ticket PROJ-123
-bun run dev pr prs --status active
-bun run dev pr comments 24094 --latest 5
-bun run dev docs update
+bun run dev pr list --status active
+bun run dev pr comments --pr 24094 --latest 5
 
 # Direct execution
 bun run src/cli/index.ts --help
@@ -98,9 +101,10 @@ src/
     commands/
       types.ts            # Command and ServiceRouter interfaces
       jira/               # Jira service commands
-      pr/                # Azure DevOps service commands
-      docs/               # Documentation commands
+      pr/                 # Pull request commands (Azure DevOps/GitHub)
       plugin/             # Plugin management commands
+      prime.ts            # Prime command
+      upgrade.ts          # Upgrade command
   lib/                    # Shared libraries
     config.ts             # Configuration loading from env vars
     jira-client.ts        # Jira REST API client
@@ -115,10 +119,14 @@ src/
 
 commands/                 # Claude Code slash commands (for plugin)
   ticket.md               # /aide:ticket - Load Jira ticket context
-  search.md               # /aide:search - Search Jira tickets
-  comment.md              # /aide:comment - Add comment to ticket
-  update.md               # /aide:update - Update ticket description
-  pr.md                   # /aide:pr - Load PR comments for review
+  ticket-search.md        # /aide:ticket-search - Search Jira tickets
+  ticket-comment.md       # /aide:ticket-comment - Add comment to ticket
+  ticket-update.md        # /aide:ticket-update - Update ticket description
+  pr-comments.md          # /aide:pr-comments - Get PR comments
+  pr-comment.md           # /aide:pr-comment - Post comment on PR
+  pr-create.md            # /aide:pr-create - Create a PR
+  pr-update.md            # /aide:pr-update - Update a PR
+  pr-reply.md             # /aide:pr-reply - Reply to PR thread
 
 skills/aide/SKILL.md      # Claude Code skill definition
 
