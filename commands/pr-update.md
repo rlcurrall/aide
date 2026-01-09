@@ -7,12 +7,12 @@ Update an existing pull request.
 
 ## Usage
 
-`/aide:pr-update <pr-id> --title "New title"` - Update PR title
-`/aide:pr-update <pr-id> --description "New description"` - Update PR description
-`/aide:pr-update <pr-id> --publish` - Publish a draft PR (make it active)
-`/aide:pr-update <pr-id> --draft` - Convert PR back to draft
-`/aide:pr-update <pr-id> --abandon` - Abandon the PR
-`/aide:pr-update <pr-id> --activate` - Reactivate an abandoned PR
+`/aide:pr-update --pr <id> --title "New title"` - Update PR title
+`/aide:pr-update --pr <id> --description "New description"` - Update PR description
+`/aide:pr-update --pr <id> --publish` - Publish a draft PR (make it active)
+`/aide:pr-update --pr <id> --draft` - Convert PR back to draft
+`/aide:pr-update --pr <id> --abandon` - Abandon the PR
+`/aide:pr-update --pr <id> --activate` - Reactivate an abandoned PR
 `/aide:pr-update --title "New title"` - Auto-detect PR from current branch
 
 ## Execution

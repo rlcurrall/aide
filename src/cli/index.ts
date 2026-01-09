@@ -8,14 +8,19 @@
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { VERSION, CLI_NAME } from './help.js';
+import { cleanupOldBackup } from './update.js';
 
 // Import service command modules
 import { jiraCommands } from './commands/jira/index.js';
 import { prCommands } from './commands/pr/index.js';
 import { pluginCommands } from './commands/plugin/index.js';
-import { primeCommand } from './commands/prime.js';
+import primeCommand from './commands/prime.js';
+import upgradeCommand from './commands/upgrade.js';
 
 async function main(): Promise<number> {
+  // Clean up any old backup files from previous upgrades
+  cleanupOldBackup();
+
   try {
     await yargs(hideBin(process.argv))
       .scriptName(CLI_NAME)
@@ -27,7 +32,11 @@ async function main(): Promise<number> {
       .command(prCommands)
       .command(pluginCommands)
       .command(primeCommand)
-      .demandCommand(1, 'Please specify a command (jira, pr, plugin, prime)')
+      .command(upgradeCommand)
+      .demandCommand(
+        1,
+        'Please specify a command (jira, pr, plugin, prime, upgrade)'
+      )
       .strict()
       .wrap(Math.min(100, process.stdout.columns || 80))
       .fail((msg, err) => {
