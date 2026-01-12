@@ -13,6 +13,7 @@ import { spawnSync } from 'child_process';
 import { renameSync, existsSync } from 'fs';
 import {
   getCurrentBinaryPath,
+  getTargetBinaryPath,
   getTempUpdatePath,
   getBackupPath,
 } from '../update.js';
@@ -55,7 +56,10 @@ async function downloadLatestRelease(outputPath: string): Promise<void> {
       throw new Error('Download failed');
     }
     // Make executable
-    spawnSync('chmod', ['+x', outputPath]);
+    const chmodResult = spawnSync('chmod', ['+x', outputPath]);
+    if (chmodResult.status !== 0) {
+      throw new Error('Failed to make binary executable');
+    }
   }
 }
 
@@ -66,7 +70,8 @@ export default createCommandModule({
   async handler() {
     try {
       const currentPath = getCurrentBinaryPath();
-      const tempPath = getTempUpdatePath(currentPath);
+      const targetPath = getTargetBinaryPath();
+      const tempPath = getTempUpdatePath(targetPath);
       const backupPath = getBackupPath(currentPath);
 
       console.log('Checking for updates...\n');
@@ -84,10 +89,19 @@ export default createCommandModule({
       // Rename current to .old (works even while running!)
       renameSync(currentPath, backupPath);
 
-      // Rename temp to current
-      renameSync(tempPath, currentPath);
+      try {
+        // Rename temp to target (ensures .exe on Windows)
+        renameSync(tempPath, targetPath);
+      } catch (error) {
+        // Restore the backup if final rename fails
+        renameSync(backupPath, currentPath);
+        throw error;
+      }
 
       console.log('✓ aide upgraded successfully!');
+      if (currentPath !== targetPath) {
+        console.log(`  Binary renamed to: ${targetPath}`);
+      }
       console.log('\nRestart aide to use the new version.\n');
     } catch (error) {
       console.error(`Error: ${error instanceof Error ? error.message : error}`);
