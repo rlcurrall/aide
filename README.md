@@ -121,6 +121,7 @@ aide <service> <action> [options]
 | ---------------------------------------- | ------------------------------ |
 | `aide pr list`                            | List pull requests             |
 | `aide pr view [--pr ID]`                 | View pull request details      |
+| `aide pr diff [--pr ID]`                 | View PR diff and changed files |
 | `aide pr create`                         | Create a pull request          |
 | `aide pr update [--pr ID]`               | Update a pull request          |
 | `aide pr comments [--pr ID]`             | Get PR comments                |
@@ -163,6 +164,12 @@ aide pr list --created-by "your.email@company.com"
 # View PR details (--pr optional, auto-detects from current branch)
 aide pr view --pr 24094
 aide pr view  # auto-detect PR from branch
+
+# View PR diff
+aide pr diff --pr 24094           # full diff
+aide pr diff --stat               # summary with file counts
+aide pr diff --files              # list changed files only
+aide pr diff --file src/app.ts   # diff for specific file
 
 # Get PR comments (--pr optional, auto-detects from current branch)
 aide pr comments --pr 24094
@@ -319,6 +326,7 @@ After installation, these commands are available in Claude Code:
 | Command                            | Description                 |
 | ---------------------------------- | --------------------------- |
 | `/aide:pr-view --pr ID`            | View PR details             |
+| `/aide:pr-diff --pr ID`            | View PR diff                |
 | `/aide:pr-comments --pr ID`        | Get PR comments             |
 | `/aide:pr-comment "text" --pr ID`  | Post comment on PR          |
 | `/aide:pr-create --title "..." `   | Create a pull request       |
