@@ -7,21 +7,25 @@ A unified command-line tool designed for AI coding agents (like Claude Code) to 
 ### Option 1: Quick Install (Recommended)
 
 **Linux/macOS:**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rlcurrall/aide/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
+
 ```powershell
 irm https://raw.githubusercontent.com/rlcurrall/aide/main/install.ps1 | iex
 ```
 
 **Windows (Git Bash):**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rlcurrall/aide/main/install.sh | bash
 ```
 
 The installation scripts will:
+
 - Download the latest release for your platform
 - Install to `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\Programs\aide` (Windows)
 - Add the installation directory to your PATH (Windows only)
@@ -31,6 +35,7 @@ The installation scripts will:
 Download the pre-built binary for your platform from the [releases page](https://github.com/rlcurrall/aide/releases/latest):
 
 **Linux:**
+
 ```bash
 curl -fsSL https://github.com/rlcurrall/aide/releases/latest/download/aide-linux -o aide
 chmod +x aide
@@ -38,6 +43,7 @@ sudo mv aide /usr/local/bin/
 ```
 
 **macOS:**
+
 ```bash
 curl -fsSL https://github.com/rlcurrall/aide/releases/latest/download/aide-mac -o aide
 chmod +x aide
@@ -45,6 +51,7 @@ sudo mv aide /usr/local/bin/
 ```
 
 **Windows (PowerShell):**
+
 ```powershell
 Invoke-WebRequest -Uri "https://github.com/rlcurrall/aide/releases/latest/download/aide.exe" -OutFile "aide.exe"
 # Move aide.exe to a directory in your PATH
@@ -97,13 +104,13 @@ aide <service> <action> [options]
 
 ### Services
 
-| Service  | Description                |
-| -------- | -------------------------- |
-| `jira`   | Jira ticket management     |
-| `pr`     | Pull request management    |
-| `plugin` | Claude Code plugin manager |
-| `prime`  | Output aide context        |
-| `upgrade`| Upgrade aide to latest     |
+| Service   | Description                |
+| --------- | -------------------------- |
+| `jira`    | Jira ticket management     |
+| `pr`      | Pull request management    |
+| `plugin`  | Claude Code plugin manager |
+| `prime`   | Output aide context        |
+| `upgrade` | Upgrade aide to latest     |
 
 ### Jira Commands
 
@@ -117,16 +124,16 @@ aide <service> <action> [options]
 
 ### Pull Request Commands
 
-| Command                                  | Description                    |
-| ---------------------------------------- | ------------------------------ |
+| Command                                   | Description                    |
+| ----------------------------------------- | ------------------------------ |
 | `aide pr list`                            | List pull requests             |
-| `aide pr view [--pr ID]`                 | View pull request details      |
-| `aide pr diff [--pr ID]`                 | View PR diff and changed files |
-| `aide pr create`                         | Create a pull request          |
-| `aide pr update [--pr ID]`               | Update a pull request          |
-| `aide pr comments [--pr ID]`             | Get PR comments                |
-| `aide pr comment <text> [--pr ID]`       | Post a comment on a PR         |
-| `aide pr reply <thread> <text> [--pr ID]`| Reply to a comment thread      |
+| `aide pr view [--pr ID]`                  | View pull request details      |
+| `aide pr diff [--pr ID]`                  | View PR diff and changed files |
+| `aide pr create`                          | Create a pull request          |
+| `aide pr update [--pr ID]`                | Update a pull request          |
+| `aide pr comments [--pr ID]`              | Get PR comments                |
+| `aide pr comment <text> [--pr ID]`        | Post a comment on a PR         |
+| `aide pr reply <thread> <text> [--pr ID]` | Reply to a comment thread      |
 
 Note: `--pr` flag is optional - aide auto-detects from current branch if omitted.
 
@@ -170,6 +177,7 @@ aide pr diff --pr 24094           # full diff
 aide pr diff --stat               # summary with file counts
 aide pr diff --files              # list changed files only
 aide pr diff --file src/app.ts   # diff for specific file
+aide pr diff --no-fetch           # skip auto-fetching branches
 
 # Get PR comments (--pr optional, auto-detects from current branch)
 aide pr comments --pr 24094
@@ -298,11 +306,11 @@ aide plugin install --local      # Install to local scope
 
 ### Installation Scopes
 
-| Scope     | Flag        | Description                              |
-| --------- | ----------- | ---------------------------------------- |
-| User      | `--user`    | Personal installation, available in all projects (default) |
-| Project   | `--project` | Team-shared via git, available to all collaborators |
-| Local     | `--local`   | Project-specific, not shared (gitignored) |
+| Scope   | Flag        | Description                                                |
+| ------- | ----------- | ---------------------------------------------------------- |
+| User    | `--user`    | Personal installation, available in all projects (default) |
+| Project | `--project` | Team-shared via git, available to all collaborators        |
+| Local   | `--local`   | Project-specific, not shared (gitignored)                  |
 
 ### Managing the Plugin
 
@@ -318,24 +326,24 @@ After installation, these commands are available in Claude Code:
 
 **Jira Commands:**
 
-| Command                            | Description                 |
-| ---------------------------------- | --------------------------- |
-| `/aide:ticket KEY`                 | Load Jira ticket context    |
-| `/aide:ticket-search "JQL"`        | Search Jira tickets         |
-| `/aide:ticket-comment KEY "text"`  | Add comment to ticket       |
-| `/aide:ticket-update KEY`          | Update ticket description   |
+| Command                           | Description               |
+| --------------------------------- | ------------------------- |
+| `/aide:ticket KEY`                | Load Jira ticket context  |
+| `/aide:ticket-search "JQL"`       | Search Jira tickets       |
+| `/aide:ticket-comment KEY "text"` | Add comment to ticket     |
+| `/aide:ticket-update KEY`         | Update ticket description |
 
 **PR Commands:**
 
-| Command                            | Description                 |
-| ---------------------------------- | --------------------------- |
-| `/aide:pr-view --pr ID`            | View PR details             |
-| `/aide:pr-diff --pr ID`            | View PR diff                |
-| `/aide:pr-comments --pr ID`        | Get PR comments             |
-| `/aide:pr-comment "text" --pr ID`  | Post comment on PR          |
-| `/aide:pr-create --title "..." `   | Create a pull request       |
-| `/aide:pr-update --pr ID`          | Update a pull request       |
-| `/aide:pr-reply THREAD "text"`     | Reply to PR thread          |
+| Command                           | Description           |
+| --------------------------------- | --------------------- |
+| `/aide:pr-view --pr ID`           | View PR details       |
+| `/aide:pr-diff --pr ID`           | View PR diff          |
+| `/aide:pr-comments --pr ID`       | Get PR comments       |
+| `/aide:pr-comment "text" --pr ID` | Post comment on PR    |
+| `/aide:pr-create --title "..." `  | Create a pull request |
+| `/aide:pr-update --pr ID`         | Update a pull request |
+| `/aide:pr-reply THREAD "text"`    | Reply to PR thread    |
 
 ### Workflows
 

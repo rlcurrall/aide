@@ -113,6 +113,8 @@ aide pr view  # auto-detect from branch
 aide pr diff --pr 123
 aide pr diff --stat  # summary with line counts
 aide pr diff --files  # list changed files only
+aide pr diff --file src/app.ts  # diff for specific file only
+aide pr diff --no-fetch  # skip auto-fetching branches
 
 # Get PR comments (with explicit PR ID)
 aide pr comments --pr 24094 --latest 10

@@ -28,16 +28,16 @@ The aide CLI provides AI coding agents with tools to interact with Jira and Azur
 
 ### Pull Request Commands
 
-| Command                            | Description           |
-| ---------------------------------- | --------------------- |
-| `aide pr list`                     | List pull requests    |
-| `aide pr view [--pr ID]`           | View PR details       |
-| `aide pr diff [--pr ID]`           | View PR diff/changes  |
-| `aide pr create`                   | Create a PR           |
-| `aide pr update [--pr ID]`         | Update a PR           |
-| `aide pr comments [--pr ID]`       | Get PR comments       |
-| `aide pr comment "msg" [--pr ID]`  | Post PR comment       |
-| `aide pr reply <thread> "msg"`     | Reply to thread       |
+| Command                           | Description          |
+| --------------------------------- | -------------------- |
+| `aide pr list`                    | List pull requests   |
+| `aide pr view [--pr ID]`          | View PR details      |
+| `aide pr diff [--pr ID] [--fetch]`| View PR diff/changes (auto-fetches branches by default) |
+| `aide pr create`                  | Create a PR          |
+| `aide pr update [--pr ID]`        | Update a PR          |
+| `aide pr comments [--pr ID]`      | Get PR comments      |
+| `aide pr comment "msg" [--pr ID]` | Post PR comment      |
+| `aide pr reply <thread> "msg"`    | Reply to thread      |
 
 ## Ticket-Driven Development Workflow
 
@@ -105,6 +105,12 @@ aide pr comments --pr 24094 --format json
 
 # Auto-detect PR from current branch
 aide pr comments --latest 10
+
+# View PR diff (auto-fetches missing branches by default)
+aide pr diff --pr 24094
+
+# Skip fetching branches (if already available locally)
+aide pr diff --pr 24094 --no-fetch
 ```
 
 ## PR Management Workflow
