@@ -71,11 +71,13 @@ export interface JiraIssueType {
 }
 
 export interface JiraAttachment {
+  id: string;
   filename: string;
   size: number;
   author: JiraUser;
   created: string;
   mimeType: string;
+  content?: string; // URL to download the attachment
 }
 
 export interface JiraComment {
@@ -107,6 +109,7 @@ export interface JiraIssueFields {
   created: string;
   updated: string;
   resolutiondate?: string;
+  labels?: string[];
   comment?: {
     total: number;
     comments: JiraComment[];
@@ -146,6 +149,130 @@ export interface JiraCommentsResponse {
  * Response from Jira's POST /issue/{issueKey}/comment endpoint
  */
 export type JiraAddCommentResponse = JiraComment;
+
+/**
+ * Response from Jira's POST /issue endpoint (create issue)
+ */
+export interface JiraCreateIssueResponse {
+  id: string;
+  key: string;
+  self: string;
+}
+
+/**
+ * Jira workflow transition
+ */
+export interface JiraTransition {
+  id: string;
+  name: string;
+  to: JiraStatus;
+  hasScreen: boolean;
+  isGlobal: boolean;
+  isInitial: boolean;
+  isConditional: boolean;
+}
+
+/**
+ * Response from Jira's GET /issue/{issueKey}/transitions endpoint
+ */
+export interface JiraTransitionsResponse {
+  transitions: JiraTransition[];
+}
+
+/**
+ * Response from Jira's POST /issue/{issueKey}/attachments endpoint
+ */
+export interface JiraAttachmentUploadResponse {
+  id: string;
+  filename: string;
+  size: number;
+  mimeType: string;
+  content: string; // URL to download the attachment
+  created: string;
+  author: JiraUser;
+}
+
+/**
+ * Jira issue type metadata for create screen
+ */
+export interface JiraIssueTypeMeta {
+  id: string;
+  name: string;
+  subtask: boolean;
+  fields: Record<string, JiraFieldMeta>;
+}
+
+/**
+ * Jira field metadata
+ */
+export interface JiraFieldMeta {
+  required: boolean;
+  name: string;
+  key: string;
+  schema: {
+    type: string;
+    items?: string;
+    custom?: string;
+    system?: string;
+  };
+  allowedValues?: Array<{
+    id: string;
+    name: string;
+    value?: string;
+  }>;
+  hasDefaultValue?: boolean;
+  defaultValue?: unknown;
+}
+
+/**
+ * Response from Jira's GET /issue/createmeta endpoint
+ */
+export interface JiraCreateMetaResponse {
+  projects: Array<{
+    key: string;
+    name: string;
+    id: string;
+    issuetypes: JiraIssueTypeMeta[];
+  }>;
+}
+
+/**
+ * Options for creating a Jira issue
+ */
+export interface JiraCreateIssueOptions {
+  projectKey: string;
+  issueType: string;
+  summary: string;
+  description?: AdfDocument;
+  assignee?: string; // Account ID
+  priority?: string; // Priority ID or name
+  labels?: string[];
+  components?: string[];
+  parent?: string; // Parent issue key for subtasks
+  customFields?: Record<string, unknown>;
+}
+
+/**
+ * Options for updating a Jira issue
+ */
+export interface JiraUpdateIssueOptions {
+  summary?: string;
+  description?: AdfDocument;
+  assignee?: { accountId: string } | null; // null to unassign
+  priority?: { id: string } | { name: string };
+  labels?: string[];
+  components?: string[]; // Component names (transformed to objects by client)
+  customFields?: Record<string, unknown>;
+}
+
+/**
+ * Options for transitioning a Jira issue
+ */
+export interface JiraTransitionOptions {
+  comment?: AdfDocument;
+  resolution?: string;
+  fields?: Record<string, unknown>;
+}
 
 // ============================================================================
 // Azure DevOps Types

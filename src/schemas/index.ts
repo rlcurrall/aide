@@ -47,9 +47,18 @@ export {
 // ============================================================================
 // Jira command schemas
 // ============================================================================
-export { TicketArgsSchema, type TicketArgs } from './jira/ticket.js';
+export { ViewArgsSchema, type ViewArgs } from './jira/view.js';
 
 export { SearchArgsSchema, type SearchArgs } from './jira/search.js';
+
+export { CreateArgsSchema, type CreateArgs } from './jira/create.js';
+
+export { UpdateArgsSchema, type UpdateArgs } from './jira/update.js';
+
+export {
+  TransitionArgsSchema,
+  type TransitionArgs,
+} from './jira/transition.js';
 
 export { CommentArgsSchema, type CommentArgs } from './jira/comment.js';
 
@@ -58,7 +67,7 @@ export {
   type CommentsArgs as JiraCommentsArgs,
 } from './jira/comments.js';
 
-export { DescArgsSchema, type DescArgs } from './jira/desc.js';
+export { AttachArgsSchema, type AttachArgs } from './jira/attach.js';
 
 // ============================================================================
 // Azure DevOps command schemas

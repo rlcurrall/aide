@@ -1,5 +1,5 @@
 /**
- * Jira ticket command
+ * Jira view command
  * Get detailed information about a specific Jira ticket
  */
 
@@ -8,31 +8,23 @@ import { loadConfig } from '@lib/config.js';
 import { JiraClient } from '@lib/jira-client.js';
 import { formatTicketDetails } from '@lib/cli-utils.js';
 import { validateArgs } from '@lib/validation.js';
-import { isValidTicketKeyFormat } from '@schemas/common.js';
-import { TicketArgsSchema, type TicketArgs } from '@schemas/jira/ticket.js';
+import { ViewArgsSchema, type ViewArgs } from '@schemas/jira/view.js';
 import { handleCommandError } from '@lib/errors.js';
+import { validateTicketKeyWithWarning, logProgress } from '@lib/jira-utils.js';
 
-async function handler(argv: ArgumentsCamelCase<TicketArgs>): Promise<void> {
-  const args = validateArgs(TicketArgsSchema, argv, 'ticket arguments');
+async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
+  const args = validateArgs(ViewArgsSchema, argv, 'view arguments');
   const { ticketKey, format } = args;
 
   // Validate ticket key format (soft validation with warning)
-  if (!isValidTicketKeyFormat(ticketKey)) {
-    console.log(
-      `Warning: '${ticketKey}' doesn't match typical Jira ticket format (PROJECT-123)`
-    );
-    console.log('Proceeding anyway...');
-    console.log('');
-  }
+  validateTicketKeyWithWarning(ticketKey);
 
   try {
     const config = loadConfig();
     const client = new JiraClient(config);
 
-    if (format !== 'json') {
-      console.log(`Fetching details for ticket: ${ticketKey}`);
-      console.log('');
-    }
+    logProgress(`Fetching details for ticket: ${ticketKey}`, format);
+    logProgress('', format);
 
     const issue = await client.getIssue(ticketKey);
 
@@ -48,7 +40,7 @@ async function handler(argv: ArgumentsCamelCase<TicketArgs>): Promise<void> {
 }
 
 export default {
-  command: 'ticket <ticketKey>',
+  command: 'view <ticketKey>',
   describe: 'Get ticket details (summary, description, metadata)',
   builder: {
     ticketKey: {
@@ -64,4 +56,4 @@ export default {
     },
   },
   handler,
-} satisfies CommandModule<object, TicketArgs>;
+} satisfies CommandModule<object, ViewArgs>;

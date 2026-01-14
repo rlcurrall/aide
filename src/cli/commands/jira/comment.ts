@@ -8,63 +8,40 @@ import { loadConfig } from '@lib/config.js';
 import { JiraClient } from '@lib/jira-client.js';
 import { convert as markdownToAdf } from '@lib/md-to-adf.js';
 import { validateArgs } from '@lib/validation.js';
-import { isValidTicketKeyFormat } from '@schemas/common.js';
 import { CommentArgsSchema, type CommentArgs } from '@schemas/jira/comment.js';
 import { handleCommandError } from '@lib/errors.js';
+import {
+  readContentFromFileOrArg,
+  validateTicketKeyWithWarning,
+  logProgress,
+} from '@lib/jira-utils.js';
 
 async function handler(argv: ArgumentsCamelCase<CommentArgs>): Promise<void> {
   const args = validateArgs(CommentArgsSchema, argv, 'comment arguments');
   const { ticketKey, format } = args;
 
   // Get comment content from args or file
-  let markdownContent: string;
-
-  if (args.file) {
-    try {
-      const file = Bun.file(args.file);
-      markdownContent = await file.text();
-    } catch (error) {
-      console.error(`Error: Could not read file '${args.file}'`);
-      if (error instanceof Error) {
-        console.error(`Details: ${error.message}`);
-      }
-      process.exit(1);
-    }
-  } else if (args.comment) {
-    markdownContent = args.comment;
-  } else {
-    console.error('Error: Comment content is required.');
-    console.error(
-      'Provide comment text as an argument or use -f/--file to specify a file.'
-    );
-    process.exit(1);
-  }
+  const markdownContent = await readContentFromFileOrArg(
+    args.comment,
+    args.file,
+    'comment'
+  );
 
   // Validate ticket key format (soft validation with warning)
-  if (!isValidTicketKeyFormat(ticketKey)) {
-    console.log(
-      `Warning: '${ticketKey}' doesn't match typical Jira ticket format (PROJECT-123)`
-    );
-    console.log('Proceeding anyway...');
-    console.log('');
-  }
+  validateTicketKeyWithWarning(ticketKey);
 
   try {
     const config = loadConfig();
     const client = new JiraClient(config);
 
-    if (format !== 'json') {
-      console.log(`Adding comment to ticket: ${ticketKey}`);
-      console.log('Converting markdown to Jira format...');
-    }
+    logProgress(`Adding comment to ticket: ${ticketKey}`, format);
+    logProgress('Converting markdown to Jira format...', format);
 
     // Convert markdown to ADF
     const adfBody = markdownToAdf(markdownContent);
 
-    if (format !== 'json') {
-      console.log('Posting comment to Jira...');
-      console.log('');
-    }
+    logProgress('Posting comment to Jira...', format);
+    logProgress('', format);
 
     const result = await client.addComment(ticketKey, adfBody);
 
