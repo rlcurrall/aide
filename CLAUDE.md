@@ -12,7 +12,7 @@ The CLI follows a hierarchical command structure: `aide <service> <action> [opti
 
 - `jira` - Jira ticket management (search, ticket, comment, comments, desc)
 - `pr` - Pull request management (list, view, diff, create, update, comments, comment, reply)
-- `plugin` - Claude Code plugin management (status, uninstall)
+- `plugin` - Claude Code plugin management (install, status, uninstall)
 
 **Top-level Commands:**
 
@@ -43,21 +43,22 @@ bun run src/cli/index.ts --help
 
 ### Plugin Installation
 
-Install the aide plugin using Claude Code's native plugin system:
-
 ```bash
-# Add the marketplace
-/plugin marketplace add rlcurrall/aide
+# Install plugin (requires Claude CLI in PATH)
+aide plugin install              # Install for current user (default)
+aide plugin install --project    # Install to project scope
+aide plugin install --local      # Install to local scope
 
-# Install the plugin
-/plugin install aide@aide-marketplace
+# Check status and manage
+aide plugin status
+aide plugin uninstall --user
 ```
 
-Or use the CLI to check status / uninstall:
+Or install manually from within Claude Code:
 
 ```bash
-bun run dev plugin status
-bun run dev plugin uninstall --user
+/plugin marketplace add rlcurrall/aide
+/plugin install aide@aide-marketplace
 ```
 
 ### Building Binaries

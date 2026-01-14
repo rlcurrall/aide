@@ -281,32 +281,36 @@ This repository includes a Claude Code plugin for AI agent integration with Jira
 
 ### Installing the Plugin
 
-The aide CLI can install its own Claude Code plugin:
+**Option 1: Using aide CLI** (requires Claude CLI in PATH):
 
 ```bash
-# Build the CLI first
-bun run build
+aide plugin install              # Install for current user
+aide plugin install --project    # Install to project scope
+aide plugin install --local      # Install to local scope
+```
 
-# Install plugin globally (recommended)
-aide plugin install
+**Option 2: Using Claude Code directly**:
 
-# Or install to current project only
-aide plugin install --project
-
-# Check installation status
-aide plugin status
-
-# Remove plugin
-aide plugin uninstall
+```bash
+/plugin marketplace add rlcurrall/aide
+/plugin install aide@aide-marketplace
 ```
 
 ### Installation Scopes
 
-| Scope   | Flag               | Location                  | Use Case                     |
-| ------- | ------------------ | ------------------------- | ---------------------------- |
-| User    | `--user` (default) | `~/.claude/plugins/aide/` | Personal, all projects       |
-| Project | `--project`        | `.claude/plugins/aide/`   | Team-shared via git          |
-| Local   | `--local`          | `.claude/plugins/aide/`   | Project-specific, gitignored |
+| Scope     | Flag        | Description                              |
+| --------- | ----------- | ---------------------------------------- |
+| User      | `--user`    | Personal installation, available in all projects (default) |
+| Project   | `--project` | Team-shared via git, available to all collaborators |
+| Local     | `--local`   | Project-specific, not shared (gitignored) |
+
+### Managing the Plugin
+
+```bash
+aide plugin status               # Check installation status
+aide plugin uninstall --user     # Remove from user scope
+aide plugin uninstall --all      # Remove from all scopes
+```
 
 ### Available Slash Commands
 

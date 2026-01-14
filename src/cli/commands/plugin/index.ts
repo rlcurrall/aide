@@ -1,6 +1,6 @@
 /**
  * Plugin service commands
- * Routes to plugin management commands (install, uninstall, status)
+ * Routes to plugin management commands (install, status, uninstall)
  */
 
 import type { CommandModule } from 'yargs';
@@ -18,7 +18,7 @@ export const pluginCommands: CommandModule = {
       .command(statusCommand)
       .demandCommand(1, 'Please specify a plugin command')
       .example('$0 plugin install', 'Install plugin for current user')
-      .example('$0 plugin install --project', 'Install to project .claude/')
+      .example('$0 plugin install --project', 'Install to project scope')
       .example('$0 plugin status', 'Show installation status')
       .example('$0 plugin uninstall --all', 'Remove from all scopes'),
   handler: () => {

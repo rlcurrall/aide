@@ -1,116 +1,118 @@
 /**
  * Plugin status command
- * Shows the installation status of the aide Claude Code plugin across all scopes
+ * Shows the installation status of the aide Claude Code plugin
  */
 
-import { homedir } from 'os';
-import { join } from 'path';
-import { existsSync, readFileSync, readdirSync } from 'fs';
+import { $ } from 'bun';
 import type { CommandModule } from 'yargs';
+import { isClaudeCliAvailable, printClaudeCliNotFoundError } from './utils.js';
 
-type Scope = 'user' | 'project' | 'local';
-
-interface InstallPaths {
-  pluginDir: string;
-  settingsFile: string;
+/** Plugin info from claude plugin list --format json */
+interface PluginInfo {
+  name: string;
+  source: string;
+  scope: string;
+  path: string;
 }
 
-/**
- * Get the installation paths based on the specified scope
- */
-function getInstallPaths(scope: Scope): InstallPaths {
-  const home = homedir();
-
-  switch (scope) {
-    case 'user':
-      return {
-        pluginDir: join(home, '.claude', 'plugins', 'aide'),
-        settingsFile: join(home, '.claude', 'settings.json'),
-      };
-    case 'project':
-      return {
-        pluginDir: join(process.cwd(), '.claude', 'plugins', 'aide'),
-        settingsFile: join(process.cwd(), '.claude', 'settings.json'),
-      };
-    case 'local':
-      return {
-        pluginDir: join(process.cwd(), '.claude', 'plugins', 'aide'),
-        settingsFile: join(process.cwd(), '.claude', 'settings.local.json'),
-      };
-  }
-}
+/** Arguments for status command (none currently) */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface StatusArgv {}
 
 /**
- * Check if the aide plugin is enabled in a settings file
+ * Parse plugin list output to find aide plugin
+ * Tries JSON format first, falls back to text parsing
  */
-function isPluginEnabled(settingsFile: string): boolean {
-  if (!existsSync(settingsFile)) return false;
+async function getAidePluginInfo(): Promise<PluginInfo | null> {
+  // Try JSON format first (more reliable)
   try {
-    const settings = JSON.parse(readFileSync(settingsFile, 'utf-8'));
-    return settings.enabledPlugins?.['aide@aide-marketplace'] === true;
+    const jsonResult = await $`claude plugin list --format json`.quiet();
+    const plugins: PluginInfo[] = JSON.parse(jsonResult.text());
+    return (
+      plugins.find(
+        (p) =>
+          p.name === 'aide' ||
+          p.source === 'aide-marketplace' ||
+          (p.name === 'aide' && p.source === 'aide-marketplace')
+      ) ?? null
+    );
   } catch {
-    return false;
+    // JSON format not available or failed, fall back to text parsing
   }
-}
 
-/**
- * Count files recursively in a directory
- */
-function countFiles(dir: string): number {
-  if (!existsSync(dir)) return 0;
-  let count = 0;
+  // Fall back to text format
   try {
-    const entries = readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isFile()) {
-        count++;
-      } else if (entry.isDirectory()) {
-        count += countFiles(join(dir, entry.name));
+    const result = await $`claude plugin list`.quiet();
+    const output = result.text();
+    const lines = output.split('\n');
+
+    for (const line of lines) {
+      // Match exact pattern: aide@aide-marketplace
+      // Expected format varies, but we look for the exact identifier
+      const trimmedLine = line.trim();
+      if (
+        trimmedLine === 'aide@aide-marketplace' ||
+        trimmedLine.startsWith('aide@aide-marketplace ')
+      ) {
+        // Parse scope if present (e.g., "aide@aide-marketplace (user)")
+        const scopeMatch = trimmedLine.match(/\((\w+)\)/);
+        return {
+          name: 'aide',
+          source: 'aide-marketplace',
+          scope: scopeMatch?.[1] ?? 'unknown',
+          path: '',
+        };
       }
     }
   } catch {
-    // Ignore read errors
+    // Text parsing failed
   }
-  return count;
+
+  return null;
 }
 
 async function handler(): Promise<void> {
-  console.log('aide Plugin Installation Status');
-  console.log('==============================');
-  console.log('');
-
-  const scopes: Scope[] = ['user', 'project', 'local'];
-  let anyInstalled = false;
-
-  for (const scope of scopes) {
-    const paths = getInstallPaths(scope);
-    const filesExist = existsSync(paths.pluginDir);
-    const enabled = isPluginEnabled(paths.settingsFile);
-    const fileCount = countFiles(paths.pluginDir);
-
-    const status =
-      filesExist && enabled
-        ? '[OK] Installed & Enabled'
-        : filesExist
-          ? '[!] Files present, not enabled'
-          : enabled
-            ? '[!] Enabled but files missing'
-            : '[-] Not installed';
-
-    console.log(`${scope.toUpperCase()} SCOPE:`);
-    console.log(`  Status: ${status}`);
-    console.log(`  Plugin dir: ${paths.pluginDir}`);
-    if (filesExist) {
-      console.log(`  Files: ${fileCount}`);
-    }
-    console.log(`  Settings: ${paths.settingsFile}`);
-    console.log('');
-
-    if (filesExist || enabled) anyInstalled = true;
+  // Check if Claude CLI is available
+  if (!(await isClaudeCliAvailable())) {
+    printClaudeCliNotFoundError();
+    process.exit(1);
   }
 
-  if (!anyInstalled) {
-    console.log('No installation found. Run "aide plugin install" to install.');
+  console.log('aide Plugin Status');
+  console.log('==================');
+  console.log('');
+
+  try {
+    const pluginInfo = await getAidePluginInfo();
+
+    if (pluginInfo) {
+      console.log('[OK] aide plugin is installed');
+      console.log('');
+      console.log('Plugin details:');
+      console.log(`  Name: ${pluginInfo.name}`);
+      console.log(`  Source: ${pluginInfo.source}`);
+      if (pluginInfo.scope && pluginInfo.scope !== 'unknown') {
+        console.log(`  Scope: ${pluginInfo.scope}`);
+      }
+      if (pluginInfo.path) {
+        console.log(`  Path: ${pluginInfo.path}`);
+      }
+    } else {
+      console.log('[-] aide plugin is not installed');
+      console.log('');
+      console.log('To install, run:');
+      console.log('  aide plugin install');
+      console.log('');
+      console.log('Or from within Claude Code:');
+      console.log('  /plugin marketplace add rlcurrall/aide');
+      console.log('  /plugin install aide@aide-marketplace');
+    }
+  } catch (error) {
+    console.error('Error: Failed to get plugin status.');
+    if (error instanceof Error) {
+      console.error(`  ${error.message}`);
+    }
+    process.exit(1);
   }
 }
 
@@ -118,4 +120,4 @@ export default {
   command: 'status',
   describe: 'Show plugin installation status',
   handler,
-} satisfies CommandModule;
+} satisfies CommandModule<object, StatusArgv>;

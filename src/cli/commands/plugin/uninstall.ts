@@ -3,12 +3,13 @@
  * Removes the aide Claude Code plugin from specified scopes
  */
 
+import { $ } from 'bun';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import { homedir } from 'os';
-import { join } from 'path';
-import { existsSync, rmSync, readFileSync, writeFileSync } from 'fs';
-
-type Scope = 'user' | 'project' | 'local';
+import {
+  isClaudeCliAvailable,
+  printClaudeCliNotFoundError,
+  RESTART_MESSAGE,
+} from './utils.js';
 
 export interface UninstallArgv {
   user: boolean;
@@ -17,95 +18,90 @@ export interface UninstallArgv {
   all: boolean;
 }
 
-interface InstallPaths {
-  pluginDir: string;
-  settingsFile: string;
-}
-
-/**
- * Get the installation paths based on the specified scope
- */
-function getInstallPaths(scope: Scope): InstallPaths {
-  const home = homedir();
-
-  switch (scope) {
-    case 'user':
-      return {
-        pluginDir: join(home, '.claude', 'plugins', 'aide'),
-        settingsFile: join(home, '.claude', 'settings.json'),
-      };
-    case 'project':
-      return {
-        pluginDir: join(process.cwd(), '.claude', 'plugins', 'aide'),
-        settingsFile: join(process.cwd(), '.claude', 'settings.json'),
-      };
-    case 'local':
-      return {
-        pluginDir: join(process.cwd(), '.claude', 'plugins', 'aide'),
-        settingsFile: join(process.cwd(), '.claude', 'settings.local.json'),
-      };
-  }
-}
-
-/**
- * Remove the aide plugin entry from a settings file
- * Returns true if the settings were modified
- */
-function removeFromSettings(settingsFile: string): boolean {
-  if (!existsSync(settingsFile)) return false;
-
-  try {
-    const settings = JSON.parse(readFileSync(settingsFile, 'utf-8'));
-    if (
-      settings.enabledPlugins &&
-      typeof settings.enabledPlugins === 'object' &&
-      'aide@aide-marketplace' in settings.enabledPlugins
-    ) {
-      delete settings.enabledPlugins['aide@aide-marketplace'];
-      writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
-      return true;
-    }
-  } catch {
-    // Ignore parse errors
-  }
-  return false;
-}
-
 async function handler(argv: ArgumentsCamelCase<UninstallArgv>): Promise<void> {
-  // Determine which scopes to uninstall from
-  const scopes: Scope[] = argv.all
-    ? ['user', 'project', 'local']
-    : [argv.project ? 'project' : argv.local ? 'local' : 'user'];
-
-  let removedAny = false;
-
-  for (const scope of scopes) {
-    const paths = getInstallPaths(scope);
-    let removed = false;
-
-    // Remove plugin directory if it exists
-    if (existsSync(paths.pluginDir)) {
-      rmSync(paths.pluginDir, { recursive: true, force: true });
-      console.log(`[OK] Removed plugin files (${scope}): ${paths.pluginDir}`);
-      removed = true;
-    }
-
-    // Remove from settings file
-    if (removeFromSettings(paths.settingsFile)) {
-      console.log(`[OK] Updated settings (${scope}): ${paths.settingsFile}`);
-      removed = true;
-    }
-
-    if (removed) removedAny = true;
-  }
-
-  if (!removedAny) {
-    console.log('No aide plugin installation found');
+  // Check if Claude CLI is available
+  if (!(await isClaudeCliAvailable())) {
+    printClaudeCliNotFoundError('/plugin uninstall aide@aide-marketplace');
     process.exit(1);
   }
 
+  // Validate conflicting flags
+  const scopeFlags = [argv.user, argv.project, argv.local].filter(Boolean);
+  if (scopeFlags.length > 1 && !argv.all) {
+    console.error(
+      'Error: Cannot specify multiple scope flags (--user, --project, --local) together.'
+    );
+    console.error(
+      'Use --all to uninstall from all scopes, or specify a single scope.'
+    );
+    process.exit(1);
+  }
+
+  // Determine which scopes to uninstall from
+  const scopes: string[] = argv.all
+    ? ['user', 'project', 'local']
+    : [argv.project ? 'project' : argv.local ? 'local' : 'user'];
+
+  console.log(`Uninstalling aide plugin from ${scopes.join(', ')} scope(s)...`);
   console.log('');
-  console.log('Uninstall complete. Restart Claude Code to apply changes.');
+
+  let successCount = 0;
+  let errorCount = 0;
+
+  for (const scope of scopes) {
+    try {
+      console.log(`Removing from ${scope} scope...`);
+      const result =
+        await $`claude plugin uninstall aide@aide-marketplace --scope ${scope}`.quiet();
+
+      if (result.exitCode === 0) {
+        console.log(`[OK] Removed from ${scope} scope`);
+        successCount++;
+      } else {
+        // Non-zero exit code but no exception - likely not installed
+        const stderr = result.stderr.toString().toLowerCase();
+        if (stderr.includes('not installed') || stderr.includes('not found')) {
+          console.log(`[-] Not installed in ${scope} scope`);
+        } else {
+          console.error(
+            `[ERROR] Failed to remove from ${scope} scope: ${result.stderr}`
+          );
+          errorCount++;
+        }
+      }
+    } catch (error) {
+      // Check if the error indicates "not installed" vs actual failure
+      const errorMessage =
+        error instanceof Error
+          ? error.message.toLowerCase()
+          : String(error).toLowerCase();
+
+      if (
+        errorMessage.includes('not installed') ||
+        errorMessage.includes('not found')
+      ) {
+        console.log(`[-] Not installed in ${scope} scope`);
+      } else {
+        console.error(
+          `[ERROR] Failed to remove from ${scope} scope: ${error instanceof Error ? error.message : error}`
+        );
+        errorCount++;
+      }
+    }
+  }
+
+  console.log('');
+
+  if (successCount > 0) {
+    console.log(`Uninstall complete. ${RESTART_MESSAGE}`);
+  } else if (errorCount > 0) {
+    console.error(
+      'Uninstall failed. Please check the errors above and try again.'
+    );
+    process.exit(1);
+  } else {
+    console.log('No aide plugin installation found in the specified scope(s).');
+  }
 }
 
 export default {
@@ -116,16 +112,19 @@ export default {
       type: 'boolean',
       default: false,
       describe: 'Remove from user scope (default)',
+      conflicts: ['project', 'local'],
     },
     project: {
       type: 'boolean',
       default: false,
       describe: 'Remove from project scope',
+      conflicts: ['user', 'local'],
     },
     local: {
       type: 'boolean',
       default: false,
       describe: 'Remove from local scope',
+      conflicts: ['user', 'project'],
     },
     all: {
       type: 'boolean',
