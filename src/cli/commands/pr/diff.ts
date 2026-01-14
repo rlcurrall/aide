@@ -6,12 +6,13 @@
 
 import {
   extractBranchName,
+  fetchMissingBranches,
   findPRByCurrentBranch,
   getGitDiff,
+  getMissingRepoErrorMessage,
   isGitRepository,
   parseGitStat,
   parsePRUrl,
-  printMissingRepoError,
   remoteRefExists,
   resolveRepoContext,
   validatePRId,
@@ -394,7 +395,13 @@ async function handler(argv: ArgumentsCamelCase<DiffArgs>): Promise<void> {
 
   // Try auto-discover project/repo from git remote first
   try {
-    const context = resolveRepoContext(project, repo, { format });
+    const context = resolveRepoContext(project, repo);
+    if (context.autoDiscovered && context.repoInfo && format !== 'json') {
+      console.log(
+        `Auto-discovered: ${context.repoInfo.org}/${context.repoInfo.project}/${context.repoInfo.repo}`
+      );
+      console.log('');
+    }
     project = context.project;
     repo = context.repo;
   } catch {
@@ -431,7 +438,9 @@ async function handler(argv: ArgumentsCamelCase<DiffArgs>): Promise<void> {
   } else {
     // No PR ID provided - auto-detect from current branch
     if (!project || !repo) {
-      printMissingRepoError('Provide a PR ID or full PR URL');
+      console.error(
+        getMissingRepoErrorMessage('Provide a PR ID or full PR URL')
+      );
       process.exit(1);
     }
 
@@ -455,7 +464,7 @@ async function handler(argv: ArgumentsCamelCase<DiffArgs>): Promise<void> {
 
   // Validate we have project/repo
   if (!project || !repo) {
-    printMissingRepoError('Provide a full PR URL');
+    console.error(getMissingRepoErrorMessage('Provide a full PR URL'));
     process.exit(1);
   }
 
@@ -487,6 +496,24 @@ async function handler(argv: ArgumentsCamelCase<DiffArgs>): Promise<void> {
         'Error: Single file diff requires being in a git repository.'
       );
       process.exit(1);
+    }
+
+    // Ensure branches are available locally (auto-fetch if enabled)
+    if (isGitRepository() && pr.sourceRefName && pr.targetRefName) {
+      const sourceBranch = extractBranchName(pr.sourceRefName);
+      const targetBranch = extractBranchName(pr.targetRefName);
+
+      const branchResult = fetchMissingBranches(sourceBranch, targetBranch, {
+        fetch: args.fetch,
+      });
+
+      // Log fetched branches (unless JSON output)
+      if (format !== 'json' && branchResult.fetched.length > 0) {
+        for (const branch of branchResult.fetched) {
+          console.log(`Fetched branch '${branch}'`);
+        }
+        console.log('');
+      }
     }
 
     // Get diff data
@@ -558,6 +585,12 @@ export default {
     file: {
       type: 'string',
       describe: 'Show diff for a specific file only',
+    },
+    fetch: {
+      type: 'boolean',
+      default: true,
+      describe:
+        'Auto-fetch branches if not available locally (use --no-fetch to disable)',
     },
   },
   handler,

@@ -19,6 +19,7 @@ export const DiffArgsSchema = v.object({
   stat: v.optional(v.boolean(), false),
   files: v.optional(v.boolean(), false),
   file: v.optional(v.string()),
+  fetch: v.optional(v.boolean(), true),
 });
 
 export type DiffArgs = v.InferOutput<typeof DiffArgsSchema>;

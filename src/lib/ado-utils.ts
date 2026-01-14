@@ -192,16 +192,6 @@ export class MissingRepoContextError extends Error {
 }
 
 /**
- * Options for resolving repository context
- */
-export interface ResolveRepoContextOptions {
-  /** If true, skip printing auto-discovery message */
-  silent?: boolean;
-  /** Output format - if 'json', auto-discovery messages are suppressed */
-  format?: 'text' | 'json' | 'markdown';
-}
-
-/**
  * Result of resolving repository context
  */
 export interface ResolvedRepoContext {
@@ -210,48 +200,49 @@ export interface ResolvedRepoContext {
   org?: string;
   /** The full repo info if auto-discovered */
   repoInfo?: GitRemoteInfo;
+  /** Whether project/repo was auto-discovered from git remote */
+  autoDiscovered: boolean;
 }
 
 /**
- * Print the standard error message for missing project/repository
+ * Get the standard error message for missing project/repository
  * @param extraHint Optional additional hint to append (e.g., "Provide a PR ID or full PR URL")
+ * @returns Formatted error message string
  */
-export function printMissingRepoError(extraHint?: string): void {
-  console.error('Error: Could not determine project and repository.');
-  console.error('');
-  console.error('Either:');
-  console.error(
-    '  1. Run this command from within a git repository with a supported remote (Azure DevOps)'
-  );
-  console.error('  2. Specify --project and --repo flags explicitly');
+export function getMissingRepoErrorMessage(extraHint?: string): string {
+  const lines = [
+    'Error: Could not determine project and repository.',
+    '',
+    'Either:',
+    '  1. Run this command from within a git repository with a supported remote (Azure DevOps)',
+    '  2. Specify --project and --repo flags explicitly',
+  ];
   if (extraHint) {
-    console.error(`  3. ${extraHint}`);
+    lines.push(`  3. ${extraHint}`);
   }
+  return lines.join('\n');
 }
 
 /**
  * Resolve repository context from provided values or auto-discovery
  *
  * This function:
- * 1. If project and repo are already provided, returns them
+ * 1. If project and repo are already provided, returns them (autoDiscovered: false)
  * 2. Otherwise, attempts to auto-discover from git remote
  * 3. Merges discovered values with provided values
- * 4. Optionally logs auto-discovery message (unless silent or format is json)
- * 5. Throws MissingRepoContextError if project/repo still missing
+ * 4. Throws MissingRepoContextError if project/repo still missing
  *
  * @param project - Project name (may be undefined)
  * @param repo - Repository name (may be undefined)
- * @param options - Options for resolution behavior
- * @returns Resolved context with project, repo, and optionally org
+ * @returns Resolved context with project, repo, autoDiscovered flag, and optionally org
  * @throws MissingRepoContextError if context cannot be resolved
  */
 export function resolveRepoContext(
   project: string | undefined,
-  repo: string | undefined,
-  options?: ResolveRepoContextOptions
+  repo: string | undefined
 ): ResolvedRepoContext {
-  const silent = options?.silent || options?.format === 'json';
   let repoInfo: GitRemoteInfo | null = null;
+  let autoDiscovered = false;
 
   // Auto-discover from git remote if not fully specified
   if (!project || !repo) {
@@ -259,12 +250,7 @@ export function resolveRepoContext(
     if (repoInfo) {
       project = project || repoInfo.project;
       repo = repo || repoInfo.repo;
-      if (!silent) {
-        console.log(
-          `Auto-discovered: ${repoInfo.org}/${repoInfo.project}/${repoInfo.repo}`
-        );
-        console.log('');
-      }
+      autoDiscovered = true;
     }
   }
 
@@ -278,6 +264,7 @@ export function resolveRepoContext(
     repo,
     org: repoInfo?.org,
     repoInfo: repoInfo ?? undefined,
+    autoDiscovered,
   };
 }
 
@@ -403,6 +390,112 @@ export function remoteRefExists(ref: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Result of a git fetch operation
+ */
+export interface GitFetchResult {
+  success: boolean;
+  error?: string;
+}
+
+/**
+ * Fetch a branch from the remote
+ * @param branch - Branch name (without refs/heads/ prefix)
+ * @param remote - Remote name (default: origin)
+ */
+export function fetchBranch(branch: string, remote = 'origin'): GitFetchResult {
+  try {
+    const result = spawnSync(['git', 'fetch', remote, branch]);
+    if (result.exitCode === 0) {
+      return { success: true };
+    }
+    return { success: false, error: result.stderr.toString().trim() };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Result of fetching missing branches
+ */
+export interface FetchMissingBranchesResult {
+  /** Whether both branches are now available locally */
+  available: boolean;
+  /** Branches that were fetched */
+  fetched: string[];
+  /** Branch that is missing (if available is false) */
+  missingBranch?: string;
+  /** Error message if fetch failed */
+  error?: string;
+}
+
+/**
+ * Fetch missing source and target branches from remote if not available locally
+ * @param sourceBranch - Source branch name (without refs/heads/ prefix)
+ * @param targetBranch - Target branch name (without refs/heads/ prefix)
+ * @param options - Whether to actually fetch missing branches (if false, just checks availability)
+ */
+export function fetchMissingBranches(
+  sourceBranch: string,
+  targetBranch: string,
+  options: { fetch: boolean } = { fetch: true }
+): FetchMissingBranchesResult {
+  const sourceRef = `origin/${sourceBranch}`;
+  const targetRef = `origin/${targetBranch}`;
+  const fetched: string[] = [];
+
+  // Check/fetch source branch
+  if (!remoteRefExists(sourceRef)) {
+    if (options.fetch) {
+      const result = fetchBranch(sourceBranch);
+      if (result.success) {
+        fetched.push(sourceBranch);
+      } else {
+        return {
+          available: false,
+          fetched,
+          missingBranch: sourceBranch,
+          error: result.error,
+        };
+      }
+    } else {
+      return {
+        available: false,
+        fetched,
+        missingBranch: sourceBranch,
+      };
+    }
+  }
+
+  // Check/fetch target branch
+  if (!remoteRefExists(targetRef)) {
+    if (options.fetch) {
+      const result = fetchBranch(targetBranch);
+      if (result.success) {
+        fetched.push(targetBranch);
+      } else {
+        return {
+          available: false,
+          fetched,
+          missingBranch: targetBranch,
+          error: result.error,
+        };
+      }
+    } else {
+      return {
+        available: false,
+        fetched,
+        missingBranch: targetBranch,
+      };
+    }
+  }
+
+  return { available: true, fetched };
 }
 
 /**

@@ -9,7 +9,7 @@ import {
   buildPrUrl,
   ensureRefPrefix,
   getCurrentBranch,
-  printMissingRepoError,
+  getMissingRepoErrorMessage,
   resolveRepoContext,
 } from '@lib/ado-utils.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
@@ -73,13 +73,19 @@ async function handler(argv: ArgumentsCamelCase<PrCreateArgs>): Promise<void> {
   let repo: string;
   let repoInfo: GitRemoteInfo | undefined;
   try {
-    const context = resolveRepoContext(args.project, args.repo, { format });
+    const context = resolveRepoContext(args.project, args.repo);
     project = context.project;
     repo = context.repo;
     repoInfo = context.repoInfo;
+    if (context.autoDiscovered && context.repoInfo && format !== 'json') {
+      console.log(
+        `Auto-discovered: ${context.repoInfo.org}/${context.repoInfo.project}/${context.repoInfo.repo}`
+      );
+      console.log('');
+    }
   } catch (error) {
     if (error instanceof MissingRepoContextError) {
-      printMissingRepoError();
+      console.error(getMissingRepoErrorMessage());
       process.exit(1);
     }
     throw error;

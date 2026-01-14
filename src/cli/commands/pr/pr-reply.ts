@@ -6,8 +6,8 @@
 
 import {
   findPRByCurrentBranch,
+  getMissingRepoErrorMessage,
   parsePRUrl,
-  printMissingRepoError,
   resolveRepoContext,
   validatePRId,
 } from '@lib/ado-utils.js';
@@ -83,7 +83,13 @@ async function handler(argv: ArgumentsCamelCase<PrReplyArgs>): Promise<void> {
 
   // Try auto-discover project/repo from git remote first (needed for PR auto-detection)
   try {
-    const context = resolveRepoContext(project, repo, { format });
+    const context = resolveRepoContext(project, repo);
+    if (context.autoDiscovered && context.repoInfo && format !== 'json') {
+      console.log(
+        `Auto-discovered: ${context.repoInfo.org}/${context.repoInfo.project}/${context.repoInfo.repo}`
+      );
+      console.log('');
+    }
     project = context.project;
     repo = context.repo;
   } catch {
@@ -122,7 +128,9 @@ async function handler(argv: ArgumentsCamelCase<PrReplyArgs>): Promise<void> {
     // No PR ID provided - auto-detect from current branch
     // We need project/repo for this
     if (!project || !repo) {
-      printMissingRepoError('Provide a PR ID or full PR URL');
+      console.error(
+        getMissingRepoErrorMessage('Provide a PR ID or full PR URL')
+      );
       process.exit(1);
     }
 
@@ -146,7 +154,7 @@ async function handler(argv: ArgumentsCamelCase<PrReplyArgs>): Promise<void> {
 
   // Validate we have project/repo (should be set by now, but double-check)
   if (!project || !repo) {
-    printMissingRepoError('Provide a full PR URL');
+    console.error(getMissingRepoErrorMessage('Provide a full PR URL'));
     process.exit(1);
   }
 

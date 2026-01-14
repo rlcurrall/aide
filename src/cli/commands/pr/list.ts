@@ -6,7 +6,7 @@
 
 import {
   MissingRepoContextError,
-  printMissingRepoError,
+  getMissingRepoErrorMessage,
   resolveRepoContext,
 } from '@lib/ado-utils.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
@@ -94,12 +94,18 @@ async function handler(argv: ArgumentsCamelCase<ListArgs>): Promise<void> {
   let project: string;
   let repo: string;
   try {
-    const context = resolveRepoContext(args.project, args.repo, { format });
+    const context = resolveRepoContext(args.project, args.repo);
     project = context.project;
     repo = context.repo;
+    if (context.autoDiscovered && context.repoInfo && format !== 'json') {
+      console.log(
+        `Auto-discovered: ${context.repoInfo.org}/${context.repoInfo.project}/${context.repoInfo.repo}`
+      );
+      console.log('');
+    }
   } catch (error) {
     if (error instanceof MissingRepoContextError) {
-      printMissingRepoError();
+      console.error(getMissingRepoErrorMessage());
       process.exit(1);
     }
     throw error;
