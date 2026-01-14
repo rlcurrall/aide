@@ -3,6 +3,42 @@ import { spawnSync } from 'bun';
 import { AzureDevOpsClient } from './azure-devops-client.js';
 import { loadAzureDevOpsConfig } from './config.js';
 
+// ============================================================================
+// Git Ref Helpers
+// ============================================================================
+
+/**
+ * Extract branch name from ref (e.g., "refs/heads/main" -> "main")
+ */
+export function extractBranchName(refName: string | undefined): string {
+  if (!refName) return 'unknown';
+  return refName.replace(/^refs\/heads\//, '');
+}
+
+/**
+ * Ensure branch name has refs/heads/ prefix
+ */
+export function ensureRefPrefix(branch: string): string {
+  if (branch.startsWith('refs/heads/')) {
+    return branch;
+  }
+  return `refs/heads/${branch}`;
+}
+
+/**
+ * Build the PR URL for Azure DevOps
+ */
+export function buildPrUrl(
+  repoInfo: GitRemoteInfo,
+  prId: number,
+  orgUrl?: string
+): string {
+  const baseUrl = orgUrl
+    ? orgUrl.replace(/\/$/, '')
+    : `https://dev.azure.com/${repoInfo.org}`;
+  return `${baseUrl}/${encodeURIComponent(repoInfo.project)}/_git/${encodeURIComponent(repoInfo.repo)}/pullrequest/${prId}`;
+}
+
 /**
  * Parse Azure DevOps git remote URL to extract org, project, and repo
  * Supports both SSH and HTTPS formats:

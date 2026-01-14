@@ -4,16 +4,16 @@
  * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads?view=azure-devops-rest-7.1
  */
 
-import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import { loadAzureDevOpsConfig } from '@lib/config.js';
-import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import {
-  resolveRepoContext,
-  printMissingRepoError,
-  parsePRUrl,
-  validatePRId,
   findPRByCurrentBranch,
+  parsePRUrl,
+  printMissingRepoError,
+  resolveRepoContext,
+  validatePRId,
 } from '@lib/ado-utils.js';
+import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
+import { loadAzureDevOpsConfig } from '@lib/config.js';
+import { handleCommandError } from '@lib/errors.js';
 import type { AdoFlattenedComment } from '@lib/types.js';
 import { validateArgs } from '@lib/validation.js';
 import {
@@ -21,7 +21,7 @@ import {
   type CommentsArgs,
   type OutputFormat,
 } from '@schemas/pr/comments.js';
-import { handleCommandError } from '@lib/errors.js';
+import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 /**
  * Represents a thread with its root comment and replies grouped together

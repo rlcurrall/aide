@@ -4,24 +4,24 @@
  * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/create?view=azure-devops-rest-7.1
  */
 
-import type { ArgumentsCamelCase, Argv, CommandModule } from 'yargs';
-import { loadAzureDevOpsConfig } from '@lib/config.js';
-import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import {
-  resolveRepoContext,
-  printMissingRepoError,
-  parsePRUrl,
-  validatePRId,
   findPRByCurrentBranch,
+  parsePRUrl,
+  printMissingRepoError,
+  resolveRepoContext,
+  validatePRId,
 } from '@lib/ado-utils.js';
+import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
+import { loadAzureDevOpsConfig } from '@lib/config.js';
+import { handleCommandError } from '@lib/errors.js';
 import type { CreateThreadResponse } from '@lib/types.js';
 import { validateArgs } from '@lib/validation.js';
 import {
   PrCommentArgsSchema,
-  type PrCommentArgs,
   type OutputFormat,
+  type PrCommentArgs,
 } from '@schemas/pr/pr-comment.js';
-import { handleCommandError } from '@lib/errors.js';
+import type { ArgumentsCamelCase, Argv, CommandModule } from 'yargs';
 
 /**
  * Format the output based on format type

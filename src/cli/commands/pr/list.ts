@@ -4,14 +4,14 @@
  * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/list?view=azure-devops-rest-7.1
  */
 
-import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import { loadAzureDevOpsConfig } from '@lib/config.js';
-import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import {
-  resolveRepoContext,
-  printMissingRepoError,
   MissingRepoContextError,
+  printMissingRepoError,
+  resolveRepoContext,
 } from '@lib/ado-utils.js';
+import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
+import { loadAzureDevOpsConfig } from '@lib/config.js';
+import { handleCommandError } from '@lib/errors.js';
 import type { AzureDevOpsPullRequest } from '@lib/types.js';
 import { validateArgs } from '@lib/validation.js';
 import {
@@ -19,7 +19,7 @@ import {
   type ListArgs,
   type OutputFormat,
 } from '@schemas/pr/list.js';
-import { handleCommandError } from '@lib/errors.js';
+import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 /**
  * Format PR list output based on format type

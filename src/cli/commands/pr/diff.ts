@@ -4,36 +4,29 @@
  * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-iteration-changes/get
  */
 
-import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import { loadAzureDevOpsConfig } from '@lib/config.js';
-import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import {
-  resolveRepoContext,
-  printMissingRepoError,
-  parsePRUrl,
-  validatePRId,
+  extractBranchName,
   findPRByCurrentBranch,
-  isGitRepository,
-  remoteRefExists,
   getGitDiff,
+  isGitRepository,
   parseGitStat,
+  parsePRUrl,
+  printMissingRepoError,
+  remoteRefExists,
+  resolveRepoContext,
+  validatePRId,
 } from '@lib/ado-utils.js';
+import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
+import { loadAzureDevOpsConfig } from '@lib/config.js';
+import { handleCommandError } from '@lib/errors.js';
 import type {
-  AzureDevOpsPullRequest,
-  AzureDevOpsPRChange,
   AzureDevOpsChangeType,
+  AzureDevOpsPRChange,
+  AzureDevOpsPullRequest,
 } from '@lib/types.js';
 import { validateArgs } from '@lib/validation.js';
 import { DiffArgsSchema, type DiffArgs } from '@schemas/pr/diff.js';
-import { handleCommandError } from '@lib/errors.js';
-
-/**
- * Extract branch name from ref (e.g., "refs/heads/main" -> "main")
- */
-function extractBranchName(refName: string | undefined): string {
-  if (!refName) return 'unknown';
-  return refName.replace(/^refs\/heads\//, '');
-}
+import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 /**
  * Map Azure DevOps change type to display character

@@ -4,48 +4,25 @@
  * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/create?view=azure-devops-rest-7.2
  */
 
-import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import { loadAzureDevOpsConfig } from '@lib/config.js';
-import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import {
-  resolveRepoContext,
-  printMissingRepoError,
   MissingRepoContextError,
+  buildPrUrl,
+  ensureRefPrefix,
   getCurrentBranch,
+  printMissingRepoError,
+  resolveRepoContext,
 } from '@lib/ado-utils.js';
+import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
+import { loadAzureDevOpsConfig } from '@lib/config.js';
+import { handleCommandError } from '@lib/errors.js';
 import type { AzureDevOpsPullRequest, GitRemoteInfo } from '@lib/types.js';
 import { validateArgs } from '@lib/validation.js';
 import {
   PrCreateArgsSchema,
-  type PrCreateArgs,
   type OutputFormat,
+  type PrCreateArgs,
 } from '@schemas/pr/pr-create.js';
-import { handleCommandError } from '@lib/errors.js';
-
-/**
- * Ensure branch name has refs/heads/ prefix
- */
-function ensureRefPrefix(branch: string): string {
-  if (branch.startsWith('refs/heads/')) {
-    return branch;
-  }
-  return `refs/heads/${branch}`;
-}
-
-/**
- * Build the PR URL for Azure DevOps
- */
-function buildPrUrl(
-  repoInfo: GitRemoteInfo,
-  prId: number,
-  orgUrl?: string
-): string {
-  // Use the org URL from config if available, otherwise construct from repoInfo
-  const baseUrl = orgUrl
-    ? orgUrl.replace(/\/$/, '')
-    : `https://dev.azure.com/${repoInfo.org}`;
-  return `${baseUrl}/${encodeURIComponent(repoInfo.project)}/_git/${encodeURIComponent(repoInfo.repo)}/pullrequest/${prId}`;
-}
+import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 /**
  * Format PR creation output based on format type
