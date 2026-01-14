@@ -73,7 +73,18 @@ const JIRA_COMMANDS = `## Jira Commands
 aide jira search "assignee = currentUser() AND status = 'In Progress'"
 
 # Get ticket details
-aide jira ticket PROJ-123
+aide jira view PROJ-123
+
+# Create ticket
+aide jira create -p PROJ -t Task -s "Summary" --assignee me
+
+# Update ticket fields
+aide jira update PROJ-123 --assignee me --priority High
+aide jira update PROJ-123 --description "New description"
+
+# Change workflow status
+aide jira transition PROJ-123 "In Progress"
+aide jira transition PROJ-123 --list  # show available transitions
 
 # Add comment
 aide jira comment PROJ-123 "Work completed, ready for review"
@@ -81,8 +92,9 @@ aide jira comment PROJ-123 "Work completed, ready for review"
 # Get recent comments
 aide jira comments PROJ-123 --latest 5
 
-# Update description
-aide jira desc PROJ-123 "Updated requirements..."
+# Manage attachments
+aide jira attach PROJ-123 --list
+aide jira attach PROJ-123 --upload ./file.pdf
 \`\`\``;
 
 const PR_COMMANDS = `## Pull Request Commands
