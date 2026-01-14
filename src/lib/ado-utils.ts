@@ -338,3 +338,154 @@ export async function findPRByCurrentBranch(
     };
   }
 }
+
+// ============================================================================
+// Git Diff Helpers
+// ============================================================================
+
+/**
+ * Check if current directory is inside a git repository
+ * Returns true if inside a git work tree, false otherwise
+ */
+export function isGitRepository(): boolean {
+  try {
+    const result = spawnSync(['git', 'rev-parse', '--is-inside-work-tree']);
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if a remote ref exists locally
+ * Returns true if the ref exists, false if not found or on error
+ */
+export function remoteRefExists(ref: string): boolean {
+  try {
+    const result = spawnSync(['git', 'rev-parse', '--verify', ref]);
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Options for git diff
+ */
+export interface GitDiffOptions {
+  stat?: boolean;
+  nameOnly?: boolean;
+  file?: string;
+}
+
+/**
+ * Result of a git diff operation
+ */
+export interface GitDiffResult {
+  success: boolean;
+  output?: string;
+  error?: string;
+}
+
+/**
+ * Get git diff output between two refs
+ */
+export function getGitDiff(
+  baseRef: string,
+  headRef: string,
+  options?: GitDiffOptions
+): GitDiffResult {
+  try {
+    const args = ['diff', `${baseRef}...${headRef}`];
+
+    if (options?.stat) args.push('--stat');
+    if (options?.nameOnly) args.push('--name-only');
+    if (options?.file) args.push('--', options.file);
+
+    const result = spawnSync(['git', ...args]);
+
+    if (result.exitCode === 0) {
+      return { success: true, output: result.stdout.toString() };
+    }
+    return { success: false, error: result.stderr.toString() };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Parsed file from git diff --stat
+ */
+export interface GitStatFile {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+/**
+ * Summary of git diff --stat
+ */
+export interface GitStatSummary {
+  filesChanged: number;
+  additions: number;
+  deletions: number;
+}
+
+/**
+ * Result of parsing git diff --stat output
+ */
+export interface GitStatResult {
+  files: GitStatFile[];
+  summary: GitStatSummary;
+}
+
+/**
+ * Parse git diff --stat output into structured data
+ *
+ * Example input:
+ *  src/foo.ts | 15 ++++++++-------
+ *  src/bar.ts |  3 +++
+ *  2 files changed, 11 insertions(+), 7 deletions(-)
+ */
+export function parseGitStat(output: string): GitStatResult {
+  const lines = output.trim().split('\n');
+  const files: GitStatFile[] = [];
+  let summary: GitStatSummary = { filesChanged: 0, additions: 0, deletions: 0 };
+
+  for (const line of lines) {
+    // Match file line: " path | count ++++----"
+    const fileMatch = line.match(/^\s*(.+?)\s*\|\s*(\d+)\s*([+-]*)/);
+    if (fileMatch && fileMatch[1] && fileMatch[2]) {
+      const path = fileMatch[1].trim();
+      const changeIndicators = fileMatch[3] || '';
+      const additions = (changeIndicators.match(/\+/g) || []).length;
+      const deletions = (changeIndicators.match(/-/g) || []).length;
+      files.push({ path, additions, deletions });
+      continue;
+    }
+
+    // Match binary file line: " path | Bin 0 -> 1234 bytes"
+    const binaryMatch = line.match(/^\s*(.+?)\s*\|\s*Bin/);
+    if (binaryMatch && binaryMatch[1]) {
+      files.push({ path: binaryMatch[1].trim(), additions: 0, deletions: 0 });
+      continue;
+    }
+
+    // Match summary line: "N files changed, X insertions(+), Y deletions(-)"
+    const summaryMatch = line.match(
+      /(\d+)\s+files?\s+changed(?:,\s*(\d+)\s+insertions?\(\+\))?(?:,\s*(\d+)\s+deletions?\(-\))?/
+    );
+    if (summaryMatch && summaryMatch[1]) {
+      summary = {
+        filesChanged: parseInt(summaryMatch[1], 10),
+        additions: summaryMatch[2] ? parseInt(summaryMatch[2], 10) : 0,
+        deletions: summaryMatch[3] ? parseInt(summaryMatch[3], 10) : 0,
+      };
+    }
+  }
+
+  return { files, summary };
+}

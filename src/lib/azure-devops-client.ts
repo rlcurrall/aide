@@ -7,6 +7,9 @@ import type {
   CreateThreadResponse,
   PullRequestUpdateOptions,
   AzureDevOpsCreateCommentResponse,
+  AzureDevOpsPRIteration,
+  AzureDevOpsPRIterationChanges,
+  AzureDevOpsPRChange,
 } from './types.js';
 
 export class AzureDevOpsClient {
@@ -388,5 +391,91 @@ export class AzureDevOpsClient {
     }
 
     return this.patch<AzureDevOpsPullRequest>(url, body);
+  }
+
+  /**
+   * Get all iterations for a pull request
+   * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-iterations/list
+   *
+   * @param project - Azure DevOps project name
+   * @param repo - Repository name
+   * @param prId - Pull request ID
+   * @returns List of PR iterations
+   */
+  async getPullRequestIterations(
+    project: string,
+    repo: string,
+    prId: number
+  ): Promise<{ value: AzureDevOpsPRIteration[] }> {
+    const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/iterations?api-version=7.1`;
+    return this.get<{ value: AzureDevOpsPRIteration[] }>(url);
+  }
+
+  /**
+   * Get changed files for a specific PR iteration
+   * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-iteration-changes/get
+   *
+   * @param project - Azure DevOps project name
+   * @param repo - Repository name
+   * @param prId - Pull request ID
+   * @param iterationId - Iteration ID
+   * @param options - Pagination options
+   * @returns Changed files for the iteration
+   */
+  async getPullRequestIterationChanges(
+    project: string,
+    repo: string,
+    prId: number,
+    iterationId: number,
+    options?: { top?: number; skip?: number }
+  ): Promise<AzureDevOpsPRIterationChanges> {
+    const params = new URLSearchParams();
+    params.append('api-version', '7.1');
+    if (options?.top) params.append('$top', options.top.toString());
+    if (options?.skip) params.append('$skip', options.skip.toString());
+
+    const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/iterations/${iterationId}/changes?${params.toString()}`;
+    return this.get<AzureDevOpsPRIterationChanges>(url);
+  }
+
+  /**
+   * Get all changed files for the latest PR iteration (handles pagination)
+   *
+   * @param project - Azure DevOps project name
+   * @param repo - Repository name
+   * @param prId - Pull request ID
+   * @returns All changed files across paginated results
+   */
+  async getAllPullRequestChanges(
+    project: string,
+    repo: string,
+    prId: number
+  ): Promise<AzureDevOpsPRChange[]> {
+    // Get latest iteration
+    const iterations = await this.getPullRequestIterations(project, repo, prId);
+    if (iterations.value.length === 0) return [];
+
+    const latestIteration = Math.max(...iterations.value.map((i) => i.id));
+
+    // Fetch all changes with pagination
+    const allChanges: AzureDevOpsPRChange[] = [];
+    let skip = 0;
+    const top = 100;
+
+    while (true) {
+      const response = await this.getPullRequestIterationChanges(
+        project,
+        repo,
+        prId,
+        latestIteration,
+        { top, skip }
+      );
+      allChanges.push(...response.changeEntries);
+
+      if (!response.nextSkip || response.changeEntries.length < top) break;
+      skip = response.nextSkip;
+    }
+
+    return allChanges;
   }
 }

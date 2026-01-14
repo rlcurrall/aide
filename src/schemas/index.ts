@@ -86,3 +86,5 @@ export {
 export { PrCreateArgsSchema, type PrCreateArgs } from './pr/pr-create.js';
 
 export { PrUpdateArgsSchema, type PrUpdateArgs } from './pr/pr-update.js';
+
+export { DiffArgsSchema, type DiffArgs } from './pr/diff.js';

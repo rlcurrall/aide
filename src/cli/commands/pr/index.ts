@@ -7,6 +7,7 @@
 import type { CommandModule } from 'yargs';
 import listCommand from './list.js';
 import viewCommand from './view.js';
+import diffCommand from './diff.js';
 import commentsCommand from './comments.js';
 import prCommentCommand from './pr-comment.js';
 import prCreateCommand from './pr-create.js';
@@ -20,6 +21,7 @@ export const prCommands: CommandModule = {
     yargs
       .command(listCommand)
       .command(viewCommand)
+      .command(diffCommand)
       .command(prCreateCommand)
       .command(prUpdateCommand)
       .command(commentsCommand)
@@ -28,6 +30,9 @@ export const prCommands: CommandModule = {
       .demandCommand(1, 'Please specify a pr command')
       .example('$0 pr view --pr 123', 'View PR details')
       .example('$0 pr view', 'View PR for current branch')
+      .example('$0 pr diff --pr 123', 'View PR diff')
+      .example('$0 pr diff --stat', 'View diff summary for current branch PR')
+      .example('$0 pr diff --files', 'List changed files in PR')
       .example('$0 pr list --status active', 'List active PRs')
       .example('$0 pr list --created-by "your.email"', 'List your PRs')
       .example('$0 pr create --title "My PR" --base main', 'Create a PR')

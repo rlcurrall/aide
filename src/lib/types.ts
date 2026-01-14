@@ -309,3 +309,67 @@ export interface GitRemoteInfo {
   project: string;
   repo: string;
 }
+
+// ============================================================================
+// Azure DevOps PR Iteration/Diff Types
+// ============================================================================
+
+/**
+ * Pull Request Iteration - represents a push to the source branch
+ * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-iterations/list
+ */
+export interface AzureDevOpsPRIteration {
+  id: number;
+  description?: string;
+  author?: AzureDevOpsIdentity;
+  createdDate?: string;
+  updatedDate?: string;
+  sourceRefCommit?: { commitId: string };
+  targetRefCommit?: { commitId: string };
+  commonRefCommit?: { commitId: string };
+}
+
+/**
+ * Response from PR Iteration Changes API
+ * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-iteration-changes/get
+ */
+export interface AzureDevOpsPRIterationChanges {
+  changeEntries: AzureDevOpsPRChange[];
+  nextSkip?: number;
+  nextTop?: number;
+}
+
+/**
+ * A single file change in a PR iteration
+ * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-iteration-changes/get
+ */
+export interface AzureDevOpsPRChange {
+  changeId: number;
+  changeTrackingId: number;
+  changeType: AzureDevOpsChangeType;
+  item?: {
+    objectId?: string;
+    originalObjectId?: string;
+    path?: string;
+  };
+  originalPath?: string;
+  sourceServerItem?: string;
+}
+
+/**
+ * Types of changes that can occur to a file in version control
+ * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/gitchange
+ */
+export type AzureDevOpsChangeType =
+  | 'add'
+  | 'edit'
+  | 'delete'
+  | 'rename'
+  | 'branch'
+  | 'merge'
+  | 'lock'
+  | 'rollback'
+  | 'sourceRename'
+  | 'targetRename'
+  | 'none'
+  | 'all';
