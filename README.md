@@ -82,7 +82,7 @@ aide pr --help
 
 # Search Jira tickets
 aide jira search "assignee = currentUser()"
-aide jira ticket PROJ-123
+aide jira view PROJ-123
 
 # List pull requests
 aide pr list --status active
@@ -107,13 +107,13 @@ aide <service> <action> [options]
 
 ### Jira Commands
 
-| Command                          | Description              |
-| -------------------------------- | ------------------------ |
-| `aide jira search <jql>`         | Search tickets using JQL |
-| `aide jira ticket <key>`         | Get ticket details       |
-| `aide jira comment <key> <text>` | Add comment to ticket    |
-| `aide jira comments <key>`       | Get ticket comments      |
-| `aide jira desc <key> <text>`    | Set ticket description   |
+| Command                                       | Description              |
+| --------------------------------------------- | ------------------------ |
+| `aide jira search <jql>`                      | Search tickets using JQL |
+| `aide jira view <key>`                        | Get ticket details       |
+| `aide jira comment <key> <text>`              | Add comment to ticket    |
+| `aide jira comments <key>`                    | Get ticket comments      |
+| `aide jira update <key> --description <text>` | Update ticket fields     |
 
 ### Pull Request Commands
 
@@ -139,7 +139,7 @@ Note: `--pr` flag is optional - aide auto-detects from current branch if omitted
 aide jira search "assignee = currentUser()"
 
 # Get ticket details
-aide jira ticket PROJ-123
+aide jira view PROJ-123
 
 # Add a comment
 aide jira comment PROJ-123 "Work completed"
@@ -148,7 +148,7 @@ aide jira comment PROJ-123 "Work completed"
 aide jira comments PROJ-123 --latest 5
 
 # Update description
-aide jira desc PROJ-123 "New description text"
+aide jira update PROJ-123 --description "New description text"
 ```
 
 ### Pull Requests

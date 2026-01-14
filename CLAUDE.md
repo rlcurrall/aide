@@ -33,7 +33,7 @@ bun install
 # Using the dev script
 bun run dev --help
 bun run dev jira search "assignee = currentUser()"
-bun run dev jira ticket PROJ-123
+bun run dev jira view PROJ-123
 bun run dev pr list --status active
 bun run dev pr comments --pr 24094 --latest 5
 

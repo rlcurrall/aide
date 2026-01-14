@@ -15,31 +15,35 @@ The aide CLI provides AI coding agents with tools to interact with Jira and Azur
 
 ### Jira Commands
 
-| Command                        | Description                   |
-| ------------------------------ | ----------------------------- |
-| `aide jira search "JQL"`       | Search tickets with JQL query |
-| `aide jira ticket KEY`         | Get ticket details            |
-| `aide jira comment KEY "text"` | Add comment to ticket         |
-| `aide jira comments KEY`       | Get ticket comments           |
-| `aide jira desc KEY "text"`    | Update ticket description     |
+| Command                                       | Description                   |
+| --------------------------------------------- | ----------------------------- |
+| `aide jira search "JQL"`                      | Search tickets with JQL query |
+| `aide jira view KEY`                          | Get ticket details            |
+| `aide jira create -p PROJ -t Type -s "Title"` | Create a new ticket           |
+| `aide jira update KEY --field value`          | Update ticket fields          |
+| `aide jira transition KEY "Status"`           | Change workflow status        |
+| `aide jira comment KEY "text"`                | Add comment to ticket         |
+| `aide jira comments KEY`                      | Get ticket comments           |
+| `aide jira attach KEY --list`                 | Manage attachments            |
 
 ### Pull Request Commands
 
-| Command                            | Description        |
-| ---------------------------------- | ------------------ |
-| `aide pr list`                     | List pull requests |
-| `aide pr view [--pr ID]`          | View PR details    |
-| `aide pr create`                  | Create a PR        |
-| `aide pr update [--pr ID]`        | Update a PR        |
-| `aide pr comments [--pr ID]`      | Get PR comments    |
-| `aide pr comment "msg" [--pr ID]` | Post PR comment    |
-| `aide pr reply <thread> "msg"`    | Reply to thread    |
+| Command                            | Description           |
+| ---------------------------------- | --------------------- |
+| `aide pr list`                     | List pull requests    |
+| `aide pr view [--pr ID]`           | View PR details       |
+| `aide pr diff [--pr ID]`           | View PR diff/changes  |
+| `aide pr create`                   | Create a PR           |
+| `aide pr update [--pr ID]`         | Update a PR           |
+| `aide pr comments [--pr ID]`       | Get PR comments       |
+| `aide pr comment "msg" [--pr ID]`  | Post PR comment       |
+| `aide pr reply <thread> "msg"`     | Reply to thread       |
 
 ## Ticket-Driven Development Workflow
 
 ### Starting Work on a Ticket
 
-1. **Load ticket context**: Use `aide jira ticket KEY` to fetch full ticket details
+1. **Load ticket context**: Use `aide jira view KEY` to fetch full ticket details
 2. **Understand requirements**: Review description, acceptance criteria, and comments
 3. **Check for blockers**: Look for linked issues or dependencies mentioned
 4. **Review recent comments**: Use `aide jira comments KEY --latest 5` to see recent discussion
@@ -296,7 +300,7 @@ aide pr comments --pr 24094 --project MyProject --repo MyRepo
 
 ```bash
 # Get full ticket context
-aide jira ticket PROJ-123
+aide jira view PROJ-123
 
 # Check recent discussion
 aide jira comments PROJ-123 --latest 5
@@ -334,7 +338,7 @@ aide pr comments --pr 24094 --thread-status active
 
 ```bash
 # Get ticket for context
-aide jira ticket PROJ-123
+aide jira view PROJ-123
 
 # Get PR comments for feedback
 aide pr comments --pr 24094 --format json
