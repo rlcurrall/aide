@@ -19,9 +19,9 @@ The release script (`src/scripts/release.ts`):
 
 ## Usage
 
-| Command | Description |
-|---------|-------------|
-| `bun release` | Patch bump (0.0.1 -> 0.0.2) |
+| Command               | Description                 |
+| --------------------- | --------------------------- |
+| `bun release`         | Patch bump (0.0.1 -> 0.0.2) |
 | `bun release --minor` | Minor bump (0.0.1 -> 0.1.0) |
 | `bun release --major` | Major bump (0.0.1 -> 1.0.0) |
 

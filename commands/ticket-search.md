@@ -21,11 +21,11 @@ aide jira search $ARGUMENTS
 
 ## Flags
 
-| Flag | Description |
-|------|-------------|
+| Flag         | Description                                         |
+| ------------ | --------------------------------------------------- |
 | `maxResults` | Maximum results to return (positional, default: 50) |
-| `--limit` | Alias for maxResults |
-| `--format` | Output format: text, json, markdown |
+| `--limit`    | Alias for maxResults                                |
+| `--format`   | Output format: text, json, markdown                 |
 
 ## Output
 

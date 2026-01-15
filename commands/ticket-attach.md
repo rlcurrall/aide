@@ -22,20 +22,21 @@ aide jira attach $ARGUMENTS
 
 ## Flags
 
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--list` | `-l` | List all attachments on the ticket |
-| `--upload` | `-u` | Upload file(s) to ticket (can be repeated) |
-| `--download` | `-d` | Download attachment by ID or filename |
-| `--output` | `-o` | Output directory for downloads |
-| `--delete` | | Delete attachment by ID or filename |
-| `--format` | | Output format: text, json, markdown |
+| Flag         | Short | Description                                |
+| ------------ | ----- | ------------------------------------------ |
+| `--list`     | `-l`  | List all attachments on the ticket         |
+| `--upload`   | `-u`  | Upload file(s) to ticket (can be repeated) |
+| `--download` | `-d`  | Download attachment by ID or filename      |
+| `--output`   | `-o`  | Output directory for downloads             |
+| `--delete`   |       | Delete attachment by ID or filename        |
+| `--format`   |       | Output format: text, json, markdown        |
 
 **Note:** Only one operation (`--list`, `--upload`, `--download`, `--delete`) can be performed at a time.
 
 ## Output
 
 **List mode:** Shows attachment details including:
+
 - Filename
 - Size
 - MIME type

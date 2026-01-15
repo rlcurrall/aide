@@ -42,7 +42,10 @@ async function downloadLatestRelease(outputPath: string): Promise<void> {
   if (isWindows) {
     const result = spawnSync(
       'powershell',
-      ['-Command', `$ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -Uri "${url}" -OutFile "${outputPath}"`],
+      [
+        '-Command',
+        `$ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -Uri "${url}" -OutFile "${outputPath}"`,
+      ],
       { stdio: 'inherit' }
     );
     if (result.status !== 0) {

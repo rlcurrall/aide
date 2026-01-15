@@ -20,21 +20,23 @@ aide jira transition $ARGUMENTS
 
 ## Flags
 
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--list` | `-l` | List available transitions for the ticket |
-| `--comment` | `-c` | Add comment with the transition |
-| `--resolution` | `-r` | Set resolution (for Done/Resolved transitions) |
-| `--format` | | Output format: text, json, markdown |
+| Flag           | Short | Description                                    |
+| -------------- | ----- | ---------------------------------------------- |
+| `--list`       | `-l`  | List available transitions for the ticket      |
+| `--comment`    | `-c`  | Add comment with the transition                |
+| `--resolution` | `-r`  | Set resolution (for Done/Resolved transitions) |
+| `--format`     |       | Output format: text, json, markdown            |
 
 ## Output
 
 When transitioning:
+
 1. Confirmation of successful transition
 2. New status name
 3. URL to view the ticket
 
 When listing (`--list`):
+
 1. Available transition names
 2. Target status for each transition
 
@@ -66,6 +68,7 @@ aide jira transition PROJ-123 "Code Review"
 ## Common Status Names
 
 Status names vary by project workflow. Common ones include:
+
 - `To Do`, `Open`, `Backlog`
 - `In Progress`, `In Development`
 - `Code Review`, `In Review`

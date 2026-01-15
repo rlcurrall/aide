@@ -27,13 +27,13 @@ aide pr create $ARGUMENTS
 
 Flags follow GitHub CLI (`gh`) conventions with Azure CLI (`az`) compatibility aliases.
 
-| Flag (gh-style)                  | Short | Aliases (az-style)                        | Description                                      |
-| -------------------------------- | ----- | ----------------------------------------- | ------------------------------------------------ |
-| `--title`                        | `-t`  | -                                         | PR title (required)                              |
-| `--body`                         | `-b`  | `--description`                           | PR description/body                              |
-| `--head`                         | `-H`  | `--source`, `-s`, `--source-branch`       | Source/head branch (defaults to current branch)  |
-| `--base`                         | `-B`  | `--target`, `--target-branch`             | Target/base branch (defaults to main)            |
-| `--draft`                        | `-d`  | -                                         | Create as draft PR                               |
+| Flag (gh-style) | Short | Aliases (az-style)                  | Description                                     |
+| --------------- | ----- | ----------------------------------- | ----------------------------------------------- |
+| `--title`       | `-t`  | -                                   | PR title (required)                             |
+| `--body`        | `-b`  | `--description`                     | PR description/body                             |
+| `--head`        | `-H`  | `--source`, `-s`, `--source-branch` | Source/head branch (defaults to current branch) |
+| `--base`        | `-B`  | `--target`, `--target-branch`       | Target/base branch (defaults to main)           |
+| `--draft`       | `-d`  | -                                   | Create as draft PR                              |
 
 ## Output
 

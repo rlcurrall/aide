@@ -20,8 +20,8 @@ aide jira view $ARGUMENTS
 
 ## Flags
 
-| Flag | Description |
-|------|-------------|
+| Flag       | Description                         |
+| ---------- | ----------------------------------- |
 | `--format` | Output format: text, json, markdown |
 
 ## Output

@@ -21,15 +21,15 @@ aide pr list $ARGUMENTS
 
 ## Flags
 
-| Flag | Description |
-|------|-------------|
-| `--status` | Filter by status: active, completed, abandoned, all (default: active) |
-| `--limit` | Maximum number of PRs to return (default: 20) |
-| `--created-by` | Filter by creator email or display name |
-| `--author` | Alias for --created-by |
-| `--project` | Project name (auto-discovered from git remote) |
-| `--repo` | Repository name (auto-discovered from git remote) |
-| `--format` | Output format: text, json, markdown |
+| Flag           | Description                                                           |
+| -------------- | --------------------------------------------------------------------- |
+| `--status`     | Filter by status: active, completed, abandoned, all (default: active) |
+| `--limit`      | Maximum number of PRs to return (default: 20)                         |
+| `--created-by` | Filter by creator email or display name                               |
+| `--author`     | Alias for --created-by                                                |
+| `--project`    | Project name (auto-discovered from git remote)                        |
+| `--repo`       | Repository name (auto-discovered from git remote)                     |
+| `--format`     | Output format: text, json, markdown                                   |
 
 ## Output
 

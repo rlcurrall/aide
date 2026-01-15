@@ -20,10 +20,10 @@ aide jira comment $ARGUMENTS
 
 ## Flags
 
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--file` | `-f` | Read comment from markdown file |
-| `--format` | | Output format: text, json, markdown |
+| Flag       | Short | Description                         |
+| ---------- | ----- | ----------------------------------- |
+| `--file`   | `-f`  | Read comment from markdown file     |
+| `--format` |       | Output format: text, json, markdown |
 
 ## Output
 

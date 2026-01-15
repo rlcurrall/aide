@@ -21,14 +21,14 @@ aide jira comments $ARGUMENTS
 
 ## Flags
 
-| Flag | Description |
-|------|-------------|
-| `--author` | Filter comments by author name/email |
-| `--since` | Show comments since date (YYYY-MM-DD) |
-| `--latest` | Show only N most recent comments |
+| Flag            | Description                                           |
+| --------------- | ----------------------------------------------------- |
+| `--author`      | Filter comments by author name/email                  |
+| `--since`       | Show comments since date (YYYY-MM-DD)                 |
+| `--latest`      | Show only N most recent comments                      |
 | `--max-results` | Maximum comments to fetch per API call (default: 100) |
-| `--all` | Fetch all comments (may require multiple API calls) |
-| `--format` | Output format: text, json, markdown |
+| `--all`         | Fetch all comments (may require multiple API calls)   |
+| `--format`      | Output format: text, json, markdown                   |
 
 ## Output
 
