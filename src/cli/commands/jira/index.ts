@@ -13,6 +13,8 @@ import updateCommand from './update.js';
 import transitionCommand from './transition.js';
 import commentCommand from './comment.js';
 import commentsCommand from './comments.js';
+import deleteCommentCommand from './delete-comment.js';
+import editCommentCommand from './edit-comment.js';
 import attachCommand from './attach.js';
 import fieldsCommand from './fields.js';
 
@@ -29,6 +31,8 @@ export const jiraCommands: CommandModule = {
       .command(transitionCommand)
       .command(commentCommand)
       .command(commentsCommand)
+      .command(deleteCommentCommand)
+      .command(editCommentCommand)
       .command(attachCommand)
       .command(fieldsCommand)
       .demandCommand(1, 'Please specify a jira command')
@@ -39,6 +43,11 @@ export const jiraCommands: CommandModule = {
       .example('$0 jira transition PROJ-123 "In Progress"', 'Change status')
       .example('$0 jira comment PROJ-123 "Comment text"', 'Add a comment')
       .example('$0 jira comments PROJ-123 --latest 5', 'Get recent comments')
+      .example('$0 jira delete-comment PROJ-123 10001', 'Delete a comment')
+      .example(
+        '$0 jira edit-comment PROJ-123 10001 "Updated"',
+        'Edit a comment'
+      )
       .example('$0 jira attach PROJ-123 --list', 'List attachments')
       .example(
         '$0 jira fields VNT -t Task --show-values',

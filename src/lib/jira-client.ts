@@ -534,6 +534,65 @@ export class JiraClient {
   }
 
   /**
+   * Update an existing comment on an issue
+   */
+  async updateComment(
+    issueKey: string,
+    commentId: string,
+    adfBody: AdfDocument
+  ): Promise<JiraAddCommentResponse> {
+    const url = `${this.config.url}/rest/api/3/issue/${issueKey}/comment/${commentId}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'PUT',
+        headers: this.getAuthHeaders(),
+        body: JSON.stringify({
+          body: adfBody,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
+
+      return (await response.json()) as JiraAddCommentResponse;
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new Error(`Failed to update comment: ${error.message}`);
+      }
+      throw new Error('Failed to update comment: Unknown error');
+    }
+  }
+
+  /**
+   * Delete a comment from an issue
+   */
+  async deleteComment(issueKey: string, commentId: string): Promise<void> {
+    const url = `${this.config.url}/rest/api/3/issue/${issueKey}/comment/${commentId}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'DELETE',
+        headers: this.getAuthHeaders(),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
+
+      // DELETE returns 204 No Content on success
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new Error(`Failed to delete comment: ${error.message}`);
+      }
+      throw new Error('Failed to delete comment: Unknown error');
+    }
+  }
+
+  /**
    * Delete an attachment by ID
    */
   async deleteAttachment(attachmentId: string): Promise<void> {

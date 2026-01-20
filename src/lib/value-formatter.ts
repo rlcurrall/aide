@@ -226,7 +226,9 @@ function formatArrayValue(
   // We detect this by checking what properties the allowedValues have
   const formatStyle = detectAllowedValueFormat(allowedValues);
 
-  const formattedItems: Array<{ name: string } | { id: string } | { value: string }> = [];
+  const formattedItems: Array<
+    { name: string } | { id: string } | { value: string }
+  > = [];
   const descriptions: string[] = [];
 
   for (const item of items) {
