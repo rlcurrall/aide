@@ -5,18 +5,20 @@
  */
 
 import {
-  extractBranchName,
-  fetchMissingBranches,
   findPRByCurrentBranch,
-  getGitDiff,
   getMissingRepoErrorMessage,
-  isGitRepository,
-  parseGitStat,
   parsePRUrl,
-  remoteRefExists,
   resolveRepoContext,
   validatePRId,
 } from '@lib/ado-utils.js';
+import {
+  extractBranchName,
+  fetchMissingBranches,
+  getGitDiff,
+  isGitRepository,
+  parseGitStat,
+  remoteRefExists,
+} from '@lib/git-utils.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import { loadAzureDevOpsConfig } from '@lib/config.js';
 import { handleCommandError } from '@lib/errors.js';

@@ -6,13 +6,13 @@
 
 import {
   buildPrUrl,
-  ensureRefPrefix,
   findPRByCurrentBranch,
   getMissingRepoErrorMessage,
   parsePRUrl,
   resolveRepoContext,
   validatePRId,
 } from '@lib/ado-utils.js';
+import { ensureRefPrefix } from '@lib/git-utils.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import { loadAzureDevOpsConfig } from '@lib/config.js';
 import { handleCommandError } from '@lib/errors.js';

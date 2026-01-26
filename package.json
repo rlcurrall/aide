@@ -16,6 +16,7 @@
     "build:mac": "bun build --compile --target=bun-darwin-arm64 src/cli/index.ts --outfile dist/aide-mac",
     "build:all": "bun run build:win && bun run build:linux && bun run build:mac",
     "release": "bun run src/scripts/release.ts",
+    "test": "bun test",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
@@ -36,6 +37,7 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "arkregex": "^0.0.5",
     "marked": "^16.3.0",
     "valibot": "^1.2.0",
     "yargs": "^18.0.0"

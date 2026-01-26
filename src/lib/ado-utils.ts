@@ -1,29 +1,21 @@
+/**
+ * Azure DevOps Utilities
+ *
+ * This module provides Azure DevOps-specific helper functions for working with
+ * ADO repositories, pull requests, and URLs.
+ *
+ * For generic git utilities, see git-utils.ts
+ */
+
 import type { GitRemoteInfo, AzureDevOpsPullRequest } from './types.js';
-import { spawnSync } from 'bun';
 import { AzureDevOpsClient } from './azure-devops-client.js';
 import { loadAzureDevOpsConfig } from './config.js';
+import { regex } from 'arkregex';
+import { getCurrentBranch, getGitRemoteUrl } from './git-utils.js';
 
 // ============================================================================
-// Git Ref Helpers
+// Azure DevOps URL Helpers
 // ============================================================================
-
-/**
- * Extract branch name from ref (e.g., "refs/heads/main" -> "main")
- */
-export function extractBranchName(refName: string | undefined): string {
-  if (!refName) return 'unknown';
-  return refName.replace(/^refs\/heads\//, '');
-}
-
-/**
- * Ensure branch name has refs/heads/ prefix
- */
-export function ensureRefPrefix(branch: string): string {
-  if (branch.startsWith('refs/heads/')) {
-    return branch;
-  }
-  return `refs/heads/${branch}`;
-}
 
 /**
  * Build the PR URL for Azure DevOps
@@ -47,48 +39,30 @@ export function buildPrUrl(
  */
 export function parseGitRemote(remoteUrl: string): GitRemoteInfo | null {
   // SSH format: git@ssh.dev.azure.com:v3/acme/MyProject/MyRepo
-  const sshMatch = remoteUrl.match(
-    /git@ssh\.dev\.azure\.com:v3\/([^/]+)\/([^/]+)\/(.+)/
-  );
+  const sshMatch = regex(
+    '^git@ssh\\.dev\\.azure\\.com:v3/(?<org>[^/]+)/(?<project>[^/]+)/(?<repo>.+)$'
+  ).exec(remoteUrl)?.groups;
   if (sshMatch) {
     return {
-      org: sshMatch[1]!,
-      project: sshMatch[2]!,
-      repo: sshMatch[3]!.replace(/\.git$/, ''),
+      org: sshMatch.org,
+      project: sshMatch.project,
+      repo: sshMatch.repo.replace(/\.git$/, ''),
     };
   }
 
-  // HTTPS format: https://dev.azure.com/acme/MyProject/_git/MyRepo
-  const httpsMatch = remoteUrl.match(
-    /https:\/\/dev\.azure\.com\/([^/]+)\/([^/]+)\/_git\/(.+)/
-  );
+  // HTTPS format: https://company@dev.azure.com/acme/MyProject/_git/MyRepo
+  const httpsMatch = regex(
+    '^https://\\w+@dev\\.azure\\.com/(?<org>[^/]+)/(?<project>[^/]+)/_git/(?<repo>.+)$'
+  ).exec(remoteUrl)?.groups;
   if (httpsMatch) {
     return {
-      org: httpsMatch[1]!,
-      project: httpsMatch[2]!,
-      repo: httpsMatch[3]!.replace(/\.git$/, ''),
+      org: httpsMatch.org,
+      project: httpsMatch.project,
+      repo: httpsMatch.repo.replace(/\.git$/, ''),
     };
   }
 
   return null;
-}
-
-/**
- * Get git remote URL from current directory
- * Returns null if not in a git repository or no remote configured
- */
-export function getGitRemoteUrl(): string | null {
-  try {
-    const result = spawnSync(['git', 'config', '--get', 'remote.origin.url']);
-
-    if (result.exitCode === 0) {
-      return result.stdout.toString().trim();
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -114,19 +88,19 @@ export function parsePRUrl(url: string): {
   repo: string;
   prId: number;
 } | null {
-  const match = url.match(
-    /https:\/\/dev\.azure\.com\/([^/]+)\/([^/]+)\/_git\/([^/]+)\/pullrequest\/(\d+)/
-  );
+  const match = regex(
+    '^https://dev\\.azure\\.com/(?<org>[^/]+)/(?<project>[^/]+)/_git/(?<repo>[^/]+)/pullrequest/(?<prId>\\d+)$'
+  ).exec(url)?.groups;
 
   if (!match) {
     return null;
   }
 
   return {
-    org: match[1]!,
-    project: match[2]!,
-    repo: match[3]!,
-    prId: parseInt(match[4]!, 10),
+    org: match.org,
+    project: match.project,
+    repo: match.repo,
+    prId: parseInt(match.prId, 10),
   };
 }
 
@@ -153,22 +127,9 @@ export function validatePRId(prId: string | number): {
   };
 }
 
-/**
- * Get the current git branch name
- * Returns null if not in a git repository, in detached HEAD state, or on error
- */
-export function getCurrentBranch(): string | null {
-  try {
-    const result = spawnSync(['git', 'rev-parse', '--abbrev-ref', 'HEAD']);
-    if (result.exitCode === 0) {
-      const branch = result.stdout.toString().trim();
-      return branch === 'HEAD' ? null : branch;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
+// ============================================================================
+// Repository Context Helpers
+// ============================================================================
 
 /**
  * Result of findPRByCurrentBranch
@@ -360,261 +321,4 @@ export async function findPRByCurrentBranch(
       error: `Failed to query PRs: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-}
-
-// ============================================================================
-// Git Diff Helpers
-// ============================================================================
-
-/**
- * Check if current directory is inside a git repository
- * Returns true if inside a git work tree, false otherwise
- */
-export function isGitRepository(): boolean {
-  try {
-    const result = spawnSync(['git', 'rev-parse', '--is-inside-work-tree']);
-    return result.exitCode === 0;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Check if a remote ref exists locally
- * Returns true if the ref exists, false if not found or on error
- */
-export function remoteRefExists(ref: string): boolean {
-  try {
-    const result = spawnSync(['git', 'rev-parse', '--verify', ref]);
-    return result.exitCode === 0;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Result of a git fetch operation
- */
-export interface GitFetchResult {
-  success: boolean;
-  error?: string;
-}
-
-/**
- * Fetch a branch from the remote
- * @param branch - Branch name (without refs/heads/ prefix)
- * @param remote - Remote name (default: origin)
- */
-export function fetchBranch(branch: string, remote = 'origin'): GitFetchResult {
-  try {
-    const result = spawnSync(['git', 'fetch', remote, branch]);
-    if (result.exitCode === 0) {
-      return { success: true };
-    }
-    return { success: false, error: result.stderr.toString().trim() };
-  } catch (err) {
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-/**
- * Result of fetching missing branches
- */
-export interface FetchMissingBranchesResult {
-  /** Whether both branches are now available locally */
-  available: boolean;
-  /** Branches that were fetched */
-  fetched: string[];
-  /** Branch that is missing (if available is false) */
-  missingBranch?: string;
-  /** Error message if fetch failed */
-  error?: string;
-}
-
-/**
- * Fetch missing source and target branches from remote if not available locally
- * @param sourceBranch - Source branch name (without refs/heads/ prefix)
- * @param targetBranch - Target branch name (without refs/heads/ prefix)
- * @param options - Whether to actually fetch missing branches (if false, just checks availability)
- */
-export function fetchMissingBranches(
-  sourceBranch: string,
-  targetBranch: string,
-  options: { fetch: boolean } = { fetch: true }
-): FetchMissingBranchesResult {
-  const sourceRef = `origin/${sourceBranch}`;
-  const targetRef = `origin/${targetBranch}`;
-  const fetched: string[] = [];
-
-  // Check/fetch source branch
-  if (!remoteRefExists(sourceRef)) {
-    if (options.fetch) {
-      const result = fetchBranch(sourceBranch);
-      if (result.success) {
-        fetched.push(sourceBranch);
-      } else {
-        return {
-          available: false,
-          fetched,
-          missingBranch: sourceBranch,
-          error: result.error,
-        };
-      }
-    } else {
-      return {
-        available: false,
-        fetched,
-        missingBranch: sourceBranch,
-      };
-    }
-  }
-
-  // Check/fetch target branch
-  if (!remoteRefExists(targetRef)) {
-    if (options.fetch) {
-      const result = fetchBranch(targetBranch);
-      if (result.success) {
-        fetched.push(targetBranch);
-      } else {
-        return {
-          available: false,
-          fetched,
-          missingBranch: targetBranch,
-          error: result.error,
-        };
-      }
-    } else {
-      return {
-        available: false,
-        fetched,
-        missingBranch: targetBranch,
-      };
-    }
-  }
-
-  return { available: true, fetched };
-}
-
-/**
- * Options for git diff
- */
-export interface GitDiffOptions {
-  stat?: boolean;
-  nameOnly?: boolean;
-  file?: string;
-}
-
-/**
- * Result of a git diff operation
- */
-export interface GitDiffResult {
-  success: boolean;
-  output?: string;
-  error?: string;
-}
-
-/**
- * Get git diff output between two refs
- */
-export function getGitDiff(
-  baseRef: string,
-  headRef: string,
-  options?: GitDiffOptions
-): GitDiffResult {
-  try {
-    const args = ['diff', `${baseRef}...${headRef}`];
-
-    if (options?.stat) args.push('--stat');
-    if (options?.nameOnly) args.push('--name-only');
-    if (options?.file) args.push('--', options.file);
-
-    const result = spawnSync(['git', ...args]);
-
-    if (result.exitCode === 0) {
-      return { success: true, output: result.stdout.toString() };
-    }
-    return { success: false, error: result.stderr.toString() };
-  } catch (err) {
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-/**
- * Parsed file from git diff --stat
- */
-export interface GitStatFile {
-  path: string;
-  additions: number;
-  deletions: number;
-}
-
-/**
- * Summary of git diff --stat
- */
-export interface GitStatSummary {
-  filesChanged: number;
-  additions: number;
-  deletions: number;
-}
-
-/**
- * Result of parsing git diff --stat output
- */
-export interface GitStatResult {
-  files: GitStatFile[];
-  summary: GitStatSummary;
-}
-
-/**
- * Parse git diff --stat output into structured data
- *
- * Example input:
- *  src/foo.ts | 15 ++++++++-------
- *  src/bar.ts |  3 +++
- *  2 files changed, 11 insertions(+), 7 deletions(-)
- */
-export function parseGitStat(output: string): GitStatResult {
-  const lines = output.trim().split('\n');
-  const files: GitStatFile[] = [];
-  let summary: GitStatSummary = { filesChanged: 0, additions: 0, deletions: 0 };
-
-  for (const line of lines) {
-    // Match file line: " path | count ++++----"
-    const fileMatch = line.match(/^\s*(.+?)\s*\|\s*(\d+)\s*([+-]*)/);
-    if (fileMatch && fileMatch[1] && fileMatch[2]) {
-      const path = fileMatch[1].trim();
-      const changeIndicators = fileMatch[3] || '';
-      const additions = (changeIndicators.match(/\+/g) || []).length;
-      const deletions = (changeIndicators.match(/-/g) || []).length;
-      files.push({ path, additions, deletions });
-      continue;
-    }
-
-    // Match binary file line: " path | Bin 0 -> 1234 bytes"
-    const binaryMatch = line.match(/^\s*(.+?)\s*\|\s*Bin/);
-    if (binaryMatch && binaryMatch[1]) {
-      files.push({ path: binaryMatch[1].trim(), additions: 0, deletions: 0 });
-      continue;
-    }
-
-    // Match summary line: "N files changed, X insertions(+), Y deletions(-)"
-    const summaryMatch = line.match(
-      /(\d+)\s+files?\s+changed(?:,\s*(\d+)\s+insertions?\(\+\))?(?:,\s*(\d+)\s+deletions?\(-\))?/
-    );
-    if (summaryMatch && summaryMatch[1]) {
-      summary = {
-        filesChanged: parseInt(summaryMatch[1], 10),
-        additions: summaryMatch[2] ? parseInt(summaryMatch[2], 10) : 0,
-        deletions: summaryMatch[3] ? parseInt(summaryMatch[3], 10) : 0,
-      };
-    }
-  }
-
-  return { files, summary };
 }

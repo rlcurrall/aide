@@ -7,11 +7,10 @@
 import {
   MissingRepoContextError,
   buildPrUrl,
-  ensureRefPrefix,
-  getCurrentBranch,
   getMissingRepoErrorMessage,
   resolveRepoContext,
 } from '@lib/ado-utils.js';
+import { ensureRefPrefix, getCurrentBranch } from '@lib/git-utils.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import { loadAzureDevOpsConfig } from '@lib/config.js';
 import { handleCommandError } from '@lib/errors.js';
