@@ -311,7 +311,7 @@ export interface AzureDevOpsPRComment {
   id: number;
   parentCommentId: number;
   author: AzureDevOpsIdentity;
-  content: string;
+  content: string | null;
   publishedDate: string;
   lastUpdatedDate: string;
   lastContentUpdatedDate: string;
@@ -422,7 +422,7 @@ export interface AdoFlattenedComment {
       uniqueName?: string;
       id: string;
     };
-    content: string;
+    content: string | null;
     publishedDate: string;
     lastUpdatedDate: string;
     commentType: string;

@@ -88,9 +88,17 @@ export function parsePRUrl(url: string): {
   repo: string;
   prId: number;
 } | null {
+  let normalized = url;
+  try {
+    const parsed = new URL(url);
+    normalized = `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    normalized = url.split(/[?#]/)[0] ?? url;
+  }
+
   const match = regex(
     '^https://dev\\.azure\\.com/(?<org>[^/]+)/(?<project>[^/]+)/_git/(?<repo>[^/]+)/pullrequest/(?<prId>\\d+)$'
-  ).exec(url)?.groups;
+  ).exec(normalized)?.groups;
 
   if (!match) {
     return null;

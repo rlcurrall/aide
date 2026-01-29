@@ -66,8 +66,8 @@ function filterComments(
   if (filter.author) {
     const authorLower = filter.author.toLowerCase();
     filtered = filtered.filter((c) => {
-      const displayName = c.comment.author.displayName.toLowerCase();
-      const uniqueName = c.comment.author.uniqueName?.toLowerCase() || '';
+      const displayName = c.comment.author?.displayName?.toLowerCase() || '';
+      const uniqueName = c.comment.author?.uniqueName?.toLowerCase() || '';
       return (
         displayName.includes(authorLower) || uniqueName.includes(authorLower)
       );
@@ -179,6 +179,14 @@ function getLatestDate(thread: GroupedThread): number {
   return latest;
 }
 
+function getCommentContent(comment: AdoFlattenedComment['comment']): string {
+  return comment.content ?? '[deleted comment]';
+}
+
+function getAuthorName(comment: AdoFlattenedComment['comment']): string {
+  return comment.author?.displayName?.trim() || 'Unknown';
+}
+
 /**
  * Format comments output based on format type
  */
@@ -228,7 +236,7 @@ function formatMarkdown(
     const firstComment = thread.rootComment || thread.replies[0];
     if (!firstComment) continue;
 
-    const authorName = firstComment.comment.author.displayName;
+    const authorName = getAuthorName(firstComment.comment);
     const rootDate = new Date(firstComment.comment.publishedDate)
       .toISOString()
       .split('T')[0];
@@ -238,7 +246,7 @@ function formatMarkdown(
 
     // Root comment content
     if (thread.rootComment) {
-      output += `${thread.rootComment.comment.content}\n\n`;
+      output += `${getCommentContent(thread.rootComment.comment)}\n\n`;
     }
 
     // Replies
@@ -246,9 +254,9 @@ function formatMarkdown(
       const replyDate = new Date(reply.comment.publishedDate)
         .toISOString()
         .split('T')[0];
-      output += `### Reply - ${reply.comment.author.displayName}\n`;
+      output += `### Reply - ${getAuthorName(reply.comment)}\n`;
       output += `**Date:** ${replyDate}\n\n`;
-      output += `${reply.comment.content}\n\n`;
+      output += `${getCommentContent(reply.comment)}\n\n`;
     }
 
     output += `---\n\n`;
@@ -277,7 +285,7 @@ function formatText(
     const firstComment = thread.rootComment || thread.replies[0];
     if (!firstComment) continue;
 
-    const authorName = firstComment.comment.author.displayName;
+    const authorName = getAuthorName(firstComment.comment);
     const rootDate = new Date(
       firstComment.comment.publishedDate
     ).toLocaleString();
@@ -287,15 +295,15 @@ function formatText(
 
     // Root comment content
     if (thread.rootComment) {
-      output += `${thread.rootComment.comment.content}\n\n`;
+      output += `${getCommentContent(thread.rootComment.comment)}\n\n`;
     }
 
     // Replies (indented)
     for (const reply of thread.replies) {
       const replyDate = new Date(reply.comment.publishedDate).toLocaleString();
-      output += `    Reply - ${reply.comment.author.displayName} (${replyDate})\n`;
+      output += `    Reply - ${getAuthorName(reply.comment)} (${replyDate})\n`;
       // Indent reply content
-      const indentedContent = reply.comment.content
+      const indentedContent = getCommentContent(reply.comment)
         .split('\n')
         .map((line) => `    ${line}`)
         .join('\n');
