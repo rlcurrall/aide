@@ -81,3 +81,19 @@ export const AzureDevOpsConfigSchema = v.object({
 });
 
 export type AzureDevOpsConfig = v.InferOutput<typeof AzureDevOpsConfigSchema>;
+
+// ============================================================================
+// GitHub Configuration Schema
+// ============================================================================
+
+/**
+ * GitHub configuration schema
+ * - token: GitHub personal access token (optional, fallback when gh CLI unavailable)
+ * - useGhCli: Whether the gh CLI is available for authentication
+ */
+export const GitHubConfigSchema = v.object({
+  token: v.optional(v.string()),
+  useGhCli: v.boolean(),
+});
+
+export type GitHubConfig = v.InferOutput<typeof GitHubConfigSchema>;

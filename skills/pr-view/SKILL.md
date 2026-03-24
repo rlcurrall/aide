@@ -18,13 +18,14 @@ View details of a pull request including title, description, status, author, and
 ## How to Execute
 
 Run:
+
 ```bash
 aide pr view [--pr <id|url>]
 ```
 
 - Without `--pr`: auto-detects from current branch
 - With `--pr 123`: views specific PR by ID
-- With `--pr <url>`: views PR from Azure DevOps URL
+- With `--pr <url>`: views PR from Azure DevOps or GitHub URL
 
 ## Output Includes
 
@@ -45,6 +46,7 @@ aide pr view [--pr <id|url>]
 ## Next Steps
 
 After viewing PR details:
+
 - Use **pr-comments** skill to see reviewer feedback
 - Use **pr-diff** skill to see code changes
 - Use **ticket** skill to load linked Jira context

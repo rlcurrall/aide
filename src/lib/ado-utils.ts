@@ -8,6 +8,7 @@
  */
 
 import type { GitRemoteInfo, AzureDevOpsPullRequest } from './types.js';
+import type { GitHubPullRequest } from './github-types.js';
 import { AzureDevOpsClient } from './azure-devops-client.js';
 import { loadAzureDevOpsConfig } from './config.js';
 import { regex } from 'arkregex';
@@ -145,6 +146,7 @@ export function validatePRId(prId: string | number): {
 export interface FindPRResult {
   success: boolean;
   pr?: AzureDevOpsPullRequest;
+  githubPr?: GitHubPullRequest;
   error?: string;
   /** The branch name that was searched (available on both success and failure) */
   branch?: string;
@@ -183,7 +185,7 @@ export function getMissingRepoErrorMessage(extraHint?: string): string {
     'Error: Could not determine project and repository.',
     '',
     'Either:',
-    '  1. Run this command from within a git repository with a supported remote (Azure DevOps)',
+    '  1. Run this command from within a git repository with a supported remote (Azure DevOps or GitHub)',
     '  2. Specify --project and --repo flags explicitly',
   ];
   if (extraHint) {

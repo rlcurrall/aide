@@ -1,20 +1,19 @@
 /**
  * PR create command - Create a pull request
- * Supports Azure DevOps (with GitHub support planned)
- * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/create?view=azure-devops-rest-7.2
+ * Supports Azure DevOps and GitHub
  */
 
-import {
-  MissingRepoContextError,
-  buildPrUrl,
-  getMissingRepoErrorMessage,
-  resolveRepoContext,
-} from '@lib/ado-utils.js';
+import { MissingRepoContextError, buildPrUrl } from '@lib/ado-utils.js';
 import { ensureRefPrefix, getCurrentBranch } from '@lib/git-utils.js';
-import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
-import { loadAzureDevOpsConfig } from '@lib/config.js';
 import { handleCommandError } from '@lib/errors.js';
 import type { AzureDevOpsPullRequest, GitRemoteInfo } from '@lib/types.js';
+import type { GitHubPullRequest } from '@lib/github-types.js';
+import {
+  resolvePlatformContext,
+  GitHubAuthError,
+  type PlatformContext,
+} from '@lib/platform.js';
+import { getGitHubPRStatus } from '@lib/github-utils.js';
 import { validateArgs } from '@lib/validation.js';
 import {
   PrCreateArgsSchema,
@@ -23,16 +22,18 @@ import {
 } from '@schemas/pr/pr-create.js';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
-/**
- * Format PR creation output based on format type
- */
-function formatOutput(
+// ============================================================================
+// Azure DevOps Formatting
+// ============================================================================
+
+function formatAdoOutput(
   pr: AzureDevOpsPullRequest,
   format: OutputFormat,
-  prUrl: string
+  prUrl: string,
+  tags?: string[]
 ): string {
   if (format === 'json') {
-    return JSON.stringify({ ...pr, url: prUrl }, null, 2);
+    return JSON.stringify({ ...pr, url: prUrl, tags: tags ?? [] }, null, 2);
   }
 
   if (format === 'markdown') {
@@ -43,6 +44,9 @@ function formatOutput(
     output += `- **Source:** ${pr.sourceRefName?.replace('refs/heads/', '') || 'N/A'}\n`;
     output += `- **Target:** ${pr.targetRefName?.replace('refs/heads/', '') || 'N/A'}\n`;
     output += `- **Created By:** ${pr.createdBy.displayName}\n`;
+    if (tags && tags.length > 0) {
+      output += `- **Tags:** ${tags.join(', ')}\n`;
+    }
     if (pr.description) {
       output += `\n## Description\n\n${pr.description}\n`;
     }
@@ -58,33 +62,87 @@ function formatOutput(
   output += `Source: ${pr.sourceRefName?.replace('refs/heads/', '') || 'N/A'}\n`;
   output += `Target: ${pr.targetRefName?.replace('refs/heads/', '') || 'N/A'}\n`;
   output += `Created By: ${pr.createdBy.displayName}\n`;
+  if (tags && tags.length > 0) {
+    output += `Tags: ${tags.join(', ')}\n`;
+  }
 
   return output;
 }
 
+// ============================================================================
+// GitHub Formatting
+// ============================================================================
+
+function formatGitHubOutput(
+  pr: GitHubPullRequest,
+  format: OutputFormat,
+  labels?: string[]
+): string {
+  if (format === 'json') {
+    return JSON.stringify({ ...pr, labels: labels ?? [] }, null, 2);
+  }
+
+  const status = getGitHubPRStatus(pr);
+
+  if (format === 'markdown') {
+    let output = `# Pull Request Created\n\n`;
+    output += `**PR #${pr.number}**: ${pr.title}\n\n`;
+    output += `- **URL:** ${pr.html_url}\n`;
+    output += `- **Status:** ${status}\n`;
+    output += `- **Source:** ${pr.head.ref}\n`;
+    output += `- **Target:** ${pr.base.ref}\n`;
+    output += `- **Created By:** ${pr.user.login}\n`;
+    if (labels && labels.length > 0) {
+      output += `- **Labels:** ${labels.join(', ')}\n`;
+    }
+    if (pr.body) {
+      output += `\n## Description\n\n${pr.body}\n`;
+    }
+    return output;
+  }
+
+  // Text format
+  let output = `Pull Request Created Successfully!\n`;
+  output += '='.repeat(50) + '\n\n';
+  output += `PR #${pr.number}: ${pr.title}\n\n`;
+  output += `URL: ${pr.html_url}\n`;
+  output += `Status: ${status}\n`;
+  output += `Source: ${pr.head.ref}\n`;
+  output += `Target: ${pr.base.ref}\n`;
+  output += `Created By: ${pr.user.login}\n`;
+  if (labels && labels.length > 0) {
+    output += `Labels: ${labels.join(', ')}\n`;
+  }
+
+  return output;
+}
+
+// ============================================================================
+// Handler
+// ============================================================================
+
 async function handler(argv: ArgumentsCamelCase<PrCreateArgs>): Promise<void> {
   const args = validateArgs(PrCreateArgsSchema, argv, 'pr-create arguments');
-  const { title, body, draft, format } = args;
+  const { title, body, draft, format, tag: tags } = args;
   let { head, base } = args;
 
-  // Resolve repository context (auto-discover if needed)
-  let project: string;
-  let repo: string;
-  let repoInfo: GitRemoteInfo | undefined;
+  let ctx: PlatformContext;
   try {
-    const context = resolveRepoContext(args.project, args.repo);
-    project = context.project;
-    repo = context.repo;
-    repoInfo = context.repoInfo;
-    if (context.autoDiscovered && context.repoInfo && format !== 'json') {
-      console.log(
-        `Auto-discovered: ${context.repoInfo.org}/${context.repoInfo.project}/${context.repoInfo.repo}`
-      );
+    ctx = resolvePlatformContext(args.project, args.repo);
+    if (ctx.autoDiscovered && format !== 'json') {
+      if (ctx.platform === 'github') {
+        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
+      } else {
+        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
+      }
       console.log('');
     }
   } catch (error) {
-    if (error instanceof MissingRepoContextError) {
-      console.error(getMissingRepoErrorMessage());
+    if (
+      error instanceof MissingRepoContextError ||
+      error instanceof GitHubAuthError
+    ) {
+      console.error(error.message);
       process.exit(1);
     }
     throw error;
@@ -113,46 +171,91 @@ async function handler(argv: ArgumentsCamelCase<PrCreateArgs>): Promise<void> {
     }
   }
 
-  // Ensure branch names have refs/heads/ prefix
-  const sourceRefName = ensureRefPrefix(head);
-  const targetRefName = ensureRefPrefix(base);
-
   if (format !== 'json') {
     console.log('');
     console.log(`Creating pull request...`);
     console.log(`  Title: ${title}`);
-    console.log(`  Source: ${sourceRefName}`);
-    console.log(`  Target: ${targetRefName}`);
+    console.log(`  Source: ${head}`);
+    console.log(`  Target: ${base}`);
     if (draft) console.log(`  Draft: yes`);
+    if (tags && tags.length > 0) console.log(`  Tags: ${tags.join(', ')}`);
     console.log('');
   }
 
   try {
-    const config = loadAzureDevOpsConfig();
-    const client = new AzureDevOpsClient(config);
+    if (ctx.platform === 'github') {
+      const pr = await ctx.client.createPullRequest(
+        ctx.owner,
+        ctx.repo,
+        head,
+        base,
+        title,
+        body || '',
+        { draft }
+      );
 
-    const pr = await client.createPullRequest(
-      project,
-      repo,
-      sourceRefName,
-      targetRefName,
-      title,
-      body || '',
-      {
-        isDraft: draft,
+      // Add labels if specified
+      const addedLabels: string[] = [];
+      if (tags && tags.length > 0) {
+        try {
+          await ctx.client.addLabels(ctx.owner, ctx.repo, pr.number, tags);
+          addedLabels.push(...tags);
+        } catch (error) {
+          console.error(
+            `Warning: Failed to add labels: ${error instanceof Error ? error.message : error}`
+          );
+        }
       }
-    );
 
-    // Build PR URL
-    const prUrl = buildPrUrl(
-      repoInfo || { org: '', project, repo },
-      pr.pullRequestId,
-      config.orgUrl
-    );
+      const output = formatGitHubOutput(pr, format, addedLabels);
+      console.log(output);
+    } else {
+      // Azure DevOps - use refs/heads/ prefix
+      const sourceRefName = ensureRefPrefix(head);
+      const targetRefName = ensureRefPrefix(base);
 
-    // Format and output
-    const output = formatOutput(pr, format, prUrl);
-    console.log(output);
+      const { loadAzureDevOpsConfig } = await import('@lib/config.js');
+      const config = loadAzureDevOpsConfig();
+
+      const pr = await ctx.client.createPullRequest(
+        ctx.project,
+        ctx.repo,
+        sourceRefName,
+        targetRefName,
+        title,
+        body || '',
+        { isDraft: draft }
+      );
+
+      // Add tags if specified
+      const addedTags: string[] = [];
+      if (tags && tags.length > 0) {
+        for (const tagName of tags) {
+          try {
+            await ctx.client.addPullRequestLabel(
+              ctx.project,
+              ctx.repo,
+              pr.pullRequestId,
+              tagName
+            );
+            addedTags.push(tagName);
+          } catch (error) {
+            console.error(
+              `Warning: Failed to add tag '${tagName}': ${error instanceof Error ? error.message : error}`
+            );
+          }
+        }
+      }
+
+      const repoInfo: GitRemoteInfo = {
+        org: ctx.org,
+        project: ctx.project,
+        repo: ctx.repo,
+      };
+      const prUrl = buildPrUrl(repoInfo, pr.pullRequestId, config.orgUrl);
+      const output = formatAdoOutput(pr, format, prUrl, addedTags);
+      console.log(output);
+    }
   } catch (error) {
     handleCommandError(error);
   }
@@ -189,6 +292,11 @@ export default {
       default: false,
       describe: 'Create as draft pull request',
       alias: 'd',
+    },
+    tag: {
+      type: 'array',
+      string: true,
+      describe: 'Add tag(s)/label(s) to the PR',
     },
     project: {
       type: 'string',

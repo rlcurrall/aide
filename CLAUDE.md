@@ -102,9 +102,13 @@ src/
     config.ts             # Configuration loading from env vars
     jira-client.ts        # Jira REST API client
     azure-devops-client.ts # Azure DevOps REST API client
+    github-client.ts      # GitHub REST API client (via gh CLI or GITHUB_TOKEN)
+    github-types.ts       # GitHub API response types
+    github-utils.ts       # GitHub-specific URL parsing and helpers
+    platform.ts           # Platform detection and context resolution
     adf-to-md.ts          # Atlassian Document Format to Markdown
     md-to-adf.ts          # Markdown to Atlassian Document Format
-    ado-utils.ts          # Git remote URL parsing (Azure DevOps-specific utilities)
+    ado-utils.ts          # Azure DevOps-specific utilities
     cli-utils.ts          # CLI formatting helpers
     comment-utils.ts      # Comment filtering utilities
     types.ts              # TypeScript interfaces
@@ -158,7 +162,8 @@ PR commands automatically discover organization, project, and repository from gi
 
 - Azure DevOps SSH: `git@ssh.dev.azure.com:v3/{org}/{project}/{repo}`
 - Azure DevOps HTTPS: `https://dev.azure.com/{org}/{project}/_git/{repo}`
-- GitHub (planned): `git@github.com:{owner}/{repo}.git`
+- GitHub SSH: `git@github.com:{owner}/{repo}.git`
+- GitHub HTTPS: `https://github.com/{owner}/{repo}.git`
 
 **Multiple Output Formats:**
 All commands support `--format` flag:
@@ -172,6 +177,7 @@ Credentials are loaded from environment variables:
 
 - Jira: `JIRA_URL`, `JIRA_EMAIL`/`JIRA_USERNAME`, `JIRA_API_TOKEN`/`JIRA_TOKEN`
 - Azure DevOps: `AZURE_DEVOPS_ORG_URL`, `AZURE_DEVOPS_PAT`, `AZURE_DEVOPS_AUTH_METHOD`
+- GitHub: `gh` CLI auth (preferred) or `GITHUB_TOKEN`
 
 Bun automatically loads `.env` files from the working directory.
 
@@ -247,7 +253,7 @@ Use API version `7.2-preview.1` for Azure DevOps endpoints. The preview version 
 Commands exit with status code 1 on errors and print user-friendly error messages to stderr. Configuration errors provide specific guidance on missing environment variables.
 
 **Git Remote Detection:**
-PR commands use `spawnSync(['git', 'config', '--get', 'remote.origin.url'])` to detect repository context and auto-route to the appropriate platform (Azure DevOps, with GitHub support planned).
+PR commands use `spawnSync(['git', 'config', '--get', 'remote.origin.url'])` to detect repository context and auto-route to the appropriate platform (Azure DevOps or GitHub).
 
 **Custom Field Handling:**
 The `--field` flag on create/update commands supports:
@@ -277,5 +283,17 @@ export AZURE_DEVOPS_ORG_URL="https://dev.azure.com/yourorg"
 export AZURE_DEVOPS_PAT="your-personal-access-token"
 export AZURE_DEVOPS_AUTH_METHOD="pat"  # optional, default: pat
 ```
+
+### GitHub
+
+GitHub authentication is handled automatically via the `gh` CLI. If you have `gh` installed and authenticated (`gh auth login`), no additional configuration is needed.
+
+For CI/headless environments without `gh`, set:
+
+```bash
+export GITHUB_TOKEN="your-github-token"
+```
+
+The platform is auto-detected from the git remote URL. GitHub remotes (SSH or HTTPS) are automatically recognized.
 
 Credentials can be stored in `~/.vars` and sourced, or in a `.env` file in the project directory.

@@ -1,19 +1,19 @@
 /**
  * PR reply command - Reply to a comment thread on a pull request
- * Supports Azure DevOps (with GitHub support planned)
+ * Supports Azure DevOps and GitHub
  * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-thread-comments/create?view=azure-devops-rest-7.1
+ * @see https://docs.github.com/en/rest/pulls/comments#create-a-reply-for-a-review-comment
  */
 
-import {
-  findPRByCurrentBranch,
-  getMissingRepoErrorMessage,
-  parsePRUrl,
-  resolveRepoContext,
-  validatePRId,
-} from '@lib/ado-utils.js';
-import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
-import { loadAzureDevOpsConfig } from '@lib/config.js';
+import { MissingRepoContextError } from '@lib/ado-utils.js';
 import { handleCommandError } from '@lib/errors.js';
+import type { GitHubReviewComment } from '@lib/github-types.js';
+import {
+  resolvePlatformContext,
+  resolvePRId,
+  GitHubAuthError,
+  type PlatformContext,
+} from '@lib/platform.js';
 import type { AzureDevOpsCreateCommentResponse } from '@lib/types.js';
 import { validateArgs } from '@lib/validation.js';
 import {
@@ -23,10 +23,14 @@ import {
 } from '@schemas/pr/pr-reply.js';
 import type { ArgumentsCamelCase, Argv, CommandModule } from 'yargs';
 
+// ============================================================================
+// Azure DevOps Output Formatting
+// ============================================================================
+
 /**
- * Format the reply output based on format type
+ * Format the ADO reply output based on format type
  */
-function formatOutput(
+function formatAdoOutput(
   comment: AzureDevOpsCreateCommentResponse,
   format: OutputFormat,
   prId: number,
@@ -74,127 +78,143 @@ function formatOutput(
   return output;
 }
 
+// ============================================================================
+// GitHub Output Formatting
+// ============================================================================
+
+/**
+ * Format the GitHub reply output based on format type
+ */
+function formatGitHubReplyOutput(
+  comment: GitHubReviewComment,
+  format: OutputFormat,
+  prId: number,
+  commentId: number
+): string {
+  if (format === 'json') {
+    return JSON.stringify(
+      {
+        success: true,
+        prId,
+        inReplyToCommentId: commentId,
+        commentId: comment.id,
+        body: comment.body,
+        author: comment.user.login,
+        createdAt: comment.created_at,
+        url: comment.html_url,
+      },
+      null,
+      2
+    );
+  }
+
+  const date = new Date(comment.created_at).toISOString().split('T')[0];
+
+  if (format === 'markdown') {
+    let output = `# Reply Posted Successfully\n\n`;
+    output += `- **PR:** #${prId}\n`;
+    output += `- **In Reply To:** comment ${commentId}\n`;
+    output += `- **Comment ID:** ${comment.id}\n`;
+    output += `- **Author:** ${comment.user.login}\n`;
+    output += `- **Date:** ${date}\n`;
+    output += `- **URL:** ${comment.html_url}\n\n`;
+    output += `## Content\n\n${comment.body}`;
+    return output;
+  }
+
+  // Text format
+  let output = `Reply posted successfully!\n`;
+  output += `PR #${prId} | In reply to comment ${commentId} | Comment ID: ${comment.id}\n`;
+  output += `Author: ${comment.user.login}\n`;
+  output += `Date: ${date}\n`;
+  output += `URL: ${comment.html_url}`;
+  return output;
+}
+
+// ============================================================================
+// Command Handler
+// ============================================================================
+
 async function handler(argv: ArgumentsCamelCase<PrReplyArgs>): Promise<void> {
   const args = validateArgs(PrReplyArgsSchema, argv, 'pr-reply arguments');
-  let prId: number | undefined;
-  let project: string | undefined = args.project;
-  let repo: string | undefined = args.repo;
   const { format, thread, parent, replyText } = args;
 
-  // Try auto-discover project/repo from git remote first (needed for PR auto-detection)
+  // Resolve platform context
+  let ctx: PlatformContext;
   try {
-    const context = resolveRepoContext(project, repo);
-    if (context.autoDiscovered && context.repoInfo && format !== 'json') {
-      console.log(
-        `Auto-discovered: ${context.repoInfo.org}/${context.repoInfo.project}/${context.repoInfo.repo}`
-      );
-      console.log('');
-    }
-    project = context.project;
-    repo = context.repo;
-  } catch {
-    // May still succeed if PR URL is provided
-  }
-
-  // Parse PR ID or URL, or auto-detect from current branch
-  if (args.pr) {
-    if (args.pr.startsWith('http')) {
-      const parsed = parsePRUrl(args.pr);
-      if (!parsed) {
-        console.error(
-          `Error: Invalid PR URL (expected Azure DevOps format): ${args.pr}`
-        );
-        console.error(
-          'Expected format: https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id}'
-        );
-        process.exit(1);
-      }
-      prId = parsed.prId;
-      // URL overrides discovered project/repo
-      project = parsed.project;
-      repo = parsed.repo;
-    } else {
-      const validation = validatePRId(args.pr);
-      if (validation.valid) {
-        prId = validation.value;
+    ctx = resolvePlatformContext(args.project, args.repo);
+    if (ctx.autoDiscovered && format !== 'json') {
+      if (ctx.platform === 'github') {
+        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
       } else {
-        console.error(
-          `Error: Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
-        );
-        process.exit(1);
+        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
       }
-    }
-  } else {
-    // No PR ID provided - auto-detect from current branch
-    // We need project/repo for this
-    if (!project || !repo) {
-      console.error(
-        getMissingRepoErrorMessage('Provide a PR ID or full PR URL')
-      );
-      process.exit(1);
-    }
-
-    const result = await findPRByCurrentBranch(project, repo);
-
-    if (format !== 'json' && result.branch) {
-      console.log(`Searching for PR from branch '${result.branch}'...`);
-    }
-
-    if (!result.success || !result.pr) {
-      console.error(`Error: ${result.error}`);
-      process.exit(1);
-    }
-
-    prId = result.pr.pullRequestId;
-    if (format !== 'json') {
-      console.log(`Found PR #${prId}: ${result.pr.title}`);
       console.log('');
     }
+  } catch (error) {
+    if (
+      error instanceof MissingRepoContextError ||
+      error instanceof GitHubAuthError
+    ) {
+      console.error(error.message);
+      process.exit(1);
+    }
+    throw error;
   }
 
-  // Validate we have project/repo (should be set by now, but double-check)
-  if (!project || !repo) {
-    console.error(getMissingRepoErrorMessage('Provide a full PR URL'));
-    process.exit(1);
-  }
-
-  // Validate prId is set (should be set by now via URL parsing or branch detection)
-  if (prId === undefined) {
-    console.error('Error: Could not determine PR ID.');
-    console.error(
-      'Please provide a PR ID, full PR URL, or run from a branch with an associated PR.'
-    );
-    process.exit(1);
-  }
-
-  // Note: thread, parent, and replyText validation is now handled by Valibot schema
+  // Resolve PR ID
+  const resolved = await resolvePRId(args.pr, ctx, format);
+  const prId = resolved.prId;
+  ctx = resolved.ctx;
 
   try {
-    const config = loadAzureDevOpsConfig();
-    const client = new AzureDevOpsClient(config);
-
-    if (format !== 'json') {
-      console.log(`Posting reply to PR #${prId}, thread ${thread}...`);
+    if (ctx.platform === 'github') {
+      // GitHub path
+      // On GitHub, the thread parameter is a review comment ID.
+      // GitHub only supports one level of threading, so --parent doesn't apply.
       if (parent !== undefined && parent > 0) {
-        console.log(`Replying to comment #${parent}`);
+        console.warn(
+          'Warning: --parent is ignored on GitHub. GitHub review comment threads only support one level of nesting.'
+        );
       }
-      console.log('');
+
+      if (format !== 'json') {
+        console.log(`Posting reply to PR #${prId}, comment ${thread}...`);
+        console.log('');
+      }
+
+      const response = await ctx.client.replyToReviewComment(
+        ctx.owner,
+        ctx.repo,
+        prId,
+        thread,
+        replyText
+      );
+
+      const output = formatGitHubReplyOutput(response, format, prId, thread);
+      console.log(output);
+    } else {
+      // Azure DevOps path
+      if (format !== 'json') {
+        console.log(`Posting reply to PR #${prId}, thread ${thread}...`);
+        if (parent !== undefined && parent > 0) {
+          console.log(`Replying to comment #${parent}`);
+        }
+        console.log('');
+      }
+
+      const response = await ctx.client.createThreadComment(
+        ctx.project,
+        ctx.repo,
+        prId,
+        thread,
+        replyText,
+        parent
+      );
+
+      const output = formatAdoOutput(response, format, prId, thread);
+      console.log(output);
     }
-
-    // Create the comment reply
-    // Note: replyText is already trimmed by Valibot schema
-    const response = await client.createThreadComment(
-      project,
-      repo,
-      prId,
-      thread,
-      replyText,
-      parent
-    );
-
-    // Format and output
-    const output = formatOutput(response, format, prId, thread);
-    console.log(output);
   } catch (error) {
     handleCommandError(error);
   }

@@ -1,7 +1,7 @@
 /**
  * Pull Request service commands
  * Routes to PR-related commands (list, create, update, comments, comment, reply)
- * Supports Azure DevOps (with GitHub support planned)
+ * Supports Azure DevOps and GitHub
  */
 
 import type { CommandModule } from 'yargs';

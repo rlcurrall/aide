@@ -1,21 +1,21 @@
 /**
  * PR view command - Get details for a pull request
- * Supports Azure DevOps (with GitHub support planned)
- * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/get-pull-request
+ * Supports Azure DevOps and GitHub
  */
 
-import {
-  findPRByCurrentBranch,
-  getMissingRepoErrorMessage,
-  parsePRUrl,
-  resolveRepoContext,
-  validatePRId,
-} from '@lib/ado-utils.js';
+import { MissingRepoContextError, validatePRId } from '@lib/ado-utils.js';
 import { extractBranchName } from '@lib/git-utils.js';
-import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
-import { loadAzureDevOpsConfig } from '@lib/config.js';
 import { handleCommandError } from '@lib/errors.js';
 import type { AzureDevOpsPullRequest } from '@lib/types.js';
+import type { GitHubPullRequest } from '@lib/github-types.js';
+import {
+  resolvePlatformContext,
+  parsePRUrlAny,
+  findPRByCurrentBranchAny,
+  GitHubAuthError,
+  type PlatformContext,
+} from '@lib/platform.js';
+import { buildGitHubPrUrl, getGitHubPRStatus } from '@lib/github-utils.js';
 import { validateArgs } from '@lib/validation.js';
 import {
   ViewArgsSchema,
@@ -24,15 +24,17 @@ import {
 } from '@schemas/pr/view.js';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
-/**
- * Format PR details based on output format
- */
-function formatOutput(
+// ============================================================================
+// Azure DevOps Formatting
+// ============================================================================
+
+function formatAdoOutput(
   pr: AzureDevOpsPullRequest,
-  format: OutputFormat
+  format: OutputFormat,
+  tags?: string[]
 ): string {
   if (format === 'json') {
-    return JSON.stringify(pr, null, 2);
+    return JSON.stringify({ ...pr, tags: tags ?? [] }, null, 2);
   }
 
   const sourceBranch = extractBranchName(pr.sourceRefName);
@@ -51,6 +53,9 @@ function formatOutput(
     output += `| **Target** | ${targetBranch} |\n`;
     output += `| **Repository** | ${pr.repository.name} |\n`;
     output += `| **Project** | ${pr.repository.project.name} |\n`;
+    if (tags && tags.length > 0) {
+      output += `| **Tags** | ${tags.join(', ')} |\n`;
+    }
 
     if (pr.description) {
       output += `\n## Description\n\n${pr.description}\n`;
@@ -69,6 +74,9 @@ function formatOutput(
   output += `Target:     ${targetBranch}\n`;
   output += `Repository: ${pr.repository.name}\n`;
   output += `Project:    ${pr.repository.project.name}\n`;
+  if (tags && tags.length > 0) {
+    output += `Tags:       ${tags.join(', ')}\n`;
+  }
 
   if (pr.description) {
     output += `\nDescription:\n${'-'.repeat(20)}\n${pr.description}\n`;
@@ -77,45 +85,148 @@ function formatOutput(
   return output;
 }
 
+// ============================================================================
+// GitHub Formatting
+// ============================================================================
+
+function formatGitHubOutput(
+  pr: GitHubPullRequest,
+  format: OutputFormat,
+  url: string
+): string {
+  if (format === 'json') {
+    return JSON.stringify(pr, null, 2);
+  }
+
+  const status = getGitHubPRStatus(pr);
+  const statusDisplay = pr.draft ? `${status} (draft)` : status;
+  const createdDate = new Date(pr.created_at).toLocaleString();
+  const labels = pr.labels.map((l) => l.name);
+
+  if (format === 'markdown') {
+    let output = `# PR #${pr.number}: ${pr.title}\n\n`;
+    output += `| Field | Value |\n`;
+    output += `|-------|-------|\n`;
+    output += `| **Status** | ${statusDisplay} |\n`;
+    output += `| **Author** | ${pr.user.login} |\n`;
+    output += `| **Created** | ${createdDate} |\n`;
+    output += `| **Source** | ${pr.head.ref} |\n`;
+    output += `| **Target** | ${pr.base.ref} |\n`;
+    output += `| **URL** | ${url} |\n`;
+    if (labels.length > 0) {
+      output += `| **Labels** | ${labels.join(', ')} |\n`;
+    }
+
+    if (pr.body) {
+      output += `\n## Description\n\n${pr.body}\n`;
+    }
+
+    return output;
+  }
+
+  // Text format
+  let output = `PR #${pr.number}: ${pr.title}\n`;
+  output += '='.repeat(50) + '\n\n';
+  output += `Status:     ${statusDisplay}\n`;
+  output += `Author:     ${pr.user.login}\n`;
+  output += `Created:    ${createdDate}\n`;
+  output += `Source:     ${pr.head.ref}\n`;
+  output += `Target:     ${pr.base.ref}\n`;
+  output += `URL:        ${url}\n`;
+  if (labels.length > 0) {
+    output += `Labels:     ${labels.join(', ')}\n`;
+  }
+
+  if (pr.body) {
+    output += `\nDescription:\n${'-'.repeat(20)}\n${pr.body}\n`;
+  }
+
+  return output;
+}
+
+// ============================================================================
+// Handler
+// ============================================================================
+
 async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
   const args = validateArgs(ViewArgsSchema, argv, 'view arguments');
-  let prId: number | undefined;
-  let project: string | undefined = args.project;
-  let repo: string | undefined = args.repo;
   const { format } = args;
 
-  // Try auto-discover project/repo from git remote first (needed for PR auto-detection)
+  let ctx: PlatformContext | undefined;
   try {
-    const context = resolveRepoContext(project, repo);
-    if (context.autoDiscovered && context.repoInfo && format !== 'json') {
-      console.log(
-        `Auto-discovered: ${context.repoInfo.org}/${context.repoInfo.project}/${context.repoInfo.repo}`
-      );
+    ctx = resolvePlatformContext(args.project, args.repo);
+    if (ctx.autoDiscovered && format !== 'json') {
+      if (ctx.platform === 'github') {
+        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
+      } else {
+        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
+      }
       console.log('');
     }
-    project = context.project;
-    repo = context.repo;
-  } catch {
+  } catch (error) {
     // May still succeed if PR URL is provided
+    if (
+      !(
+        error instanceof MissingRepoContextError ||
+        error instanceof GitHubAuthError
+      ) ||
+      !args.pr?.startsWith('http')
+    ) {
+      if (
+        error instanceof MissingRepoContextError ||
+        error instanceof GitHubAuthError
+      ) {
+        console.error(error.message);
+        process.exit(1);
+      }
+      throw error;
+    }
+    // Will handle below via URL parsing
+    ctx = undefined;
   }
+
+  let prId: number | undefined;
 
   // Parse PR ID or URL, or auto-detect from current branch
   if (args.pr) {
     if (args.pr.startsWith('http')) {
-      const parsed = parsePRUrl(args.pr);
+      const parsed = parsePRUrlAny(args.pr);
       if (!parsed) {
-        console.error(
-          `Error: Invalid PR URL (expected Azure DevOps format): ${args.pr}`
-        );
-        console.error(
-          'Expected format: https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id}'
-        );
+        console.error(`Error: Invalid PR URL: ${args.pr}`);
+        console.error('Expected Azure DevOps or GitHub PR URL format.');
         process.exit(1);
       }
       prId = parsed.prId;
-      // URL overrides discovered project/repo
-      project = parsed.project;
-      repo = parsed.repo;
+
+      // URL overrides context - rebuild for the right platform
+      if (parsed.platform === 'github' && parsed.owner && parsed.ghRepo) {
+        const { GitHubClient } = await import('@lib/github-client.js');
+        ctx = {
+          platform: 'github',
+          owner: parsed.owner,
+          repo: parsed.ghRepo,
+          client: new GitHubClient(),
+          autoDiscovered: false,
+        };
+      } else if (
+        parsed.platform === 'azure-devops' &&
+        parsed.project &&
+        parsed.repo
+      ) {
+        const { loadAzureDevOpsConfig } = await import('@lib/config.js');
+        const { AzureDevOpsClient } = await import(
+          '@lib/azure-devops-client.js'
+        );
+        const config = loadAzureDevOpsConfig();
+        ctx = {
+          platform: 'azure-devops',
+          org: parsed.org ?? '',
+          project: parsed.project,
+          repo: parsed.repo,
+          client: new AzureDevOpsClient(config),
+          autoDiscovered: false,
+        };
+      }
     } else {
       const validation = validatePRId(args.pr);
       if (validation.valid) {
@@ -129,38 +240,39 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
     }
   } else {
     // No PR ID provided - auto-detect from current branch
-    if (!project || !repo) {
+    if (!ctx) {
       console.error(
-        getMissingRepoErrorMessage('Provide a PR ID or full PR URL')
+        'Error: Could not determine repository context. Provide a PR ID or full PR URL.'
       );
       process.exit(1);
     }
 
-    const result = await findPRByCurrentBranch(project, repo);
+    const result = await findPRByCurrentBranchAny(ctx);
 
     if (format !== 'json' && result.branch) {
       console.log(`Searching for PR from branch '${result.branch}'...`);
     }
 
-    if (!result.success || !result.pr) {
+    if (!result.success) {
       console.error(`Error: ${result.error}`);
       process.exit(1);
     }
 
-    prId = result.pr.pullRequestId;
-    if (format !== 'json') {
-      console.log(`Found PR #${prId}: ${result.pr.title}`);
-      console.log('');
+    if (ctx.platform === 'github' && result.githubPr) {
+      prId = result.githubPr.number;
+      if (format !== 'json') {
+        console.log(`Found PR #${prId}: ${result.githubPr.title}`);
+        console.log('');
+      }
+    } else if (result.pr) {
+      prId = result.pr.pullRequestId;
+      if (format !== 'json') {
+        console.log(`Found PR #${prId}: ${result.pr.title}`);
+        console.log('');
+      }
     }
   }
 
-  // Validate we have project/repo
-  if (!project || !repo) {
-    console.error(getMissingRepoErrorMessage('Provide a full PR URL'));
-    process.exit(1);
-  }
-
-  // Validate prId is set
   if (prId === undefined) {
     console.error('Error: Could not determine PR ID.');
     console.error(
@@ -169,13 +281,32 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
     process.exit(1);
   }
 
-  try {
-    const config = loadAzureDevOpsConfig();
-    const client = new AzureDevOpsClient(config);
+  if (!ctx) {
+    console.error(
+      'Error: Could not determine repository context. Provide a full PR URL.'
+    );
+    process.exit(1);
+  }
 
-    const pr = await client.getPullRequest(project, repo, prId);
-    const output = formatOutput(pr, format);
-    console.log(output);
+  try {
+    if (ctx.platform === 'github') {
+      const pr = await ctx.client.getPullRequest(ctx.owner, ctx.repo, prId);
+      const url = buildGitHubPrUrl(ctx.owner, ctx.repo, prId);
+      const output = formatGitHubOutput(pr, format, url);
+      console.log(output);
+    } else {
+      const [pr, labelsResponse] = await Promise.all([
+        ctx.client.getPullRequest(ctx.project, ctx.repo, prId),
+        ctx.client.getPullRequestLabels(ctx.project, ctx.repo, prId),
+      ]);
+
+      const tags = labelsResponse.value
+        .filter((l) => l.active)
+        .map((l) => l.name);
+
+      const output = formatAdoOutput(pr, format, tags);
+      console.log(output);
+    }
   } catch (error) {
     handleCommandError(error);
   }
