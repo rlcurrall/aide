@@ -1,6 +1,6 @@
 # aide CLI - AI Agent Tools
 
-A unified command-line tool designed for AI coding agents (like Claude Code) to interact with Jira and Azure DevOps APIs.
+A unified command-line tool designed for AI coding agents (like Claude Code) to interact with Jira, Azure DevOps, and GitHub APIs.
 
 ## Installation
 
@@ -231,6 +231,16 @@ export AZURE_DEVOPS_ORG_URL="https://dev.azure.com/yourorg"
 export AZURE_DEVOPS_PAT="your-personal-access-token"
 ```
 
+**GitHub:**
+
+GitHub authentication is handled automatically via the `gh` CLI. If you have `gh` installed and authenticated (`gh auth login`), no additional configuration is needed.
+
+For CI/headless environments without `gh`, set:
+
+```bash
+export GITHUB_TOKEN="your-github-token"
+```
+
 You can store these in:
 
 - `~/.vars` and source it in your shell profile
@@ -238,16 +248,17 @@ You can store these in:
 
 ## Auto-Discovery
 
-When running from within a git repository with an Azure DevOps remote, PR commands automatically detect:
+When running from within a git repository, PR commands automatically detect the hosting platform and repository from the git remote.
 
-- Organization
-- Project
-- Repository
-
-Supported remote formats:
+**Azure DevOps:**
 
 - SSH: `git@ssh.dev.azure.com:v3/org/project/repo`
 - HTTPS: `https://dev.azure.com/org/project/_git/repo`
+
+**GitHub:**
+
+- SSH: `git@github.com:owner/repo.git`
+- HTTPS: `https://github.com/owner/repo.git`
 
 ## Development
 
@@ -285,7 +296,7 @@ bun run format      # Format code
 
 ## Claude Code Plugin
 
-This repository includes a Claude Code plugin for AI agent integration with Jira and Azure DevOps.
+This repository includes a Claude Code plugin for AI agent integration with Jira, Azure DevOps, and GitHub.
 
 ### Installing the Plugin
 

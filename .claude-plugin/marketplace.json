@@ -8,7 +8,7 @@
     {
       "name": "aide",
       "source": "./",
-      "description": "AI agent integration with Jira and Azure DevOps",
+      "description": "AI agent integration with Jira, Azure DevOps, and GitHub",
       "version": "0.0.13"
     }
   ]
