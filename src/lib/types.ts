@@ -284,8 +284,8 @@ export interface JiraTransitionOptions {
 // Azure DevOps Types
 // ============================================================================
 
-// AzureDevOpsConfig is defined and exported from ../schemas/config.ts
-export type { AzureDevOpsConfig } from '../schemas/config.js';
+// AzureDevOpsConfig and GitHubConfig are defined and exported from ../schemas/config.ts
+export type { AzureDevOpsConfig, GitHubConfig } from '../schemas/config.js';
 
 export interface AzureDevOpsIdentity {
   displayName: string;
@@ -366,6 +366,13 @@ export interface CreateThreadResponse {
   properties?: unknown;
 }
 
+export interface AzureDevOpsPRLabel {
+  id: string;
+  name: string;
+  active: boolean;
+  url: string;
+}
+
 export interface AzureDevOpsRepository {
   id: string;
   name: string;
@@ -386,6 +393,7 @@ export interface AzureDevOpsPullRequest {
   repository: AzureDevOpsRepository;
   sourceRefName?: string; // e.g., "refs/heads/feature-branch"
   targetRefName?: string; // e.g., "refs/heads/main"
+  labels?: AzureDevOpsPRLabel[];
 }
 
 /**

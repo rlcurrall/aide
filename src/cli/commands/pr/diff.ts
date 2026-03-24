@@ -1,16 +1,10 @@
 /**
  * PR diff command - View pull request diff and changed files
- * Supports Azure DevOps with hybrid approach: git CLI when available, API fallback otherwise
- * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-iteration-changes/get
+ * Supports Azure DevOps and GitHub with hybrid approach:
+ * git CLI when available, API fallback otherwise
  */
 
-import {
-  findPRByCurrentBranch,
-  getMissingRepoErrorMessage,
-  parsePRUrl,
-  resolveRepoContext,
-  validatePRId,
-} from '@lib/ado-utils.js';
+import { MissingRepoContextError } from '@lib/ado-utils.js';
 import {
   extractBranchName,
   fetchMissingBranches,
@@ -19,22 +13,78 @@ import {
   parseGitStat,
   remoteRefExists,
 } from '@lib/git-utils.js';
-import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
-import { loadAzureDevOpsConfig } from '@lib/config.js';
 import { handleCommandError } from '@lib/errors.js';
 import type {
   AzureDevOpsChangeType,
   AzureDevOpsPRChange,
   AzureDevOpsPullRequest,
 } from '@lib/types.js';
+import type { GitHubPRFile, GitHubPullRequest } from '@lib/github-types.js';
+import {
+  resolvePlatformContext,
+  resolvePRId,
+  GitHubAuthError,
+  type PlatformContext,
+} from '@lib/platform.js';
 import { validateArgs } from '@lib/validation.js';
 import { DiffArgsSchema, type DiffArgs } from '@schemas/pr/diff.js';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
+// ============================================================================
+// Shared Types
+// ============================================================================
+
+type DiffMode = 'full' | 'stat' | 'files' | 'file';
+
+/**
+ * Result of getting diff data via git CLI
+ */
+interface GitCliDiffResult {
+  source: 'git-cli';
+  output: string;
+  localBranchStatus: { available: true };
+}
+
+/**
+ * Result of getting diff data via ADO API fallback
+ */
+interface AdoApiDiffResult {
+  source: 'api-fallback';
+  warning: string;
+  localBranchStatus: {
+    available: false;
+    reason: 'not-git-repo' | 'branch-not-found' | 'git-error';
+  };
+  files: Array<{
+    path: string;
+    changeType: AzureDevOpsChangeType;
+    originalPath?: string;
+  }>;
+}
+
+/**
+ * Result of getting diff data via GitHub API fallback
+ */
+interface GitHubApiDiffResult {
+  source: 'api-fallback';
+  warning: string;
+  localBranchStatus: {
+    available: false;
+    reason: 'not-git-repo' | 'branch-not-found' | 'git-error';
+  };
+  files: GitHubPRFile[];
+}
+
+type DiffResult = GitCliDiffResult | AdoApiDiffResult | GitHubApiDiffResult;
+
+// ============================================================================
+// ADO Change Type Helpers
+// ============================================================================
+
 /**
  * Map Azure DevOps change type to display character
  */
-function getChangeTypeChar(changeType: AzureDevOpsChangeType): string {
+function getAdoChangeTypeChar(changeType: AzureDevOpsChangeType): string {
   switch (changeType) {
     case 'add':
       return 'A';
@@ -54,7 +104,7 @@ function getChangeTypeChar(changeType: AzureDevOpsChangeType): string {
 /**
  * Map Azure DevOps change type to display label
  */
-function getChangeTypeLabel(changeType: AzureDevOpsChangeType): string {
+function getAdoChangeTypeLabel(changeType: AzureDevOpsChangeType): string {
   switch (changeType) {
     case 'add':
       return 'added';
@@ -71,31 +121,272 @@ function getChangeTypeLabel(changeType: AzureDevOpsChangeType): string {
   }
 }
 
+// ============================================================================
+// GitHub Change Type Helpers
+// ============================================================================
+
 /**
- * Result of getting diff data
+ * Map GitHub file status to display character
  */
-interface DiffResult {
-  source: 'git-cli' | 'api-fallback';
-  warning?: string;
-  localBranchStatus: {
-    available: boolean;
-    reason?: 'not-git-repo' | 'branch-not-found' | 'git-error';
-  };
-  // For git-cli source
-  output?: string;
-  // For api-fallback source
-  files?: Array<{
-    path: string;
-    changeType: AzureDevOpsChangeType;
-    originalPath?: string;
-  }>;
+function getGitHubStatusChar(status: GitHubPRFile['status']): string {
+  switch (status) {
+    case 'added':
+      return 'A';
+    case 'modified':
+    case 'changed':
+      return 'M';
+    case 'removed':
+      return 'D';
+    case 'renamed':
+    case 'copied':
+      return 'R';
+    case 'unchanged':
+      return ' ';
+    default:
+      return '?';
+  }
 }
 
 /**
- * Format API fallback files for text output
+ * Map GitHub file status to display label
  */
-function formatApiFilesText(
-  files: DiffResult['files'],
+function getGitHubStatusLabel(status: GitHubPRFile['status']): string {
+  switch (status) {
+    case 'added':
+      return 'added';
+    case 'modified':
+    case 'changed':
+      return 'modified';
+    case 'removed':
+      return 'deleted';
+    case 'renamed':
+      return 'renamed';
+    case 'copied':
+      return 'copied';
+    case 'unchanged':
+      return 'unchanged';
+    default:
+      return status;
+  }
+}
+
+// ============================================================================
+// Shared Git CLI Diff
+// ============================================================================
+
+interface BranchRefs {
+  sourceBranch: string;
+  targetBranch: string;
+}
+
+/**
+ * Attempt to get diff via local git CLI. Returns null if not possible,
+ * along with a reason for the failure.
+ */
+function tryGitCliDiff(
+  branches: BranchRefs,
+  options: { stat?: boolean; nameOnly?: boolean; file?: string }
+):
+  | GitCliDiffResult
+  | {
+      fallbackReason: 'not-git-repo' | 'branch-not-found' | 'git-error';
+      branch?: string;
+      error?: string;
+    } {
+  if (!isGitRepository()) {
+    return { fallbackReason: 'not-git-repo' };
+  }
+
+  const sourceRef = `origin/${branches.sourceBranch}`;
+  const targetRef = `origin/${branches.targetBranch}`;
+
+  if (!remoteRefExists(sourceRef)) {
+    return {
+      fallbackReason: 'branch-not-found',
+      branch: branches.sourceBranch,
+    };
+  }
+
+  if (!remoteRefExists(targetRef)) {
+    return {
+      fallbackReason: 'branch-not-found',
+      branch: branches.targetBranch,
+    };
+  }
+
+  const diffResult = getGitDiff(targetRef, sourceRef, options);
+
+  if (!diffResult.success) {
+    return { fallbackReason: 'git-error', error: diffResult.error };
+  }
+
+  return {
+    source: 'git-cli',
+    output: diffResult.output ?? '',
+    localBranchStatus: { available: true },
+  };
+}
+
+/**
+ * Build the warning message for API fallback
+ */
+function buildFallbackWarning(
+  reason: 'not-git-repo' | 'branch-not-found' | 'git-error',
+  branch?: string,
+  error?: string
+): string {
+  if (reason === 'not-git-repo') {
+    return 'Not in a git repository. Showing file list from API.';
+  }
+  if (reason === 'branch-not-found') {
+    return `Branch '${branch}' not available locally. Run: git fetch origin ${branch}`;
+  }
+  return `Git error: ${error || 'unknown'}. Showing file list from API.`;
+}
+
+// ============================================================================
+// ADO Diff Data
+// ============================================================================
+
+/**
+ * Get diff data for an Azure DevOps PR
+ */
+async function getAdoDiffData(
+  pr: AzureDevOpsPullRequest,
+  project: string,
+  repo: string,
+  ctx: PlatformContext & { platform: 'azure-devops' },
+  options: { stat?: boolean; nameOnly?: boolean; file?: string }
+): Promise<DiffResult> {
+  if (!pr.sourceRefName || !pr.targetRefName) {
+    return await getAdoApiDiff(pr, project, repo, ctx, {
+      reason: 'git-error',
+      error: 'PR missing source or target branch',
+    });
+  }
+
+  const sourceBranch = extractBranchName(pr.sourceRefName);
+  const targetBranch = extractBranchName(pr.targetRefName);
+
+  const result = tryGitCliDiff({ sourceBranch, targetBranch }, options);
+
+  if ('source' in result) {
+    return result;
+  }
+
+  return await getAdoApiDiff(pr, project, repo, ctx, {
+    reason: result.fallbackReason,
+    branch: result.branch,
+    error: result.error,
+  });
+}
+
+/**
+ * Get diff from ADO API (fallback)
+ */
+async function getAdoApiDiff(
+  pr: AzureDevOpsPullRequest,
+  project: string,
+  repo: string,
+  ctx: PlatformContext & { platform: 'azure-devops' },
+  fallbackInfo: {
+    reason: 'not-git-repo' | 'branch-not-found' | 'git-error';
+    branch?: string;
+    error?: string;
+  }
+): Promise<AdoApiDiffResult> {
+  const changes = await ctx.client.getAllPullRequestChanges(
+    project,
+    repo,
+    pr.pullRequestId
+  );
+
+  return {
+    source: 'api-fallback',
+    warning: buildFallbackWarning(
+      fallbackInfo.reason,
+      fallbackInfo.branch,
+      fallbackInfo.error
+    ),
+    localBranchStatus: {
+      available: false,
+      reason: fallbackInfo.reason,
+    },
+    files: changes.map((entry: AzureDevOpsPRChange) => ({
+      path: entry.item?.path || entry.sourceServerItem || 'unknown',
+      changeType: entry.changeType,
+      originalPath: entry.originalPath || entry.sourceServerItem,
+    })),
+  };
+}
+
+// ============================================================================
+// GitHub Diff Data
+// ============================================================================
+
+/**
+ * Get diff data for a GitHub PR
+ */
+async function getGitHubDiffData(
+  pr: GitHubPullRequest,
+  ctx: PlatformContext & { platform: 'github' },
+  options: { stat?: boolean; nameOnly?: boolean; file?: string }
+): Promise<DiffResult> {
+  const sourceBranch = pr.head.ref;
+  const targetBranch = pr.base.ref;
+
+  const result = tryGitCliDiff({ sourceBranch, targetBranch }, options);
+
+  if ('source' in result) {
+    return result;
+  }
+
+  return await getGitHubApiDiff(pr, ctx, {
+    reason: result.fallbackReason,
+    branch: result.branch,
+    error: result.error,
+  });
+}
+
+/**
+ * Get diff from GitHub API (fallback)
+ */
+async function getGitHubApiDiff(
+  pr: GitHubPullRequest,
+  ctx: PlatformContext & { platform: 'github' },
+  fallbackInfo: {
+    reason: 'not-git-repo' | 'branch-not-found' | 'git-error';
+    branch?: string;
+    error?: string;
+  }
+): Promise<GitHubApiDiffResult> {
+  const files = await ctx.client.getPullRequestFiles(
+    ctx.owner,
+    ctx.repo,
+    pr.number
+  );
+
+  return {
+    source: 'api-fallback',
+    warning: buildFallbackWarning(
+      fallbackInfo.reason,
+      fallbackInfo.branch,
+      fallbackInfo.error
+    ),
+    localBranchStatus: {
+      available: false,
+      reason: fallbackInfo.reason,
+    },
+    files,
+  };
+}
+
+// ============================================================================
+// ADO Formatting
+// ============================================================================
+
+function formatAdoApiFilesText(
+  files: AdoApiDiffResult['files'],
   isStatMode: boolean
 ): string {
   if (!files || files.length === 0) {
@@ -105,7 +396,7 @@ function formatApiFilesText(
   let output = '';
 
   for (const file of files) {
-    const char = getChangeTypeChar(file.changeType);
+    const char = getAdoChangeTypeChar(file.changeType);
     if (file.originalPath && file.changeType === 'rename') {
       output += `  ${char}  ${file.path}  (renamed from ${file.originalPath})\n`;
     } else {
@@ -120,24 +411,21 @@ function formatApiFilesText(
   return output;
 }
 
-/**
- * Format output for text mode
- */
-function formatTextOutput(
+function formatAdoTextOutput(
   pr: AzureDevOpsPullRequest,
   diffResult: DiffResult,
-  mode: 'full' | 'stat' | 'files' | 'file'
+  mode: DiffMode
 ): string {
   const sourceBranch = extractBranchName(pr.sourceRefName);
   const targetBranch = extractBranchName(pr.targetRefName);
 
-  // For --files mode, just output file paths
   if (mode === 'files') {
     if (diffResult.source === 'git-cli' && diffResult.output) {
       return diffResult.output.trim();
     }
-    if (diffResult.files) {
-      return diffResult.files.map((f) => f.path).join('\n');
+    if ('files' in diffResult && diffResult.files) {
+      const files = diffResult.files as AdoApiDiffResult['files'];
+      return files.map((f) => f.path).join('\n');
     }
     return '';
   }
@@ -145,38 +433,35 @@ function formatTextOutput(
   let output = `PR #${pr.pullRequestId}: ${pr.title}\n`;
   output += `Source: ${sourceBranch} -> Target: ${targetBranch}\n`;
 
-  // Add warning for API fallback
   if (diffResult.source === 'api-fallback' && diffResult.warning) {
     output += `\nWARNING: ${diffResult.warning}\n`;
   }
 
   output += '\n';
 
-  // Output the diff content
   if (diffResult.source === 'git-cli' && diffResult.output) {
     output += diffResult.output;
-  } else if (diffResult.files) {
+  } else if ('files' in diffResult && diffResult.files) {
     if (mode === 'full') {
       output += 'Changed files:\n';
     }
-    output += formatApiFilesText(diffResult.files, mode === 'stat');
+    output += formatAdoApiFilesText(
+      diffResult.files as AdoApiDiffResult['files'],
+      mode === 'stat'
+    );
   }
 
   return output;
 }
 
-/**
- * Format output for markdown mode
- */
-function formatMarkdownOutput(
+function formatAdoMarkdownOutput(
   pr: AzureDevOpsPullRequest,
   diffResult: DiffResult,
-  mode: 'full' | 'stat' | 'files' | 'file'
+  mode: DiffMode
 ): string {
   const sourceBranch = extractBranchName(pr.sourceRefName);
   const targetBranch = extractBranchName(pr.targetRefName);
 
-  // For --files mode, just output file paths as a list
   if (mode === 'files') {
     if (diffResult.source === 'git-cli' && diffResult.output) {
       return diffResult.output
@@ -185,8 +470,9 @@ function formatMarkdownOutput(
         .map((f) => `- ${f}`)
         .join('\n');
     }
-    if (diffResult.files) {
-      return diffResult.files.map((f) => `- ${f.path}`).join('\n');
+    if ('files' in diffResult && diffResult.files) {
+      const files = diffResult.files as AdoApiDiffResult['files'];
+      return files.map((f) => `- ${f.path}`).join('\n');
     }
     return '';
   }
@@ -194,24 +480,23 @@ function formatMarkdownOutput(
   let output = `# PR #${pr.pullRequestId}: ${pr.title}\n\n`;
   output += `**Source:** ${sourceBranch} → **Target:** ${targetBranch}\n\n`;
 
-  // Add warning for API fallback
   if (diffResult.source === 'api-fallback' && diffResult.warning) {
     output += `> **Warning:** ${diffResult.warning}\n\n`;
   }
 
-  // Output the diff content
   if (diffResult.source === 'git-cli' && diffResult.output) {
     if (mode === 'stat') {
       output += '```\n' + diffResult.output + '\n```\n';
     } else {
       output += '```diff\n' + diffResult.output + '\n```\n';
     }
-  } else if (diffResult.files) {
+  } else if ('files' in diffResult && diffResult.files) {
+    const files = diffResult.files as AdoApiDiffResult['files'];
     output += '## Changed Files\n\n';
     output += '| Status | File |\n';
     output += '|--------|------|\n';
-    for (const file of diffResult.files) {
-      const label = getChangeTypeLabel(file.changeType);
+    for (const file of files) {
+      const label = getAdoChangeTypeLabel(file.changeType);
       if (file.originalPath && file.changeType === 'rename') {
         output += `| ${label} | ${file.path} ← ${file.originalPath} |\n`;
       } else {
@@ -223,13 +508,10 @@ function formatMarkdownOutput(
   return output;
 }
 
-/**
- * Format output for JSON mode
- */
-function formatJsonOutput(
+function formatAdoJsonOutput(
   pr: AzureDevOpsPullRequest,
   diffResult: DiffResult,
-  mode: 'full' | 'stat' | 'files' | 'file'
+  mode: DiffMode
 ): string {
   const sourceBranch = extractBranchName(pr.sourceRefName);
   const targetBranch = extractBranchName(pr.targetRefName);
@@ -242,7 +524,9 @@ function formatJsonOutput(
     source: diffResult.source,
     localBranchStatus: diffResult.localBranchStatus,
     mode,
-    ...(diffResult.warning && { warning: diffResult.warning }),
+    ...(diffResult.source === 'api-fallback' && diffResult.warning
+      ? { warning: diffResult.warning }
+      : {}),
   };
 
   if (diffResult.source === 'git-cli' && diffResult.output) {
@@ -257,8 +541,8 @@ function formatJsonOutput(
     return JSON.stringify({ ...baseOutput, diff: diffResult.output }, null, 2);
   }
 
-  // API fallback
-  const files = (diffResult.files || []).map((f) => ({
+  const adoFiles = (diffResult as AdoApiDiffResult).files || [];
+  const files = adoFiles.map((f) => ({
     path: f.path,
     changeType: f.changeType,
     ...(f.originalPath && { originalPath: f.originalPath }),
@@ -267,117 +551,192 @@ function formatJsonOutput(
   return JSON.stringify({ ...baseOutput, files }, null, 2);
 }
 
-/**
- * Get diff data using git CLI or API fallback
- */
-async function getDiffData(
-  pr: AzureDevOpsPullRequest,
-  project: string,
-  repo: string,
-  client: AzureDevOpsClient,
-  options: { stat?: boolean; nameOnly?: boolean; file?: string }
-): Promise<DiffResult> {
-  // Step 1: Check if we're in a git repo
-  if (!isGitRepository()) {
-    return await getApiDiff(pr, project, repo, client, {
-      reason: 'not-git-repo',
-    });
+// ============================================================================
+// GitHub Formatting
+// ============================================================================
+
+function formatGitHubApiFilesText(
+  files: GitHubPRFile[],
+  isStatMode: boolean
+): string {
+  if (!files || files.length === 0) {
+    return 'No changes found.';
   }
 
-  // Step 2: Check if refs are present
-  if (!pr.sourceRefName || !pr.targetRefName) {
-    return await getApiDiff(pr, project, repo, client, {
-      reason: 'git-error',
-      error: 'PR missing source or target branch',
-    });
+  let output = '';
+  let totalAdditions = 0;
+  let totalDeletions = 0;
+
+  for (const file of files) {
+    const char = getGitHubStatusChar(file.status);
+    if (isStatMode) {
+      output += `  ${file.filename}`;
+      output += ` | ${file.changes} ${'+'.repeat(Math.min(file.additions, 20))}${'-'.repeat(Math.min(file.deletions, 20))}\n`;
+      totalAdditions += file.additions;
+      totalDeletions += file.deletions;
+    } else if (file.previous_filename && file.status === 'renamed') {
+      output += `  ${char}  ${file.filename}  (renamed from ${file.previous_filename})\n`;
+    } else {
+      output += `  ${char}  ${file.filename}\n`;
+    }
   }
 
-  // Step 3: Check if the source branch exists locally
-  const sourceBranch = extractBranchName(pr.sourceRefName);
-  const targetBranch = extractBranchName(pr.targetRefName);
-  const sourceRef = `origin/${sourceBranch}`;
-  const targetRef = `origin/${targetBranch}`;
-
-  if (!remoteRefExists(sourceRef)) {
-    return await getApiDiff(pr, project, repo, client, {
-      reason: 'branch-not-found',
-      branch: sourceBranch,
-    });
+  if (isStatMode) {
+    output += `\n${files.length} files changed, ${totalAdditions} insertions(+), ${totalDeletions} deletions(-)`;
   }
 
-  if (!remoteRefExists(targetRef)) {
-    return await getApiDiff(pr, project, repo, client, {
-      reason: 'branch-not-found',
-      branch: targetBranch,
-    });
-  }
-
-  // Step 4: Try git diff
-  const diffResult = getGitDiff(targetRef, sourceRef, options);
-
-  if (!diffResult.success) {
-    return await getApiDiff(pr, project, repo, client, {
-      reason: 'git-error',
-      error: diffResult.error,
-    });
-  }
-
-  return {
-    source: 'git-cli',
-    output: diffResult.output,
-    localBranchStatus: { available: true },
-  };
+  return output;
 }
 
-/**
- * Get diff from API (fallback)
- */
-async function getApiDiff(
-  pr: AzureDevOpsPullRequest,
-  project: string,
-  repo: string,
-  client: AzureDevOpsClient,
-  fallbackInfo: {
-    reason: 'not-git-repo' | 'branch-not-found' | 'git-error';
-    branch?: string;
-    error?: string;
-  }
-): Promise<DiffResult> {
-  const changes = await client.getAllPullRequestChanges(
-    project,
-    repo,
-    pr.pullRequestId
-  );
+function formatGitHubTextOutput(
+  pr: GitHubPullRequest,
+  diffResult: DiffResult,
+  mode: DiffMode
+): string {
+  const sourceBranch = pr.head.ref;
+  const targetBranch = pr.base.ref;
 
-  let warning: string;
-  if (fallbackInfo.reason === 'not-git-repo') {
-    warning = 'Not in a git repository. Showing file list from API.';
-  } else if (fallbackInfo.reason === 'branch-not-found') {
-    warning = `Branch '${fallbackInfo.branch}' not available locally. Run: git fetch origin ${fallbackInfo.branch}`;
-  } else {
-    warning = `Git error: ${fallbackInfo.error || 'unknown'}. Showing file list from API.`;
+  if (mode === 'files') {
+    if (diffResult.source === 'git-cli' && diffResult.output) {
+      return diffResult.output.trim();
+    }
+    if ('files' in diffResult && diffResult.files) {
+      const files = diffResult.files as GitHubPRFile[];
+      return files.map((f) => f.filename).join('\n');
+    }
+    return '';
   }
 
-  return {
-    source: 'api-fallback',
-    warning,
-    localBranchStatus: {
-      available: false,
-      reason: fallbackInfo.reason,
-    },
-    files: changes.map((entry: AzureDevOpsPRChange) => ({
-      path: entry.item?.path || entry.sourceServerItem || 'unknown',
-      changeType: entry.changeType,
-      originalPath: entry.originalPath || entry.sourceServerItem,
-    })),
-  };
+  let output = `PR #${pr.number}: ${pr.title}\n`;
+  output += `Source: ${sourceBranch} -> Target: ${targetBranch}\n`;
+
+  if (diffResult.source === 'api-fallback' && diffResult.warning) {
+    output += `\nWARNING: ${diffResult.warning}\n`;
+  }
+
+  output += '\n';
+
+  if (diffResult.source === 'git-cli' && diffResult.output) {
+    output += diffResult.output;
+  } else if ('files' in diffResult && diffResult.files) {
+    const files = diffResult.files as GitHubPRFile[];
+    if (mode === 'full') {
+      output += 'Changed files:\n';
+    }
+    output += formatGitHubApiFilesText(files, mode === 'stat');
+  }
+
+  return output;
 }
+
+function formatGitHubMarkdownOutput(
+  pr: GitHubPullRequest,
+  diffResult: DiffResult,
+  mode: DiffMode
+): string {
+  const sourceBranch = pr.head.ref;
+  const targetBranch = pr.base.ref;
+
+  if (mode === 'files') {
+    if (diffResult.source === 'git-cli' && diffResult.output) {
+      return diffResult.output
+        .trim()
+        .split('\n')
+        .map((f) => `- ${f}`)
+        .join('\n');
+    }
+    if ('files' in diffResult && diffResult.files) {
+      const files = diffResult.files as GitHubPRFile[];
+      return files.map((f) => `- ${f.filename}`).join('\n');
+    }
+    return '';
+  }
+
+  let output = `# PR #${pr.number}: ${pr.title}\n\n`;
+  output += `**Source:** ${sourceBranch} → **Target:** ${targetBranch}\n\n`;
+
+  if (diffResult.source === 'api-fallback' && diffResult.warning) {
+    output += `> **Warning:** ${diffResult.warning}\n\n`;
+  }
+
+  if (diffResult.source === 'git-cli' && diffResult.output) {
+    if (mode === 'stat') {
+      output += '```\n' + diffResult.output + '\n```\n';
+    } else {
+      output += '```diff\n' + diffResult.output + '\n```\n';
+    }
+  } else if ('files' in diffResult && diffResult.files) {
+    const files = diffResult.files as GitHubPRFile[];
+    output += '## Changed Files\n\n';
+    output += '| Status | File | +/- |\n';
+    output += '|--------|------|-----|\n';
+    for (const file of files) {
+      const label = getGitHubStatusLabel(file.status);
+      const stats = `+${file.additions} -${file.deletions}`;
+      if (file.previous_filename && file.status === 'renamed') {
+        output += `| ${label} | ${file.filename} ← ${file.previous_filename} | ${stats} |\n`;
+      } else {
+        output += `| ${label} | ${file.filename} | ${stats} |\n`;
+      }
+    }
+  }
+
+  return output;
+}
+
+function formatGitHubJsonOutput(
+  pr: GitHubPullRequest,
+  diffResult: DiffResult,
+  mode: DiffMode
+): string {
+  const sourceBranch = pr.head.ref;
+  const targetBranch = pr.base.ref;
+
+  const baseOutput = {
+    prId: pr.number,
+    title: pr.title,
+    sourceBranch,
+    targetBranch,
+    source: diffResult.source,
+    localBranchStatus: diffResult.localBranchStatus,
+    mode,
+    ...(diffResult.source === 'api-fallback' && diffResult.warning
+      ? { warning: diffResult.warning }
+      : {}),
+  };
+
+  if (diffResult.source === 'git-cli' && diffResult.output) {
+    if (mode === 'stat') {
+      const parsed = parseGitStat(diffResult.output);
+      return JSON.stringify({ ...baseOutput, ...parsed }, null, 2);
+    }
+    if (mode === 'files') {
+      const files = diffResult.output.trim().split('\n').filter(Boolean);
+      return JSON.stringify({ ...baseOutput, files }, null, 2);
+    }
+    return JSON.stringify({ ...baseOutput, diff: diffResult.output }, null, 2);
+  }
+
+  const ghFiles = (diffResult as GitHubApiDiffResult).files || [];
+  const files = ghFiles.map((f) => ({
+    filename: f.filename,
+    status: f.status,
+    additions: f.additions,
+    deletions: f.deletions,
+    changes: f.changes,
+    ...(f.previous_filename && { previous_filename: f.previous_filename }),
+    ...(f.patch && { patch: f.patch }),
+  }));
+
+  return JSON.stringify({ ...baseOutput, files }, null, 2);
+}
+
+// ============================================================================
+// Handler
+// ============================================================================
 
 async function handler(argv: ArgumentsCamelCase<DiffArgs>): Promise<void> {
   const args = validateArgs(DiffArgsSchema, argv, 'diff arguments');
-  let prId: number | undefined;
-  let project: string | undefined = args.project;
-  let repo: string | undefined = args.repo;
   const { format } = args;
 
   // Validate mutually exclusive flags
@@ -390,166 +749,204 @@ async function handler(argv: ArgumentsCamelCase<DiffArgs>): Promise<void> {
   }
 
   // Determine mode
-  let mode: 'full' | 'stat' | 'files' | 'file' = 'full';
+  let mode: DiffMode = 'full';
   if (args.stat) mode = 'stat';
   else if (args.files) mode = 'files';
   else if (args.file) mode = 'file';
 
-  // Try auto-discover project/repo from git remote first
+  // Resolve platform context
+  let ctx: PlatformContext | undefined;
   try {
-    const context = resolveRepoContext(project, repo);
-    if (context.autoDiscovered && context.repoInfo && format !== 'json') {
-      console.log(
-        `Auto-discovered: ${context.repoInfo.org}/${context.repoInfo.project}/${context.repoInfo.repo}`
-      );
-      console.log('');
-    }
-    project = context.project;
-    repo = context.repo;
-  } catch {
-    // May still succeed if PR URL is provided
-  }
-
-  // Parse PR ID or URL, or auto-detect from current branch
-  if (args.pr) {
-    if (args.pr.startsWith('http')) {
-      const parsed = parsePRUrl(args.pr);
-      if (!parsed) {
-        console.error(
-          `Error: Invalid PR URL (expected Azure DevOps format): ${args.pr}`
-        );
-        console.error(
-          'Expected format: https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id}'
-        );
-        process.exit(1);
-      }
-      prId = parsed.prId;
-      project = parsed.project;
-      repo = parsed.repo;
-    } else {
-      const validation = validatePRId(args.pr);
-      if (validation.valid) {
-        prId = validation.value;
+    ctx = resolvePlatformContext(args.project, args.repo);
+    if (ctx.autoDiscovered && format !== 'json') {
+      if (ctx.platform === 'github') {
+        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
       } else {
-        console.error(
-          `Error: Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
-        );
-        process.exit(1);
+        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
       }
-    }
-  } else {
-    // No PR ID provided - auto-detect from current branch
-    if (!project || !repo) {
-      console.error(
-        getMissingRepoErrorMessage('Provide a PR ID or full PR URL')
-      );
-      process.exit(1);
-    }
-
-    const result = await findPRByCurrentBranch(project, repo);
-
-    if (format !== 'json' && result.branch) {
-      console.log(`Searching for PR from branch '${result.branch}'...`);
-    }
-
-    if (!result.success || !result.pr) {
-      console.error(`Error: ${result.error}`);
-      process.exit(1);
-    }
-
-    prId = result.pr.pullRequestId;
-    if (format !== 'json') {
-      console.log(`Found PR #${prId}: ${result.pr.title}`);
       console.log('');
     }
+  } catch (error) {
+    if (
+      !(
+        error instanceof MissingRepoContextError ||
+        error instanceof GitHubAuthError
+      ) ||
+      !args.pr?.startsWith('http')
+    ) {
+      if (
+        error instanceof MissingRepoContextError ||
+        error instanceof GitHubAuthError
+      ) {
+        console.error(error.message);
+        process.exit(1);
+      }
+      throw error;
+    }
+    // Will handle below via URL parsing
+    ctx = undefined;
   }
 
-  // Validate we have project/repo
-  if (!project || !repo) {
-    console.error(getMissingRepoErrorMessage('Provide a full PR URL'));
-    process.exit(1);
-  }
-
-  // Validate prId is set
-  if (prId === undefined) {
-    console.error('Error: Could not determine PR ID.');
+  // Resolve PR ID (handles URL parsing, numeric ID, and auto-detect from branch)
+  if (!ctx) {
     console.error(
-      'Please provide a PR ID, full PR URL, or run from a branch with an associated PR.'
+      'Error: Could not determine repository context. Provide a PR ID or full PR URL.'
     );
     process.exit(1);
   }
+  const resolved = await resolvePRId(args.pr, ctx, format);
+  ctx = resolved.ctx;
+  const prId = resolved.prId;
 
   try {
-    const config = loadAzureDevOpsConfig();
-    const client = new AzureDevOpsClient(config);
-
     if (format !== 'json') {
       console.log(`Fetching diff for PR #${prId}...`);
       console.log('');
     }
 
-    // Get PR details first
-    const pr = await client.getPullRequest(project, repo, prId);
-
-    // Validate refs are present for --file mode with API fallback
-    // (we'll check this inside getDiffData, but pre-validate for better error message)
-    if (args.file && !isGitRepository()) {
-      console.error(
-        'Error: Single file diff requires being in a git repository.'
-      );
-      process.exit(1);
-    }
-
-    // Ensure branches are available locally (auto-fetch if enabled)
-    if (isGitRepository() && pr.sourceRefName && pr.targetRefName) {
-      const sourceBranch = extractBranchName(pr.sourceRefName);
-      const targetBranch = extractBranchName(pr.targetRefName);
-
-      const branchResult = fetchMissingBranches(sourceBranch, targetBranch, {
-        fetch: args.fetch,
-      });
-
-      // Log fetched branches (unless JSON output)
-      if (format !== 'json' && branchResult.fetched.length > 0) {
-        for (const branch of branchResult.fetched) {
-          console.log(`Fetched branch '${branch}'`);
-        }
-        console.log('');
-      }
-    }
-
-    // Get diff data
-    const diffResult = await getDiffData(pr, project, repo, client, {
-      stat: args.stat,
-      nameOnly: args.files,
-      file: args.file,
-    });
-
-    // Check if --file mode is unsupported in fallback
-    if (args.file && diffResult.source === 'api-fallback') {
-      const sourceBranch = extractBranchName(pr.sourceRefName);
-      console.error(
-        `Error: Single file diff requires branch to be available locally.`
-      );
-      console.error(`Run: git fetch origin ${sourceBranch}`);
-      process.exit(1);
-    }
-
-    // Format and output
-    let output: string;
-    if (format === 'json') {
-      output = formatJsonOutput(pr, diffResult, mode);
-    } else if (format === 'markdown') {
-      output = formatMarkdownOutput(pr, diffResult, mode);
+    if (ctx.platform === 'github') {
+      await handleGitHubDiff(ctx, prId, args, mode, format);
     } else {
-      output = formatTextOutput(pr, diffResult, mode);
+      await handleAdoDiff(ctx, prId, args, mode, format);
     }
-
-    console.log(output);
   } catch (error) {
     handleCommandError(error);
   }
 }
+
+// ============================================================================
+// Platform-specific Handler Logic
+// ============================================================================
+
+async function handleAdoDiff(
+  ctx: PlatformContext & { platform: 'azure-devops' },
+  prId: number,
+  args: DiffArgs,
+  mode: DiffMode,
+  format: string
+): Promise<void> {
+  const pr = await ctx.client.getPullRequest(ctx.project, ctx.repo, prId);
+
+  if (args.file && !isGitRepository()) {
+    console.error(
+      'Error: Single file diff requires being in a git repository.'
+    );
+    process.exit(1);
+  }
+
+  // Ensure branches are available locally
+  if (isGitRepository() && pr.sourceRefName && pr.targetRefName) {
+    const sourceBranch = extractBranchName(pr.sourceRefName);
+    const targetBranch = extractBranchName(pr.targetRefName);
+
+    const branchResult = fetchMissingBranches(sourceBranch, targetBranch, {
+      fetch: args.fetch,
+    });
+
+    if (format !== 'json' && branchResult.fetched.length > 0) {
+      for (const branch of branchResult.fetched) {
+        console.log(`Fetched branch '${branch}'`);
+      }
+      console.log('');
+    }
+  }
+
+  const diffResult = await getAdoDiffData(pr, ctx.project, ctx.repo, ctx, {
+    stat: args.stat,
+    nameOnly: args.files,
+    file: args.file,
+  });
+
+  // --file mode unsupported in ADO API fallback
+  if (args.file && diffResult.source === 'api-fallback') {
+    const sourceBranch = extractBranchName(pr.sourceRefName);
+    console.error(
+      `Error: Single file diff requires branch to be available locally.`
+    );
+    console.error(`Run: git fetch origin ${sourceBranch}`);
+    process.exit(1);
+  }
+
+  let output: string;
+  if (format === 'json') {
+    output = formatAdoJsonOutput(pr, diffResult, mode);
+  } else if (format === 'markdown') {
+    output = formatAdoMarkdownOutput(pr, diffResult, mode);
+  } else {
+    output = formatAdoTextOutput(pr, diffResult, mode);
+  }
+
+  console.log(output);
+}
+
+async function handleGitHubDiff(
+  ctx: PlatformContext & { platform: 'github' },
+  prId: number,
+  args: DiffArgs,
+  mode: DiffMode,
+  format: string
+): Promise<void> {
+  const pr = await ctx.client.getPullRequest(ctx.owner, ctx.repo, prId);
+
+  // For GitHub, --file mode with API fallback IS supported (patch field available)
+  // so we don't block it upfront like ADO
+
+  // Ensure branches are available locally
+  if (isGitRepository()) {
+    const sourceBranch = pr.head.ref;
+    const targetBranch = pr.base.ref;
+
+    const branchResult = fetchMissingBranches(sourceBranch, targetBranch, {
+      fetch: args.fetch,
+    });
+
+    if (format !== 'json' && branchResult.fetched.length > 0) {
+      for (const branch of branchResult.fetched) {
+        console.log(`Fetched branch '${branch}'`);
+      }
+      console.log('');
+    }
+  }
+
+  const diffResult = await getGitHubDiffData(pr, ctx, {
+    stat: args.stat,
+    nameOnly: args.files,
+    file: args.file,
+  });
+
+  // For --file mode with GitHub API fallback, show patch from matching file
+  if (args.file && diffResult.source === 'api-fallback') {
+    const ghFiles = (diffResult as GitHubApiDiffResult).files;
+    const matchingFile = ghFiles.find((f) => f.filename === args.file);
+    if (!matchingFile) {
+      console.error(`Error: File '${args.file}' not found in PR changes.`);
+      process.exit(1);
+    }
+    if (!matchingFile.patch) {
+      console.error(
+        `Error: No diff available for '${args.file}' (binary file or too large).`
+      );
+      process.exit(1);
+    }
+    console.log(matchingFile.patch);
+    return;
+  }
+
+  let output: string;
+  if (format === 'json') {
+    output = formatGitHubJsonOutput(pr, diffResult, mode);
+  } else if (format === 'markdown') {
+    output = formatGitHubMarkdownOutput(pr, diffResult, mode);
+  } else {
+    output = formatGitHubTextOutput(pr, diffResult, mode);
+  }
+
+  console.log(output);
+}
+
+// ============================================================================
+// Export
+// ============================================================================
 
 export default {
   command: 'diff',

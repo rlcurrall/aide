@@ -1,26 +1,24 @@
 /**
  * PR update command - Update a pull request
- * Supports Azure DevOps (with GitHub support planned)
- * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/update?view=azure-devops-rest-7.1
+ * Supports Azure DevOps and GitHub
  */
 
-import {
-  buildPrUrl,
-  findPRByCurrentBranch,
-  getMissingRepoErrorMessage,
-  parsePRUrl,
-  resolveRepoContext,
-  validatePRId,
-} from '@lib/ado-utils.js';
+import { MissingRepoContextError, buildPrUrl } from '@lib/ado-utils.js';
 import { ensureRefPrefix } from '@lib/git-utils.js';
-import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
-import { loadAzureDevOpsConfig } from '@lib/config.js';
 import { handleCommandError } from '@lib/errors.js';
 import type {
   AzureDevOpsPullRequest,
   GitRemoteInfo,
   PullRequestUpdateOptions,
 } from '@lib/types.js';
+import type { GitHubPullRequest } from '@lib/github-types.js';
+import {
+  resolvePlatformContext,
+  resolvePRId,
+  GitHubAuthError,
+  type PlatformContext,
+} from '@lib/platform.js';
+import { buildGitHubPrUrl, getGitHubPRStatus } from '@lib/github-utils.js';
 import { validateArgs } from '@lib/validation.js';
 import {
   PrUpdateArgsSchema,
@@ -29,10 +27,11 @@ import {
 } from '@schemas/pr/pr-update.js';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
-/**
- * Format updated PR output based on format type
- */
-function formatOutput(
+// ============================================================================
+// Azure DevOps Formatting
+// ============================================================================
+
+function formatAdoOutput(
   pr: AzureDevOpsPullRequest,
   format: OutputFormat,
   prUrl?: string
@@ -86,11 +85,68 @@ function formatOutput(
   return output;
 }
 
+// ============================================================================
+// GitHub Formatting
+// ============================================================================
+
+function formatGitHubOutput(
+  pr: GitHubPullRequest,
+  format: OutputFormat,
+  url: string
+): string {
+  if (format === 'json') {
+    return JSON.stringify({ ...pr, url }, null, 2);
+  }
+
+  const status = getGitHubPRStatus(pr);
+  const draftStatus = pr.draft ? ' [DRAFT]' : '';
+  const date = new Date(pr.created_at).toISOString().split('T')[0];
+  const labels = pr.labels.map((l) => l.name);
+
+  if (format === 'markdown') {
+    let output = `# PR #${pr.number} Updated${draftStatus}\n\n`;
+    output += `**Title:** ${pr.title}\n`;
+    output += `**Status:** ${status}\n`;
+    output += `**Created:** ${date} by ${pr.user.login}\n`;
+    output += `**Source:** ${pr.head.ref}\n`;
+    output += `**Target:** ${pr.base.ref}\n`;
+    output += `**URL:** ${url}\n`;
+    if (labels.length > 0) {
+      output += `**Labels:** ${labels.join(', ')}\n`;
+    }
+    if (pr.body) {
+      output += `\n## Description\n\n${pr.body}\n`;
+    }
+    return output;
+  }
+
+  // Text format
+  let output = `PR #${pr.number} Updated${draftStatus}\n`;
+  output += '='.repeat(50) + '\n\n';
+  output += `Title: ${pr.title}\n`;
+  output += `Status: ${status}\n`;
+  output += `Created: ${date} by ${pr.user.login}\n`;
+  output += `Source: ${pr.head.ref}\n`;
+  output += `Target: ${pr.base.ref}\n`;
+  output += `URL: ${url}\n`;
+  if (labels.length > 0) {
+    output += `Labels: ${labels.join(', ')}\n`;
+  }
+  if (pr.body) {
+    const shortDesc =
+      pr.body.length > 200 ? pr.body.substring(0, 197) + '...' : pr.body;
+    output += `\nDescription:\n${shortDesc}\n`;
+  }
+
+  return output;
+}
+
+// ============================================================================
+// Handler
+// ============================================================================
+
 async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
   const args = validateArgs(PrUpdateArgsSchema, argv, 'pr-update arguments');
-  let prId: number | undefined;
-  let project: string | undefined = args.project;
-  let repo: string | undefined = args.repo;
   const {
     format,
     title,
@@ -100,8 +156,9 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
     publish,
     abandon,
     activate,
+    tag: tagsToAdd,
+    removeTag: tagsToRemove,
   } = args;
-  let repoInfo: GitRemoteInfo | undefined;
 
   // Validate conflicting flags
   if (draft && publish) {
@@ -114,122 +171,64 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
     process.exit(1);
   }
 
-  // Try auto-discover project/repo from git remote first (needed for PR auto-detection)
+  let ctx: PlatformContext | undefined;
   try {
-    const context = resolveRepoContext(project, repo);
-    if (context.autoDiscovered && context.repoInfo && format !== 'json') {
-      console.log(
-        `Auto-discovered: ${context.repoInfo.org}/${context.repoInfo.project}/${context.repoInfo.repo}`
-      );
-      console.log('');
-    }
-    project = context.project;
-    repo = context.repo;
-    repoInfo = context.repoInfo;
-  } catch {
-    // May still succeed if PR URL is provided
-  }
-
-  // Parse PR ID or URL, or auto-detect from current branch
-  if (args.pr) {
-    if (args.pr.startsWith('http')) {
-      const parsed = parsePRUrl(args.pr);
-      if (!parsed) {
-        console.error(
-          `Error: Invalid PR URL (expected Azure DevOps format): ${args.pr}`
-        );
-        console.error(
-          'Expected format: https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id}'
-        );
-        process.exit(1);
-      }
-      prId = parsed.prId;
-      // URL overrides discovered project/repo
-      project = parsed.project;
-      repo = parsed.repo;
-    } else {
-      const validation = validatePRId(args.pr);
-      if (validation.valid) {
-        prId = validation.value;
+    ctx = resolvePlatformContext(args.project, args.repo);
+    if (ctx.autoDiscovered && format !== 'json') {
+      if (ctx.platform === 'github') {
+        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
       } else {
-        console.error(
-          `Error: Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
-        );
-        process.exit(1);
+        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
       }
-    }
-  } else {
-    // No PR ID provided - auto-detect from current branch
-    // We need project/repo for this
-    if (!project || !repo) {
-      console.error(
-        getMissingRepoErrorMessage('Provide a PR ID or full PR URL')
-      );
-      process.exit(1);
-    }
-
-    const result = await findPRByCurrentBranch(project, repo);
-
-    if (format !== 'json' && result.branch) {
-      console.log(`Searching for PR from branch '${result.branch}'...`);
-    }
-
-    if (!result.success || !result.pr) {
-      console.error(`Error: ${result.error}`);
-      process.exit(1);
-    }
-
-    prId = result.pr.pullRequestId;
-    if (format !== 'json') {
-      console.log(`Found PR #${prId}: ${result.pr.title}`);
       console.log('');
     }
+  } catch (error) {
+    if (
+      !(
+        error instanceof MissingRepoContextError ||
+        error instanceof GitHubAuthError
+      ) ||
+      !args.pr?.startsWith('http')
+    ) {
+      if (
+        error instanceof MissingRepoContextError ||
+        error instanceof GitHubAuthError
+      ) {
+        console.error(error.message);
+        process.exit(1);
+      }
+      throw error;
+    }
+    // Will handle below via URL parsing
+    ctx = undefined;
   }
 
-  // Validate we have project/repo (should be set by now, but double-check)
-  if (!project || !repo) {
-    console.error(getMissingRepoErrorMessage('Provide a full PR URL'));
-    process.exit(1);
-  }
-
-  // Validate prId is set
-  if (prId === undefined) {
-    console.error('Error: Could not determine PR ID.');
+  // Resolve PR ID from --pr flag or auto-detect from current branch
+  if (!ctx) {
     console.error(
-      'Please provide a PR ID, full PR URL, or run from a branch with an associated PR.'
+      'Error: Could not determine repository context. Provide a PR ID or full PR URL.'
     );
     process.exit(1);
   }
+  const resolved = await resolvePRId(args.pr, ctx, format);
+  const prId = resolved.prId;
+  ctx = resolved.ctx;
 
-  // Build update options
-  const updates: PullRequestUpdateOptions = {};
-
-  if (title !== undefined) {
-    updates.title = title;
-  }
-
-  if (description !== undefined) {
-    updates.description = description;
-  }
-
-  if (draft) {
-    updates.isDraft = true;
-  } else if (publish) {
-    updates.isDraft = false;
-  }
-
-  if (abandon) {
-    updates.status = 'abandoned';
-  } else if (activate) {
-    updates.status = 'active';
-  }
-
-  if (target) {
-    updates.targetRefName = ensureRefPrefix(target);
-  }
+  const hasTagOps =
+    (tagsToAdd && tagsToAdd.length > 0) ||
+    (tagsToRemove && tagsToRemove.length > 0);
 
   // Check if there's anything to update
-  if (Object.keys(updates).length === 0) {
+  if (
+    title === undefined &&
+    description === undefined &&
+    target === undefined &&
+    !draft &&
+    !publish &&
+    !abandon &&
+    !activate &&
+    !hasTagOps
+  ) {
     console.error('Error: No updates specified.');
     console.error('');
     console.error('Use one or more of these flags:');
@@ -240,46 +239,210 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
     console.error('  --publish     (publish draft PR)');
     console.error('  --abandon     (abandon PR)');
     console.error('  --activate    (reactivate abandoned PR)');
+    console.error('  --tag "tag-name"   (add a tag)');
+    console.error('  --remove-tag "tag" (remove a tag)');
     process.exit(1);
   }
 
+  if (format !== 'json') {
+    console.log(`Updating PR #${prId}...`);
+    if (title) console.log(`  Title: ${title}`);
+    if (description)
+      console.log(
+        `  Description: ${description.substring(0, 50)}${description.length > 50 ? '...' : ''}`
+      );
+    if (target) console.log(`  Target branch: ${target}`);
+    if (draft) console.log('  Setting as draft');
+    if (publish) console.log('  Publishing draft');
+    if (abandon) console.log('  Abandoning PR');
+    if (activate) console.log('  Reactivating PR');
+    if (tagsToAdd && tagsToAdd.length > 0)
+      console.log(`  Adding tags: ${tagsToAdd.join(', ')}`);
+    if (tagsToRemove && tagsToRemove.length > 0)
+      console.log(`  Removing tags: ${tagsToRemove.join(', ')}`);
+    console.log('');
+  }
+
   try {
-    const config = loadAzureDevOpsConfig();
-    const client = new AzureDevOpsClient(config);
+    if (ctx.platform === 'github') {
+      // =======================================================================
+      // GitHub path
+      // =======================================================================
+      const { owner, repo } = ctx;
 
-    if (format !== 'json') {
-      console.log(`Updating PR #${prId}...`);
-      if (title) console.log(`  Title: ${title}`);
-      if (description)
-        console.log(
-          `  Description: ${description.substring(0, 50)}${description.length > 50 ? '...' : ''}`
+      // Build REST API update payload
+      const ghUpdates: Record<string, unknown> = {};
+      if (title !== undefined) ghUpdates.title = title;
+      if (description !== undefined) ghUpdates.body = description;
+      if (target !== undefined) ghUpdates.base = target;
+      if (abandon) ghUpdates.state = 'closed';
+      else if (activate) ghUpdates.state = 'open';
+
+      // Apply REST updates if any
+      if (Object.keys(ghUpdates).length > 0) {
+        await ctx.client.updatePullRequest(
+          owner,
+          repo,
+          prId,
+          ghUpdates as {
+            title?: string;
+            body?: string;
+            state?: 'open' | 'closed';
+            base?: string;
+          }
         );
-      if (target) console.log(`  Target branch: ${target}`);
-      if (draft) console.log('  Setting as draft');
-      if (publish) console.log('  Publishing draft');
-      if (abandon) console.log('  Abandoning PR');
-      if (activate) console.log('  Reactivating PR');
-      console.log('');
+      }
+
+      // Draft/publish require GraphQL mutations (separate from REST update)
+      if (draft) {
+        await ctx.client.convertToDraft(owner, repo, prId);
+      } else if (publish) {
+        await ctx.client.publishDraftPR(owner, repo, prId);
+      }
+
+      // Handle label additions
+      if (tagsToAdd && tagsToAdd.length > 0) {
+        try {
+          await ctx.client.addLabels(owner, repo, prId, tagsToAdd);
+        } catch (error) {
+          console.error(
+            `Warning: Failed to add labels: ${error instanceof Error ? error.message : error}`
+          );
+        }
+      }
+
+      // Handle label removals
+      if (tagsToRemove && tagsToRemove.length > 0) {
+        for (const label of tagsToRemove) {
+          try {
+            await ctx.client.removeLabel(owner, repo, prId, label);
+          } catch (error) {
+            console.error(
+              `Warning: Failed to remove label '${label}': ${error instanceof Error ? error.message : error}`
+            );
+          }
+        }
+      }
+
+      // Refetch to get current state after all updates
+      const updatedPR = await ctx.client.getPullRequest(owner, repo, prId);
+      const prUrl = buildGitHubPrUrl(owner, repo, prId);
+      const output = formatGitHubOutput(updatedPR, format, prUrl);
+      console.log(output);
+    } else {
+      // =======================================================================
+      // Azure DevOps path
+      // =======================================================================
+
+      // Build update options
+      const updates: PullRequestUpdateOptions = {};
+
+      if (title !== undefined) {
+        updates.title = title;
+      }
+
+      if (description !== undefined) {
+        updates.description = description;
+      }
+
+      if (draft) {
+        updates.isDraft = true;
+      } else if (publish) {
+        updates.isDraft = false;
+      }
+
+      if (abandon) {
+        updates.status = 'abandoned';
+      } else if (activate) {
+        updates.status = 'active';
+      }
+
+      if (target) {
+        updates.targetRefName = ensureRefPrefix(target);
+      }
+
+      // Perform the PR field update (if there are any field changes)
+      let updatedPR: AzureDevOpsPullRequest;
+      if (Object.keys(updates).length > 0) {
+        updatedPR = await ctx.client.updatePullRequest(
+          ctx.project,
+          ctx.repo,
+          prId,
+          updates
+        );
+      } else {
+        // Tag-only update - fetch current PR state
+        updatedPR = await ctx.client.getPullRequest(
+          ctx.project,
+          ctx.repo,
+          prId
+        );
+      }
+
+      // Handle tag removals
+      if (tagsToRemove && tagsToRemove.length > 0) {
+        const labelsResponse = await ctx.client.getPullRequestLabels(
+          ctx.project,
+          ctx.repo,
+          prId
+        );
+        const existingLabels = labelsResponse.value;
+
+        for (const tagName of tagsToRemove) {
+          const label = existingLabels.find(
+            (l) => l.name.toLowerCase() === tagName.toLowerCase()
+          );
+          if (label) {
+            try {
+              await ctx.client.removePullRequestLabel(
+                ctx.project,
+                ctx.repo,
+                prId,
+                label.id
+              );
+            } catch (error) {
+              console.error(
+                `Warning: Failed to remove tag '${tagName}': ${error instanceof Error ? error.message : error}`
+              );
+            }
+          } else {
+            console.error(`Warning: Tag '${tagName}' not found on PR #${prId}`);
+          }
+        }
+      }
+
+      // Handle tag additions
+      if (tagsToAdd && tagsToAdd.length > 0) {
+        for (const tagName of tagsToAdd) {
+          try {
+            await ctx.client.addPullRequestLabel(
+              ctx.project,
+              ctx.repo,
+              prId,
+              tagName
+            );
+          } catch (error) {
+            console.error(
+              `Warning: Failed to add tag '${tagName}': ${error instanceof Error ? error.message : error}`
+            );
+          }
+        }
+      }
+
+      // Build PR URL for output
+      const { loadAzureDevOpsConfig } = await import('@lib/config.js');
+      const config = loadAzureDevOpsConfig();
+      const repoInfo: GitRemoteInfo = {
+        org: ctx.org,
+        project: ctx.project,
+        repo: ctx.repo,
+      };
+      const prUrl = buildPrUrl(repoInfo, prId, config.orgUrl);
+
+      // Format and output
+      const output = formatAdoOutput(updatedPR, format, prUrl);
+      console.log(output);
     }
-
-    // Perform the update
-    const updatedPR = await client.updatePullRequest(
-      project,
-      repo,
-      prId,
-      updates
-    );
-
-    // Build PR URL for output
-    const prUrl = buildPrUrl(
-      repoInfo || { org: '', project, repo },
-      prId,
-      config.orgUrl
-    );
-
-    // Format and output
-    const output = formatOutput(updatedPR, format, prUrl);
-    console.log(output);
   } catch (error) {
     handleCommandError(error);
   }
@@ -335,6 +498,16 @@ export default {
     activate: {
       type: 'boolean',
       describe: 'Reactivate an abandoned PR',
+    },
+    tag: {
+      type: 'array',
+      string: true,
+      describe: 'Add tag(s) to the PR',
+    },
+    'remove-tag': {
+      type: 'array',
+      string: true,
+      describe: 'Remove tag(s) from the PR',
     },
   },
   handler,

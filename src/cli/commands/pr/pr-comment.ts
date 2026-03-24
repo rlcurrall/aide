@@ -1,19 +1,23 @@
 /**
  * PR comment command - Post a comment on a pull request
- * Supports Azure DevOps (with GitHub support planned)
+ * Supports Azure DevOps and GitHub
  * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/create?view=azure-devops-rest-7.1
+ * @see https://docs.github.com/en/rest/issues/comments
+ * @see https://docs.github.com/en/rest/pulls/comments
  */
 
-import {
-  findPRByCurrentBranch,
-  getMissingRepoErrorMessage,
-  parsePRUrl,
-  resolveRepoContext,
-  validatePRId,
-} from '@lib/ado-utils.js';
-import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
-import { loadAzureDevOpsConfig } from '@lib/config.js';
+import { MissingRepoContextError } from '@lib/ado-utils.js';
 import { handleCommandError } from '@lib/errors.js';
+import type {
+  GitHubIssueComment,
+  GitHubReviewComment,
+} from '@lib/github-types.js';
+import {
+  resolvePlatformContext,
+  resolvePRId,
+  GitHubAuthError,
+  type PlatformContext,
+} from '@lib/platform.js';
 import type { CreateThreadResponse } from '@lib/types.js';
 import { validateArgs } from '@lib/validation.js';
 import {
@@ -23,10 +27,14 @@ import {
 } from '@schemas/pr/pr-comment.js';
 import type { ArgumentsCamelCase, Argv, CommandModule } from 'yargs';
 
+// ============================================================================
+// Azure DevOps Output Formatting
+// ============================================================================
+
 /**
- * Format the output based on format type
+ * Format ADO thread response for output
  */
-function formatOutput(
+function formatAdoOutput(
   thread: CreateThreadResponse,
   format: OutputFormat,
   prId: number,
@@ -86,11 +94,80 @@ function formatOutput(
   return output;
 }
 
+// ============================================================================
+// GitHub Output Formatting
+// ============================================================================
+
+/**
+ * Format a GitHub comment response for output.
+ * Handles both issue comments (general) and review comments (file-level).
+ */
+function formatGitHubOutput(
+  response: GitHubIssueComment | GitHubReviewComment,
+  format: OutputFormat,
+  prId: number,
+  filePath?: string,
+  line?: number
+): string {
+  const isReview = 'path' in response && !!response.path;
+
+  if (format === 'json') {
+    return JSON.stringify(response, null, 2);
+  }
+
+  const date = new Date(response.created_at).toISOString().split('T')[0];
+  const author = response.user.login;
+  const locationInfo = filePath
+    ? ` on ${filePath}${line ? `:${line}` : ''}`
+    : '';
+
+  if (format === 'markdown') {
+    let output = `# Comment Posted on PR #${prId}\n\n`;
+    output += `**Comment ID:** ${response.id}\n`;
+    output += `**Type:** ${isReview ? 'Review comment' : 'Issue comment'}\n`;
+    output += `**Author:** ${author}\n`;
+    output += `**Date:** ${date}\n`;
+    if (filePath) {
+      output += `**Location:** \`${filePath}\``;
+      if (line) {
+        output += ` (line ${line})`;
+      }
+      output += '\n';
+    }
+    output += `**URL:** ${response.html_url}\n`;
+    output += `\n---\n\n`;
+    output += `${response.body}\n`;
+
+    return output;
+  }
+
+  // Text format
+  let output = `Comment posted successfully${locationInfo}!\n`;
+  output += '='.repeat(50) + '\n\n';
+  output += `Comment ID: ${response.id}\n`;
+  output += `Type: ${isReview ? 'Review comment' : 'Issue comment'}\n`;
+  output += `PR: #${prId}\n`;
+  output += `Author: ${author}\n`;
+  output += `Date: ${date}\n`;
+  if (filePath) {
+    output += `File: ${filePath}`;
+    if (line) {
+      output += `:${line}`;
+    }
+    output += '\n';
+  }
+  output += `URL: ${response.html_url}\n`;
+  output += `\nComment:\n  ${response.body}\n`;
+
+  return output;
+}
+
+// ============================================================================
+// Command Handler
+// ============================================================================
+
 async function handler(argv: ArgumentsCamelCase<PrCommentArgs>): Promise<void> {
   const args = validateArgs(PrCommentArgsSchema, argv, 'pr-comment arguments');
-  let prId: number | undefined;
-  let project: string | undefined = args.project;
-  let repo: string | undefined = args.repo;
   const { format, comment, file, line, endLine } = args;
 
   // Validate file/line requirements
@@ -115,96 +192,35 @@ async function handler(argv: ArgumentsCamelCase<PrCommentArgs>): Promise<void> {
     process.exit(1);
   }
 
-  // Try auto-discover project/repo from git remote first (needed for PR auto-detection)
+  // Resolve platform context
+  let ctx: PlatformContext;
   try {
-    const context = resolveRepoContext(project, repo);
-    if (context.autoDiscovered && context.repoInfo && format !== 'json') {
-      console.log(
-        `Auto-discovered: ${context.repoInfo.org}/${context.repoInfo.project}/${context.repoInfo.repo}`
-      );
-      console.log('');
-    }
-    project = context.project;
-    repo = context.repo;
-  } catch {
-    // May still succeed if PR URL is provided
-  }
-
-  // Parse PR ID or URL, or auto-detect from current branch
-  if (args.pr) {
-    if (args.pr.startsWith('http')) {
-      const parsed = parsePRUrl(args.pr);
-      if (!parsed) {
-        console.error(
-          `Error: Invalid PR URL (expected Azure DevOps format): ${args.pr}`
-        );
-        console.error(
-          'Expected format: https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id}'
-        );
-        process.exit(1);
-      }
-      prId = parsed.prId;
-      // URL overrides discovered project/repo
-      project = parsed.project;
-      repo = parsed.repo;
-    } else {
-      const validation = validatePRId(args.pr);
-      if (validation.valid) {
-        prId = validation.value;
+    ctx = resolvePlatformContext(args.project, args.repo);
+    if (ctx.autoDiscovered && format !== 'json') {
+      if (ctx.platform === 'github') {
+        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
       } else {
-        console.error(
-          `Error: Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
-        );
-        process.exit(1);
+        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
       }
-    }
-  } else {
-    // No PR ID provided - auto-detect from current branch
-    // We need project/repo for this
-    if (!project || !repo) {
-      console.error(
-        getMissingRepoErrorMessage('Provide a PR ID or full PR URL')
-      );
-      process.exit(1);
-    }
-
-    const result = await findPRByCurrentBranch(project, repo);
-
-    if (format !== 'json' && result.branch) {
-      console.log(`Searching for PR from branch '${result.branch}'...`);
-    }
-
-    if (!result.success || !result.pr) {
-      console.error(`Error: ${result.error}`);
-      process.exit(1);
-    }
-
-    prId = result.pr.pullRequestId;
-    if (format !== 'json') {
-      console.log(`Found PR #${prId}: ${result.pr.title}`);
       console.log('');
     }
+  } catch (error) {
+    if (
+      error instanceof MissingRepoContextError ||
+      error instanceof GitHubAuthError
+    ) {
+      console.error(error.message);
+      process.exit(1);
+    }
+    throw error;
   }
 
-  // Validate we have project/repo (should be set by now, but double-check)
-  if (!project || !repo) {
-    console.error(getMissingRepoErrorMessage('Provide a full PR URL'));
-    process.exit(1);
-  }
-
-  // Validate prId is set (should be set by now via URL parsing or branch detection)
-  if (prId === undefined) {
-    console.error('Error: Could not determine PR ID.');
-    console.error(
-      'Please provide a PR ID, full PR URL, or run from a branch with an associated PR.'
-    );
-    process.exit(1);
-  }
+  // Resolve PR ID
+  const resolved = await resolvePRId(args.pr, ctx, format);
+  const prId = resolved.prId;
+  ctx = resolved.ctx;
 
   try {
-    const config = loadAzureDevOpsConfig();
-    const client = new AzureDevOpsClient(config);
-
     if (format !== 'json') {
       console.log(`Posting comment to PR #${prId}...`);
       if (file) {
@@ -214,24 +230,62 @@ async function handler(argv: ArgumentsCamelCase<PrCommentArgs>): Promise<void> {
       console.log('');
     }
 
-    // Create the thread with the comment
-    const thread = await client.createPullRequestThread(
-      project,
-      repo,
-      prId,
-      comment,
-      file && line
-        ? {
-            filePath: file,
-            line,
-            endLine,
-          }
-        : undefined
-    );
+    if (ctx.platform === 'github') {
+      // GitHub path
+      const { owner, repo } = ctx;
+      let response: GitHubIssueComment | GitHubReviewComment;
 
-    // Format and output
-    const output = formatOutput(thread, format, prId, file, line);
-    console.log(output);
+      if (file && line) {
+        // File-specific review comment: need the head SHA from the PR
+        const pr = await ctx.client.getPullRequest(owner, repo, prId);
+        const commitId = pr.head.sha;
+
+        // GitHub file paths should not have a leading '/'
+        const ghFilePath = file.startsWith('/') ? file.slice(1) : file;
+
+        response = await ctx.client.createReviewComment(
+          owner,
+          repo,
+          prId,
+          comment,
+          {
+            path: ghFilePath,
+            line,
+            commit_id: commitId,
+            ...(endLine ? { start_line: line, line: endLine } : {}),
+          }
+        );
+      } else {
+        // General issue comment
+        response = await ctx.client.createIssueComment(
+          owner,
+          repo,
+          prId,
+          comment
+        );
+      }
+
+      const output = formatGitHubOutput(response, format, prId, file, line);
+      console.log(output);
+    } else {
+      // Azure DevOps path
+      const thread = await ctx.client.createPullRequestThread(
+        ctx.project,
+        ctx.repo,
+        prId,
+        comment,
+        file && line
+          ? {
+              filePath: file,
+              line,
+              endLine,
+            }
+          : undefined
+      );
+
+      const output = formatAdoOutput(thread, format, prId, file, line);
+      console.log(output);
+    }
   } catch (error) {
     handleCommandError(error);
   }
