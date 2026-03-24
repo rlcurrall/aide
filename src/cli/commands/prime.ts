@@ -6,11 +6,12 @@
  *
  * Design considerations:
  * - Outputs minimal context (~80 tokens) to preserve context budget
- * - Uses generic "Pull Requests" language to support future GitHub integration
+ * - Uses generic "Pull Requests" language to support both Azure DevOps and GitHub
  * - Silent exit (code 0) on any error to not disrupt sessions
  * - Shows configuration status warnings when env vars are missing
  */
 
+import { spawnSync } from 'bun';
 import type { CommandModule } from 'yargs';
 
 /**
@@ -24,12 +25,29 @@ function isJiraConfigured(): boolean {
 }
 
 /**
- * Check if Azure DevOps environment variables are configured
+ * Check if any PR platform is configured (Azure DevOps or GitHub via gh CLI/token)
  */
-function isAzureDevOpsConfigured(): boolean {
-  const hasOrgUrl = !!process.env.AZURE_DEVOPS_ORG_URL;
-  const hasPat = !!process.env.AZURE_DEVOPS_PAT;
-  return hasOrgUrl && hasPat;
+function isPRPlatformConfigured(): boolean {
+  // Azure DevOps
+  const hasAdoOrgUrl = !!process.env.AZURE_DEVOPS_ORG_URL;
+  const hasAdoPat = !!process.env.AZURE_DEVOPS_PAT;
+  if (hasAdoOrgUrl && hasAdoPat) return true;
+
+  // GitHub via token
+  if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) return true;
+
+  // GitHub via gh CLI
+  try {
+    const result = spawnSync(['gh', 'auth', 'status'], {
+      stdout: 'ignore',
+      stderr: 'ignore',
+    });
+    if (result.exitCode === 0) return true;
+  } catch {
+    // gh not available
+  }
+
+  return false;
 }
 
 /**
@@ -37,10 +55,10 @@ function isAzureDevOpsConfigured(): boolean {
  */
 function buildConfigStatusSection(): string {
   const jiraConfigured = isJiraConfigured();
-  const adoConfigured = isAzureDevOpsConfigured();
+  const prConfigured = isPRPlatformConfigured();
 
   // If everything is configured, return empty string (no status section needed)
-  if (jiraConfigured && adoConfigured) {
+  if (jiraConfigured && prConfigured) {
     return '';
   }
 
@@ -54,11 +72,11 @@ function buildConfigStatusSection(): string {
     );
   }
 
-  if (adoConfigured) {
+  if (prConfigured) {
     lines.push('- Pull Requests: Configured');
   } else {
     lines.push(
-      '- Pull Requests: Not configured (set AZURE_DEVOPS_ORG_URL, AZURE_DEVOPS_PAT)'
+      '- Pull Requests: Not configured (run `gh auth login` for GitHub, or set AZURE_DEVOPS_ORG_URL + AZURE_DEVOPS_PAT for Azure DevOps)'
     );
   }
 

@@ -1,7 +1,7 @@
 {
   "name": "aide",
   "version": "0.0.13",
-  "description": "AI agent tools CLI for Jira and Azure DevOps",
+  "description": "AI agent tools CLI for Jira, Azure DevOps, and GitHub",
   "module": "index.ts",
   "type": "module",
   "private": true,

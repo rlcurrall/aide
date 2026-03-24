@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the **aide CLI** - a unified command-line tool for AI coding agents to interact with Jira and Azure DevOps APIs. Built with Bun/TypeScript, it provides a single binary that can be compiled for Windows, Linux, and macOS.
+This is the **aide CLI** - a unified command-line tool for AI coding agents to interact with Jira, Azure DevOps, and GitHub APIs. Built with Bun/TypeScript, it provides a single binary that can be compiled for Windows, Linux, and macOS.
 
 The CLI follows a hierarchical command structure: `aide <service> <action> [options]`
 
