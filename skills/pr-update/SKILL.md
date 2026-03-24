@@ -18,22 +18,25 @@ Update an existing pull request's title, description, or status.
 ## How to Execute
 
 Run:
+
 ```bash
 aide pr update [--pr <id>] [options]
 ```
 
 ### Flags
 
-| Flag            | Description                     |
-|-----------------|---------------------------------|
-| `--pr`          | PR ID (auto-detected if omitted)|
-| `--title`       | Update PR title                 |
-| `--description` | Update PR description           |
-| `--target`      | Change target/base branch       |
-| `--draft`       | Convert to draft PR             |
-| `--publish`     | Publish draft PR (make active)  |
-| `--abandon`     | Abandon the PR                  |
-| `--activate`    | Reactivate an abandoned PR      |
+| Flag            | Description                            |
+| --------------- | -------------------------------------- |
+| `--pr`          | PR ID (auto-detected if omitted)       |
+| `--title`       | Update PR title                        |
+| `--description` | Update PR description                  |
+| `--target`      | Change target/base branch              |
+| `--draft`       | Convert to draft PR                    |
+| `--publish`     | Publish draft PR (make active)         |
+| `--abandon`     | Abandon the PR                         |
+| `--activate`    | Reactivate an abandoned PR             |
+| `--tag`         | Add tag(s) to the PR (repeatable)      |
+| `--remove-tag`  | Remove tag(s) from the PR (repeatable) |
 
 ## Output Includes
 
@@ -62,16 +65,25 @@ aide pr update --pr 24094 --abandon
 
 # Reactivate abandoned PR
 aide pr update --pr 24094 --activate
+
+# Add tags
+aide pr update --tag bug --tag performance
+
+# Remove tags
+aide pr update --remove-tag "old-tag"
+
+# Tag-only update (no other fields needed)
+aide pr update --tag "new-tag"
 ```
 
 ## PR Lifecycle Management
 
-| Status      | Action               | Use Case                              |
-|-------------|----------------------|---------------------------------------|
-| Draft       | `--publish`          | Ready for review                      |
-| Active      | `--draft`            | Need more work before review          |
-| Active      | `--abandon`          | Close without merging                 |
-| Abandoned   | `--activate`         | Reopen previously abandoned PR        |
+| Status    | Action       | Use Case                       |
+| --------- | ------------ | ------------------------------ |
+| Draft     | `--publish`  | Ready for review               |
+| Active    | `--draft`    | Need more work before review   |
+| Active    | `--abandon`  | Close without merging          |
+| Abandoned | `--activate` | Reopen previously abandoned PR |
 
 ## Best Practices
 
@@ -83,5 +95,6 @@ aide pr update --pr 24094 --activate
 ## Next Steps
 
 After updating a PR:
+
 - Use **pr-comments** skill to check for new feedback
 - Use **pr-view** skill to verify changes

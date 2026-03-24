@@ -18,19 +18,20 @@ Discover what fields are available when creating or updating Jira tickets.
 ## How to Execute
 
 Run:
+
 ```bash
 aide jira fields PROJECT [options]
 ```
 
 ### Options
 
-| Flag           | Short | Description                                         |
-|----------------|-------|-----------------------------------------------------|
-| `--type`       | `-t`  | Issue type (e.g., Task, Bug). If omitted, shows all |
-| `--filter`     | `-f`  | Filter: all, required, optional, custom, system     |
-| `--show-values`| `-v`  | Display allowed values for select fields            |
-| `--max-values` |       | Maximum values to display per field (default: 10)   |
-| `--format`     |       | Output format: text, json, markdown                 |
+| Flag            | Short | Description                                         |
+| --------------- | ----- | --------------------------------------------------- |
+| `--type`        | `-t`  | Issue type (e.g., Task, Bug). If omitted, shows all |
+| `--filter`      | `-f`  | Filter: all, required, optional, custom, system     |
+| `--show-values` | `-v`  | Display allowed values for select fields            |
+| `--max-values`  |       | Maximum values to display per field (default: 10)   |
+| `--format`      |       | Output format: text, json, markdown                 |
 
 ## Common Patterns
 
@@ -67,6 +68,7 @@ aide jira update PROJ-123 --field "Severity=High"
 ```
 
 The `--field` flag automatically:
+
 - Resolves field names to internal IDs
 - Formats values based on field type
 - Validates values and shows allowed options on error
@@ -81,12 +83,12 @@ The `--field` flag automatically:
 
 ## Use Cases
 
-| Goal                        | Command                                              |
-|-----------------------------|------------------------------------------------------|
-| Find required fields        | `aide jira fields PROJ -t Bug --filter required`     |
-| See custom fields           | `aide jira fields PROJ --filter custom`              |
-| Get allowed values          | `aide jira fields PROJ -t Bug --show-values`         |
-| Get metadata for automation | `aide jira fields PROJ --format json`                |
+| Goal                        | Command                                          |
+| --------------------------- | ------------------------------------------------ |
+| Find required fields        | `aide jira fields PROJ -t Bug --filter required` |
+| See custom fields           | `aide jira fields PROJ --filter custom`          |
+| Get allowed values          | `aide jira fields PROJ -t Bug --show-values`     |
+| Get metadata for automation | `aide jira fields PROJ --format json`            |
 
 ## Best Practices
 
@@ -98,5 +100,6 @@ The `--field` flag automatically:
 ## Next Steps
 
 After discovering fields:
+
 - Use **ticket-create** skill to create tickets with correct fields
 - Use **ticket-update** skill to update custom fields

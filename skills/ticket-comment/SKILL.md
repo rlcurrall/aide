@@ -18,11 +18,13 @@ Add a comment to a Jira ticket. Comments support markdown formatting.
 ## How to Execute
 
 Run:
+
 ```bash
 aide jira comment TICKET-KEY "comment text" [--format text|json|markdown]
 ```
 
 Or read from file:
+
 ```bash
 aide jira comment TICKET-KEY --file ./comment.md
 ```
@@ -30,7 +32,7 @@ aide jira comment TICKET-KEY --file ./comment.md
 ### Flags
 
 | Flag       | Short | Description                         |
-|------------|-------|-------------------------------------|
+| ---------- | ----- | ----------------------------------- |
 | `--file`   | `-f`  | Read comment from markdown file     |
 | `--format` |       | Output format: text, json, markdown |
 
@@ -61,13 +63,13 @@ aide jira comment PROJ-123 --file ./status-update.md
 
 ## Use Cases
 
-| Purpose               | Example                                              |
-|-----------------------|------------------------------------------------------|
-| Progress update       | "Completed initial implementation"                   |
-| Asking questions      | "Should this handle edge case X?"                    |
-| Documenting decisions | "Using OAuth 2.0 with PKCE for enhanced security"    |
-| Communicating blockers| "Blocked on API access - waiting for credentials"    |
-| Closing notes         | "Implementation complete, PR #123 merged"            |
+| Purpose                | Example                                           |
+| ---------------------- | ------------------------------------------------- |
+| Progress update        | "Completed initial implementation"                |
+| Asking questions       | "Should this handle edge case X?"                 |
+| Documenting decisions  | "Using OAuth 2.0 with PKCE for enhanced security" |
+| Communicating blockers | "Blocked on API access - waiting for credentials" |
+| Closing notes          | "Implementation complete, PR #123 merged"         |
 
 ## Best Practices
 
@@ -79,5 +81,6 @@ aide jira comment PROJ-123 --file ./status-update.md
 ## Next Steps
 
 After adding a comment:
+
 - Use **ticket-comments** skill to see all comments
 - Use **ticket-transition** skill to change status if appropriate

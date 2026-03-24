@@ -18,6 +18,7 @@ Retrieve and view comments from a Jira ticket with filtering options.
 ## How to Execute
 
 Run:
+
 ```bash
 aide jira comments TICKET-KEY [options]
 ```
@@ -25,7 +26,7 @@ aide jira comments TICKET-KEY [options]
 ### Flags
 
 | Flag            | Description                                           |
-|-----------------|-------------------------------------------------------|
+| --------------- | ----------------------------------------------------- |
 | `--author`      | Filter comments by author name/email                  |
 | `--since`       | Show comments since date (YYYY-MM-DD)                 |
 | `--latest`      | Show only N most recent comments                      |
@@ -67,12 +68,12 @@ aide jira comments PROJ-123 --format json
 
 ## Use Cases
 
-| Goal                    | Command                                              |
-|-------------------------|------------------------------------------------------|
-| Review discussion       | `aide jira comments PROJ-123`                        |
-| Check recent updates    | `aide jira comments PROJ-123 --latest 5`             |
-| See specific reviewer   | `aide jira comments PROJ-123 --author "name"`        |
-| Track since last check  | `aide jira comments PROJ-123 --since 2024-01-15`     |
+| Goal                   | Command                                          |
+| ---------------------- | ------------------------------------------------ |
+| Review discussion      | `aide jira comments PROJ-123`                    |
+| Check recent updates   | `aide jira comments PROJ-123 --latest 5`         |
+| See specific reviewer  | `aide jira comments PROJ-123 --author "name"`    |
+| Track since last check | `aide jira comments PROJ-123 --since 2024-01-15` |
 
 ## Best Practices
 
@@ -84,6 +85,7 @@ aide jira comments PROJ-123 --format json
 ## Next Steps
 
 After reviewing comments:
+
 - Use **ticket-comment** skill to respond
 - Use **ticket-update** skill if changes are needed
 - Use **ticket-transition** skill to change status

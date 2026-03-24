@@ -18,6 +18,7 @@ Fetch PR comments to review feedback from reviewers.
 ## How to Execute
 
 Run:
+
 ```bash
 aide pr comments [--pr <id|url>] [options]
 ```
@@ -25,7 +26,7 @@ aide pr comments [--pr <id|url>] [options]
 ### Flags
 
 | Flag               | Description                                         |
-|--------------------|-----------------------------------------------------|
+| ------------------ | --------------------------------------------------- |
 | `--pr`             | PR ID or URL (auto-detected from branch if omitted) |
 | `--latest`         | Limit to N most recent comments                     |
 | `--thread-status`  | Filter by thread status: active, fixed, closed      |
@@ -36,6 +37,7 @@ aide pr comments [--pr <id|url>] [options]
 ## Output Includes
 
 Comments organized by:
+
 1. File path and line number
 2. Thread status (active, fixed, etc.)
 3. Author and timestamp
@@ -67,6 +69,7 @@ aide pr comments --format json
 ## Addressing Feedback
 
 After loading comments:
+
 1. **Prioritize**: Address blocking/critical feedback first
 2. **Understand context**: Read the full thread, not just latest comment
 3. **Implement fixes**: Make changes based on feedback
@@ -75,6 +78,7 @@ After loading comments:
 ## Next Steps
 
 After reviewing comments:
+
 - Use **pr-reply** skill to respond to specific threads
 - Use **pr-comment** skill to post general updates
 - Use **pr-diff** skill to see the code being discussed

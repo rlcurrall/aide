@@ -18,11 +18,13 @@ Change the workflow status of a Jira ticket (e.g., move to "In Progress", "Done"
 ## How to Execute
 
 List available transitions first:
+
 ```bash
 aide jira transition TICKET-KEY --list
 ```
 
 Then transition to desired status:
+
 ```bash
 aide jira transition TICKET-KEY "Status Name" [options]
 ```
@@ -30,7 +32,7 @@ aide jira transition TICKET-KEY "Status Name" [options]
 ### Flags
 
 | Flag           | Short | Description                                    |
-|----------------|-------|------------------------------------------------|
+| -------------- | ----- | ---------------------------------------------- |
 | `--list`       | `-l`  | List available transitions for the ticket      |
 | `--comment`    | `-c`  | Add comment with the transition                |
 | `--resolution` | `-r`  | Set resolution (for Done/Resolved transitions) |
@@ -39,11 +41,13 @@ aide jira transition TICKET-KEY "Status Name" [options]
 ## Output
 
 **When transitioning:**
+
 1. Confirmation of successful transition
 2. New status name
 3. URL to view the ticket
 
 **When listing (`--list`):**
+
 1. Available transition names
 2. Target status for each transition
 
@@ -70,12 +74,12 @@ aide jira transition PROJ-123 "Code Review"
 
 Status names vary by project workflow. Common ones include:
 
-| Category    | Status Names                          |
-|-------------|---------------------------------------|
-| Not Started | To Do, Open, Backlog                  |
-| In Progress | In Progress, In Development           |
-| Review      | Code Review, In Review, QA            |
-| Completed   | Done, Closed, Resolved                |
+| Category    | Status Names                |
+| ----------- | --------------------------- |
+| Not Started | To Do, Open, Backlog        |
+| In Progress | In Progress, In Development |
+| Review      | Code Review, In Review, QA  |
+| Completed   | Done, Closed, Resolved      |
 
 ## Best Practices
 
@@ -100,5 +104,6 @@ aide jira transition PROJ-123 "Done" --comment "Merged and deployed" --resolutio
 ## Next Steps
 
 After transitioning:
+
 - Use **ticket** skill to verify the new status
 - Use **ticket-comment** skill to add additional notes

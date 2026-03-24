@@ -18,6 +18,7 @@ Fetch detailed information about a Jira ticket to understand requirements and co
 ## How to Execute
 
 Run:
+
 ```bash
 aide jira view <TICKET-KEY> [--format text|json|markdown]
 ```
@@ -64,6 +65,7 @@ aide jira view <TICKET-KEY> [--format text|json|markdown]
 ## Next Steps
 
 After loading ticket:
+
 - Use **ticket-comments** skill to see discussion history
 - Use **ticket-update** skill to modify fields
 - Use **ticket-transition** skill to change status

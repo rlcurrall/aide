@@ -18,6 +18,7 @@ List pull requests from the repository with filtering options.
 ## How to Execute
 
 Run:
+
 ```bash
 aide pr list [options]
 ```
@@ -25,7 +26,7 @@ aide pr list [options]
 ### Flags
 
 | Flag           | Description                                                           |
-|----------------|-----------------------------------------------------------------------|
+| -------------- | --------------------------------------------------------------------- |
 | `--status`     | Filter by status: active, completed, abandoned, all (default: active) |
 | `--limit`      | Maximum number of PRs to return (default: 20)                         |
 | `--created-by` | Filter by creator email or display name                               |
@@ -66,12 +67,12 @@ aide pr list --format json
 
 ## Use Cases
 
-| Goal                    | Command                                              |
-|-------------------------|------------------------------------------------------|
-| Find PRs to review      | `aide pr list --status active`                       |
-| Track your work         | `aide pr list --created-by "me@company.com"`         |
-| Audit merged changes    | `aide pr list --status completed --limit 50`         |
-| Monitor team activity   | `aide pr list --status all`                          |
+| Goal                  | Command                                      |
+| --------------------- | -------------------------------------------- |
+| Find PRs to review    | `aide pr list --status active`               |
+| Track your work       | `aide pr list --created-by "me@company.com"` |
+| Audit merged changes  | `aide pr list --status completed --limit 50` |
+| Monitor team activity | `aide pr list --status all`                  |
 
 ## Best Practices
 
@@ -83,6 +84,7 @@ aide pr list --format json
 ## Next Steps
 
 After listing PRs:
+
 - Use **pr-view** skill to see details of a specific PR
 - Use **pr-comments** skill to check feedback on a PR
 - Use **pr-diff** skill to review code changes

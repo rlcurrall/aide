@@ -18,30 +18,32 @@ Update fields on an existing Jira ticket.
 ## How to Execute
 
 First, view the current ticket to see existing values:
+
 ```bash
 aide jira view TICKET-KEY
 ```
 
 Then update desired fields:
+
 ```bash
 aide jira update TICKET-KEY [options]
 ```
 
 ### Flags
 
-| Flag              | Short | Description                                          |
-|-------------------|-------|------------------------------------------------------|
-| `--summary`       | `-s`  | Update summary/title                                 |
-| `--description`   | `-d`  | Update description (markdown format)                 |
-| `--file`          | `-f`  | Read description from markdown file                  |
-| `--assignee`      | `-a`  | Update assignee (email, "me", or "none")             |
-| `--priority`      |       | Update priority (e.g., High, Medium, Low)            |
-| `--labels`        |       | Set labels (comma-separated, replaces existing)      |
-| `--add-labels`    |       | Add labels (keeps existing)                          |
-| `--remove-labels` |       | Remove specific labels                               |
-| `--component`     |       | Set components (can be repeated, replaces existing)  |
-| `--field`         |       | Custom field (Name=value format)                     |
-| `--format`        |       | Output format: text, json, markdown                  |
+| Flag              | Short | Description                                         |
+| ----------------- | ----- | --------------------------------------------------- |
+| `--summary`       | `-s`  | Update summary/title                                |
+| `--description`   | `-d`  | Update description (markdown format)                |
+| `--file`          | `-f`  | Read description from markdown file                 |
+| `--assignee`      | `-a`  | Update assignee (email, "me", or "none")            |
+| `--priority`      |       | Update priority (e.g., High, Medium, Low)           |
+| `--labels`        |       | Set labels (comma-separated, replaces existing)     |
+| `--add-labels`    |       | Add labels (keeps existing)                         |
+| `--remove-labels` |       | Remove specific labels                              |
+| `--component`     |       | Set components (can be repeated, replaces existing) |
+| `--field`         |       | Custom field (Name=value format)                    |
+| `--format`        |       | Output format: text, json, markdown                 |
 
 ## Custom Fields
 
@@ -103,5 +105,6 @@ aide jira update PROJ-123 --field "Severity=High"
 ## Next Steps
 
 After updating:
+
 - Use **ticket** skill to verify changes
 - Use **ticket-comment** skill to note the update

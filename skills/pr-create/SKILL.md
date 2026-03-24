@@ -18,6 +18,7 @@ Create a new pull request from the current branch.
 ## How to Execute
 
 Run:
+
 ```bash
 aide pr create --title "Title" [options]
 ```
@@ -27,12 +28,13 @@ aide pr create --title "Title" [options]
 Supports both GitHub CLI and Azure CLI style flags:
 
 | Flag (gh-style) | Short | Aliases (az-style)                  | Description                                     |
-|-----------------|-------|-------------------------------------|-------------------------------------------------|
+| --------------- | ----- | ----------------------------------- | ----------------------------------------------- |
 | `--title`       | `-t`  | -                                   | PR title (required)                             |
 | `--body`        | `-b`  | `--description`                     | PR description/body                             |
 | `--head`        | `-H`  | `--source`, `-s`, `--source-branch` | Source/head branch (defaults to current branch) |
 | `--base`        | `-B`  | `--target`, `--target-branch`       | Target/base branch (defaults to main)           |
 | `--draft`       | `-d`  | -                                   | Create as draft PR                              |
+| `--tag`         | -     | -                                   | Add tag(s) to the PR (repeatable)               |
 
 ## Output Includes
 
@@ -62,6 +64,9 @@ aide pr create --title "WIP: Refactor auth module" --draft
 
 # Targeting specific branch
 aide pr create --title "Hotfix: Login bug" --base release/v2.0
+
+# With tags
+aide pr create --title "PROJ-123: Fix performance" --tag bug --tag performance
 ```
 
 ## PR Management Workflow
@@ -75,6 +80,7 @@ aide pr create --title "Hotfix: Login bug" --base release/v2.0
 ## Next Steps
 
 After creating a PR:
+
 - Share the PR URL with reviewers
 - Use **pr-comments** skill to monitor feedback
 - Use **pr-update** skill to publish draft when ready

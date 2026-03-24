@@ -18,6 +18,7 @@ Post a comment on a pull request thread.
 ## How to Execute
 
 Run:
+
 ```bash
 aide pr comment "comment text" [--pr <id>] [options]
 ```
@@ -25,7 +26,7 @@ aide pr comment "comment text" [--pr <id>] [options]
 ### Flags
 
 | Flag         | Description                                         |
-|--------------|-----------------------------------------------------|
+| ------------ | --------------------------------------------------- |
 | `--pr`       | PR ID or URL (auto-detected from branch if omitted) |
 | `--file`     | File path to attach comment to                      |
 | `--line`     | Line number in file (requires `--file`)             |
@@ -56,13 +57,13 @@ aide pr comment "Added null check as suggested" --pr 24094 --file src/utils/help
 
 ## Use Cases
 
-| Purpose               | Example                                                    |
-|-----------------------|------------------------------------------------------------|
-| Request review        | "Ready for re-review after addressing all feedback"        |
-| Acknowledge feedback  | "Good point, I've updated the implementation"              |
-| Ask questions         | "Should this use async/await or promises?"                 |
-| Document decisions    | "Using OAuth 2.0 with PKCE for enhanced security"          |
-| Mark completion       | "All comments addressed, tests passing"                    |
+| Purpose              | Example                                             |
+| -------------------- | --------------------------------------------------- |
+| Request review       | "Ready for re-review after addressing all feedback" |
+| Acknowledge feedback | "Good point, I've updated the implementation"       |
+| Ask questions        | "Should this use async/await or promises?"          |
+| Document decisions   | "Using OAuth 2.0 with PKCE for enhanced security"   |
+| Mark completion      | "All comments addressed, tests passing"             |
 
 ## Best Practices
 
@@ -74,5 +75,6 @@ aide pr comment "Added null check as suggested" --pr 24094 --file src/utils/help
 ## Next Steps
 
 After posting a comment:
+
 - Use **pr-comments** skill to verify your comment was posted
 - Use **pr-reply** skill to respond to specific threads

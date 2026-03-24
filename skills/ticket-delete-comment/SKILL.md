@@ -17,26 +17,28 @@ Delete a comment from a Jira ticket by its comment ID.
 ## How to Execute
 
 Run:
+
 ```bash
 aide jira delete-comment TICKET-KEY COMMENT-ID [--format text|json|markdown]
 ```
 
 ### Arguments
 
-| Argument     | Required | Description                    |
-|--------------|----------|--------------------------------|
+| Argument     | Required | Description                      |
+| ------------ | -------- | -------------------------------- |
 | `TICKET-KEY` | Yes      | Jira ticket key (e.g., PROJ-123) |
-| `COMMENT-ID` | Yes      | ID of the comment to delete    |
+| `COMMENT-ID` | Yes      | ID of the comment to delete      |
 
 ### Flags
 
 | Flag       | Description                         |
-|------------|-------------------------------------|
+| ---------- | ----------------------------------- |
 | `--format` | Output format: text, json, markdown |
 
 ## Finding Comment IDs
 
 To find the comment ID you want to delete, first list comments:
+
 ```bash
 aide jira comments PROJ-123 --format json
 ```
@@ -61,12 +63,12 @@ aide jira delete-comment PROJ-123 10001 --format json
 
 ## Use Cases
 
-| Purpose                  | Example                                    |
-|--------------------------|--------------------------------------------|
-| Remove test comment      | Clean up after testing                     |
-| Remove duplicate         | Accidentally posted same comment twice     |
-| Remove outdated info     | Information is no longer accurate          |
-| Clean up draft           | Remove incomplete or draft comment         |
+| Purpose              | Example                                |
+| -------------------- | -------------------------------------- |
+| Remove test comment  | Clean up after testing                 |
+| Remove duplicate     | Accidentally posted same comment twice |
+| Remove outdated info | Information is no longer accurate      |
+| Clean up draft       | Remove incomplete or draft comment     |
 
 ## Important Notes
 
@@ -77,5 +79,6 @@ aide jira delete-comment PROJ-123 10001 --format json
 ## Next Steps
 
 After deleting a comment:
+
 - Use **ticket-comments** skill to verify deletion
 - Use **ticket-comment** skill to add a new comment if needed

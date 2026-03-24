@@ -18,6 +18,7 @@ Reply to an existing comment thread on a pull request.
 ## How to Execute
 
 Run:
+
 ```bash
 aide pr reply <thread-id> "reply text" [--pr <id>] [options]
 ```
@@ -25,7 +26,7 @@ aide pr reply <thread-id> "reply text" [--pr <id>] [options]
 ### Flags
 
 | Flag       | Description                                         |
-|------------|-----------------------------------------------------|
+| ---------- | --------------------------------------------------- |
 | `--pr`     | PR ID or URL (auto-detected from branch if omitted) |
 | `--parent` | Parent comment ID for nested replies                |
 
@@ -55,13 +56,13 @@ Use the **pr-comments** skill to load PR comments, which displays thread IDs for
 
 ## Response Patterns
 
-| Scenario                  | Example Reply                                           |
-|---------------------------|---------------------------------------------------------|
-| Fixed as requested        | "Fixed in commit abc123"                                |
-| Explaining approach       | "I chose this approach because..."                      |
-| Requesting clarification  | "Could you clarify what you mean by...?"                |
-| Acknowledging feedback    | "Good catch! I've updated the implementation"           |
-| Disagreeing respectfully  | "I see your point, but I think X because..."            |
+| Scenario                 | Example Reply                                 |
+| ------------------------ | --------------------------------------------- |
+| Fixed as requested       | "Fixed in commit abc123"                      |
+| Explaining approach      | "I chose this approach because..."            |
+| Requesting clarification | "Could you clarify what you mean by...?"      |
+| Acknowledging feedback   | "Good catch! I've updated the implementation" |
+| Disagreeing respectfully | "I see your point, but I think X because..."  |
 
 ## Best Practices
 
@@ -73,5 +74,6 @@ Use the **pr-comments** skill to load PR comments, which displays thread IDs for
 ## Next Steps
 
 After replying:
+
 - Use **pr-comments** skill to see the updated thread
 - Use **pr-comment** skill for new general comments

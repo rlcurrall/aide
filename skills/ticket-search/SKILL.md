@@ -18,6 +18,7 @@ Search for Jira tickets using JQL (Jira Query Language).
 ## How to Execute
 
 Run:
+
 ```bash
 aide jira search "JQL query" [maxResults] [--format text|json|markdown]
 ```
@@ -25,7 +26,7 @@ aide jira search "JQL query" [maxResults] [--format text|json|markdown]
 ### Flags
 
 | Flag         | Description                                         |
-|--------------|-----------------------------------------------------|
+| ------------ | --------------------------------------------------- |
 | `maxResults` | Maximum results to return (positional, default: 50) |
 | `--limit`    | Alias for maxResults                                |
 | `--format`   | Output format: text, json, markdown                 |
@@ -101,6 +102,7 @@ aide jira search "project = PROJ AND text ~ 'performance' AND priority = High"
 ## Next Steps
 
 After finding tickets:
+
 - Use **ticket** skill to view full details
 - Use **ticket-comments** skill to see discussion
 - Use **ticket-update** skill to modify tickets

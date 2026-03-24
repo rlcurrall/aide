@@ -18,35 +18,38 @@ Edit an existing comment on a Jira ticket. Comments support markdown formatting.
 ## How to Execute
 
 Run:
+
 ```bash
 aide jira edit-comment TICKET-KEY COMMENT-ID "new content" [--format text|json|markdown]
 ```
 
 Or read from file:
+
 ```bash
 aide jira edit-comment TICKET-KEY COMMENT-ID --file ./updated-comment.md
 ```
 
 ### Arguments
 
-| Argument     | Required | Description                        |
-|--------------|----------|------------------------------------|
-| `TICKET-KEY` | Yes      | Jira ticket key (e.g., PROJ-123)   |
-| `COMMENT-ID` | Yes      | ID of the comment to edit          |
-| `comment`    | No*      | New comment text in markdown format |
+| Argument     | Required | Description                         |
+| ------------ | -------- | ----------------------------------- |
+| `TICKET-KEY` | Yes      | Jira ticket key (e.g., PROJ-123)    |
+| `COMMENT-ID` | Yes      | ID of the comment to edit           |
+| `comment`    | No\*     | New comment text in markdown format |
 
-*Either inline comment or `--file` must be provided.
+\*Either inline comment or `--file` must be provided.
 
 ### Flags
 
 | Flag       | Short | Description                         |
-|------------|-------|-------------------------------------|
+| ---------- | ----- | ----------------------------------- |
 | `--file`   | `-f`  | Read new comment from markdown file |
 | `--format` |       | Output format: text, json, markdown |
 
 ## Finding Comment IDs
 
 To find the comment ID you want to edit, first list comments:
+
 ```bash
 aide jira comments PROJ-123 --format json
 ```
@@ -81,13 +84,13 @@ aide jira edit-comment PROJ-123 10001 "Updated" --format json
 
 ## Use Cases
 
-| Purpose              | Example                                        |
-|----------------------|------------------------------------------------|
-| Fix typo             | Correct spelling or grammar mistake            |
-| Add information      | Include details that were initially missed     |
-| Update status        | Change "in progress" to "completed"            |
-| Correct inaccuracy   | Fix incorrect technical information            |
-| Improve formatting   | Add markdown headers, lists, or code blocks    |
+| Purpose            | Example                                     |
+| ------------------ | ------------------------------------------- |
+| Fix typo           | Correct spelling or grammar mistake         |
+| Add information    | Include details that were initially missed  |
+| Update status      | Change "in progress" to "completed"         |
+| Correct inaccuracy | Fix incorrect technical information         |
+| Improve formatting | Add markdown headers, lists, or code blocks |
 
 ## Best Practices
 
@@ -105,5 +108,6 @@ aide jira edit-comment PROJ-123 10001 "Updated" --format json
 ## Next Steps
 
 After editing a comment:
+
 - Use **ticket-comments** skill to verify the edit
 - Use **ticket-delete-comment** skill if you need to remove it instead

@@ -18,6 +18,7 @@ List, upload, download, or delete attachments on a Jira ticket.
 ## How to Execute
 
 Run:
+
 ```bash
 aide jira attach TICKET-KEY --<operation> [options]
 ```
@@ -25,7 +26,7 @@ aide jira attach TICKET-KEY --<operation> [options]
 ### Operations (one at a time)
 
 | Flag         | Short | Description                                |
-|--------------|-------|--------------------------------------------|
+| ------------ | ----- | ------------------------------------------ |
 | `--list`     | `-l`  | List all attachments on the ticket         |
 | `--upload`   | `-u`  | Upload file(s) to ticket (can be repeated) |
 | `--download` | `-d`  | Download attachment by ID or filename      |
@@ -33,14 +34,15 @@ aide jira attach TICKET-KEY --<operation> [options]
 
 ### Additional Flags
 
-| Flag       | Short | Description                           |
-|------------|-------|---------------------------------------|
-| `--output` | `-o`  | Output directory for downloads        |
-| `--format` |       | Output format: text, json, markdown   |
+| Flag       | Short | Description                         |
+| ---------- | ----- | ----------------------------------- |
+| `--output` | `-o`  | Output directory for downloads      |
+| `--format` |       | Output format: text, json, markdown |
 
 ## Output
 
 **List mode:** Shows attachment details including:
+
 - Filename
 - Size
 - MIME type
@@ -87,12 +89,12 @@ aide jira attach PROJ-123 --list --format json
 
 ## Use Cases
 
-| Goal                    | Command                                              |
-|-------------------------|------------------------------------------------------|
-| See attached files      | `aide jira attach PROJ-123 --list`                   |
-| Add bug screenshot      | `aide jira attach PROJ-123 --upload ./bug.png`       |
-| Get attached log        | `aide jira attach PROJ-123 --download "error.log"`   |
-| Remove old file         | `aide jira attach PROJ-123 --delete "draft.pdf"`     |
+| Goal               | Command                                            |
+| ------------------ | -------------------------------------------------- |
+| See attached files | `aide jira attach PROJ-123 --list`                 |
+| Add bug screenshot | `aide jira attach PROJ-123 --upload ./bug.png`     |
+| Get attached log   | `aide jira attach PROJ-123 --download "error.log"` |
+| Remove old file    | `aide jira attach PROJ-123 --delete "draft.pdf"`   |
 
 ## Best Practices
 
@@ -104,5 +106,6 @@ aide jira attach PROJ-123 --list --format json
 ## Next Steps
 
 After managing attachments:
+
 - Use **ticket** skill to view full ticket details
 - Use **ticket-comment** skill to note attachment changes

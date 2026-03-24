@@ -18,19 +18,20 @@ View changes in a pull request including file diffs and change statistics.
 ## How to Execute
 
 Run:
+
 ```bash
 aide pr diff [--pr <id|url>] [options]
 ```
 
 ### Options
 
-| Flag        | Description                                           |
-|-------------|-------------------------------------------------------|
-| `--pr`      | PR ID or URL (auto-detected from branch if omitted)   |
-| `--stat`    | Show summary statistics with line counts              |
-| `--files`   | Show only changed file paths                          |
-| `--file`    | Show diff for a specific file path                    |
-| `--no-fetch`| Skip auto-fetching missing branches (fetch by default)|
+| Flag         | Description                                            |
+| ------------ | ------------------------------------------------------ |
+| `--pr`       | PR ID or URL (auto-detected from branch if omitted)    |
+| `--stat`     | Show summary statistics with line counts               |
+| `--files`    | Show only changed file paths                           |
+| `--file`     | Show diff for a specific file path                     |
+| `--no-fetch` | Skip auto-fetching missing branches (fetch by default) |
 
 ## Output Includes
 
@@ -62,5 +63,6 @@ aide pr diff --file src/auth/login.ts
 ## Next Steps
 
 After viewing PR diff:
+
 - Use **pr-comments** skill to see related feedback
 - Use **pr-view** skill for PR metadata

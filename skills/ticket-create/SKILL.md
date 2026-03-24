@@ -17,6 +17,7 @@ Create a new Jira ticket with the specified details.
 ## How to Execute
 
 Run:
+
 ```bash
 aide jira create -p PROJECT -t TYPE -s "Summary" [options]
 ```
@@ -24,7 +25,7 @@ aide jira create -p PROJECT -t TYPE -s "Summary" [options]
 ### Required Flags
 
 | Flag        | Short | Description                                   |
-|-------------|-------|-----------------------------------------------|
+| ----------- | ----- | --------------------------------------------- |
 | `--project` | `-p`  | Project key (required, e.g., PROJ)            |
 | `--type`    | `-t`  | Issue type (required, e.g., Task, Bug, Story) |
 | `--summary` | `-s`  | Issue summary/title (required)                |
@@ -32,7 +33,7 @@ aide jira create -p PROJECT -t TYPE -s "Summary" [options]
 ### Optional Flags
 
 | Flag            | Short | Description                           |
-|-----------------|-------|---------------------------------------|
+| --------------- | ----- | ------------------------------------- |
 | `--description` | `-d`  | Description text in markdown format   |
 | `--file`        | `-f`  | Read description from markdown file   |
 | `--assignee`    | `-a`  | Assignee (email, account ID, or "me") |
@@ -91,6 +92,7 @@ aide jira create -p PROJ -t Bug -s "Critical bug" --field "Severity=Critical"
 ## Next Steps
 
 After creating a ticket:
+
 - Use **ticket** skill to verify details
 - Use **ticket-update** skill to modify fields
 - Use **ticket-transition** skill to change status
