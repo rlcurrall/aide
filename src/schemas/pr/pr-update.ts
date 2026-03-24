@@ -23,6 +23,9 @@ export const PrUpdateArgsSchema = v.object({
   publish: v.optional(v.boolean()),
   abandon: v.optional(v.boolean()),
   activate: v.optional(v.boolean()),
+  tag: v.optional(v.array(v.string()), []),
+  removeTag: v.optional(v.array(v.string()), []),
+  'remove-tag': v.optional(v.array(v.string())), // Alias for removeTag
 });
 
 export type PrUpdateArgs = v.InferOutput<typeof PrUpdateArgsSchema>;

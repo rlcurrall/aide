@@ -2,6 +2,7 @@ import type {
   AzureDevOpsConfig,
   AzureDevOpsPRThread,
   AzureDevOpsPullRequest,
+  AzureDevOpsPRLabel,
   AdoFlattenedComment,
   CreateThreadOptions,
   CreateThreadResponse,
@@ -104,6 +105,26 @@ export class AzureDevOpsClient {
     }
 
     return response.json() as Promise<T>;
+  }
+
+  /**
+   * Make a DELETE request to Azure DevOps API
+   */
+  private async delete(url: string): Promise<void> {
+    const response = await fetch(url, {
+      method: 'DELETE',
+      headers: {
+        Authorization: this.getAuthHeader(),
+        Accept: 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `Azure DevOps API error (${response.status}): ${errorText}`
+      );
+    }
   }
 
   /**
@@ -477,5 +498,46 @@ export class AzureDevOpsClient {
     }
 
     return allChanges;
+  }
+
+  /**
+   * Get labels for a pull request
+   * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-labels/list
+   */
+  async getPullRequestLabels(
+    project: string,
+    repo: string,
+    prId: number
+  ): Promise<{ value: AzureDevOpsPRLabel[] }> {
+    const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/labels?api-version=7.1`;
+    return this.get<{ value: AzureDevOpsPRLabel[] }>(url);
+  }
+
+  /**
+   * Add a label to a pull request
+   * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-labels/create
+   */
+  async addPullRequestLabel(
+    project: string,
+    repo: string,
+    prId: number,
+    name: string
+  ): Promise<AzureDevOpsPRLabel> {
+    const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/labels?api-version=7.1`;
+    return this.post<AzureDevOpsPRLabel>(url, { name });
+  }
+
+  /**
+   * Remove a label from a pull request
+   * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-labels/delete
+   */
+  async removePullRequestLabel(
+    project: string,
+    repo: string,
+    prId: number,
+    labelId: string
+  ): Promise<void> {
+    const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/labels/${encodeURIComponent(labelId)}?api-version=7.1`;
+    return this.delete(url);
   }
 }

@@ -35,13 +35,14 @@ function detectAllowedValueFormat(
   }
 
   // Sample the first few allowed values to detect the pattern
-  const sample = allowedValues.slice(0, 3);  // <-- PROBLEM: Only samples 3 items
+  const sample = allowedValues.slice(0, 3); // <-- PROBLEM: Only samples 3 items
 
   // ... complex logic that can produce incorrect results
 }
 ```
 
 **Problems:**
+
 - If the first 3 items don't represent the full pattern, wrong format is detected
 - Fields with mixed properties (both `name` and `value`) may be misclassified
 - The heuristics are complex and hard to debug
@@ -49,6 +50,7 @@ function detectAllowedValueFormat(
 #### 2. Silent Failures
 
 When the wrong format is detected:
+
 - Values are formatted incorrectly (e.g., `{name: "X"}` instead of `{value: "X"}`)
 - Jira API rejects the request with cryptic errors
 - Users have no visibility into what format was attempted
@@ -60,6 +62,7 @@ Users cannot override the auto-detection when it fails. If `detectAllowedValueFo
 #### 4. Case Sensitivity Inconsistency
 
 In `findMatchingAllowedValue()` and `validateFieldValue()`:
+
 - Name and value matching is case-insensitive: `av.name.toLowerCase() === inputLower`
 - ID matching is case-sensitive: `av.id === input`
 
@@ -98,6 +101,7 @@ Replace the complex sampling logic with a simpler approach that checks only the 
 ### 3. Verbose Actionable Errors
 
 When formatting fails, provide detailed error messages showing:
+
 - What format was attempted
 - What the actual allowedValues look like
 - How to use explicit format syntax to fix
@@ -108,10 +112,10 @@ When formatting fails, provide detailed error messages showing:
 
 ### Files to Modify
 
-| File | Changes |
-|------|---------|
+| File                         | Changes                                                                                         |
+| ---------------------------- | ----------------------------------------------------------------------------------------------- |
 | `src/lib/value-formatter.ts` | Add `parseExplicitFormat()`, simplify `detectAllowedValueFormat()`, update formatting functions |
-| `src/lib/field-resolver.ts` | Make ID matching case-insensitive, improve error messages |
+| `src/lib/field-resolver.ts`  | Make ID matching case-insensitive, improve error messages                                       |
 
 ---
 
@@ -224,7 +228,7 @@ function findMatchingAllowedValue(
     if (
       (av.name && av.name.toLowerCase() === inputLower) ||
       (av.value && av.value.toLowerCase() === inputLower) ||
-      (av.id && av.id.toLowerCase() === inputLower)  // Now case-insensitive
+      (av.id && av.id.toLowerCase() === inputLower) // Now case-insensitive
     ) {
       return av;
     }
@@ -342,7 +346,11 @@ function formatArrayValue(
   // Format each item based on the items type
   if (itemType === 'option' || itemType === 'string') {
     const formattedItems = parsedItems.map((item) => {
-      const match = findMatchingAllowedValue(item, allowedValues, explicitFormat);
+      const match = findMatchingAllowedValue(
+        item,
+        allowedValues,
+        explicitFormat
+      );
       return { value: match?.value || match?.name || item };
     });
 
@@ -367,7 +375,9 @@ function formatArrayValue(
   // Determine format: explicit > auto-detect
   const formatStyle = explicitFormat || detectAllowedValueFormat(allowedValues);
 
-  const formattedItems: Array<{ name: string } | { id: string } | { value: string }> = [];
+  const formattedItems: Array<
+    { name: string } | { id: string } | { value: string }
+  > = [];
   const descriptions: string[] = [];
   const errors: string[] = [];
 
@@ -397,7 +407,7 @@ function formatArrayValue(
   // Generate verbose error if values weren't matched
   if (errors.length > 0) {
     return {
-      success: true,  // Still succeed but include warning
+      success: true, // Still succeed but include warning
       formattedValue: formattedItems,
       originalValue: value,
       formatDescription: `[${descriptions.join(', ')}]`,
@@ -443,7 +453,11 @@ function formatOptionValue(
   const parsed = parseExplicitFormat(stringValue);
 
   // Try to find matching allowed value
-  const match = findMatchingAllowedValue(parsed.value, allowedValues, parsed.format);
+  const match = findMatchingAllowedValue(
+    parsed.value,
+    allowedValues,
+    parsed.format
+  );
 
   if (match) {
     // Determine which property to use based on explicit format or what's available
@@ -578,7 +592,9 @@ export function generateFormattingError(
   lines.push(`  @id:${inputValue}     - Format as {"id": "${inputValue}"}`);
   lines.push('');
   lines.push('Example:');
-  lines.push(`  aide jira update PROJ-123 --field "${fieldName}=@value:${inputValue}"`);
+  lines.push(
+    `  aide jira update PROJ-123 --field "${fieldName}=@value:${inputValue}"`
+  );
 
   return lines.join('\n');
 }
@@ -632,7 +648,7 @@ export function validateFieldValue(
     if (
       (av.name && av.name.toLowerCase() === compareLower) ||
       (av.value && av.value.toLowerCase() === compareLower) ||
-      (av.id && av.id.toLowerCase() === compareLower)  // <-- Now case-insensitive
+      (av.id && av.id.toLowerCase() === compareLower) // <-- Now case-insensitive
     ) {
       return { valid: true, normalizedValue: value };
     }
@@ -679,11 +695,15 @@ export function formatValidationErrors(
           const hasValue = first.value !== undefined;
           const hasId = first.id !== undefined;
 
-          lines.push(`  Field accepts: ${[
-            hasValue && 'value',
-            hasName && 'name',
-            hasId && 'id'
-          ].filter(Boolean).join(', ')}`);
+          lines.push(
+            `  Field accepts: ${[
+              hasValue && 'value',
+              hasName && 'name',
+              hasId && 'id',
+            ]
+              .filter(Boolean)
+              .join(', ')}`
+          );
         }
 
         lines.push(
@@ -692,7 +712,9 @@ export function formatValidationErrors(
 
         // Suggest explicit format syntax
         lines.push('');
-        lines.push('  Tip: Use explicit format prefix to specify how to match:');
+        lines.push(
+          '  Tip: Use explicit format prefix to specify how to match:'
+        );
         lines.push(`    --field "${fieldName}=@value:YourValue"`);
         lines.push(`    --field "${fieldName}=@name:YourValue"`);
         lines.push(`    --field "${fieldName}=@id:YourId"`);
@@ -844,25 +866,19 @@ describe('formatFieldValue with explicit format', () => {
   });
 
   it('should use explicit @value: format', () => {
-    const field = mockField([
-      { id: '1', name: 'High', value: 'high' },
-    ]);
+    const field = mockField([{ id: '1', name: 'High', value: 'high' }]);
     const result = formatFieldValue(field, '@value:high');
     expect(result.formattedValue).toEqual({ value: 'high' });
   });
 
   it('should use explicit @name: format', () => {
-    const field = mockField([
-      { id: '1', name: 'Backend' },
-    ]);
+    const field = mockField([{ id: '1', name: 'Backend' }]);
     const result = formatFieldValue(field, '@name:Backend');
     expect(result.formattedValue).toEqual({ name: 'Backend' });
   });
 
   it('should use explicit @id: format', () => {
-    const field = mockField([
-      { id: '10001', name: 'High' },
-    ]);
+    const field = mockField([{ id: '10001', name: 'High' }]);
     const result = formatFieldValue(field, '@id:10001');
     expect(result.formattedValue).toEqual({ id: '10001' });
   });
@@ -900,11 +916,11 @@ Update `skills/ticket-update/SKILL.md` and `skills/ticket-create/SKILL.md` to do
 
 When setting custom field values, the CLI auto-detects the correct format. If auto-detection fails, use explicit format prefixes:
 
-| Prefix | Format | Example |
-|--------|--------|---------|
-| `@value:` | `{"value": "X"}` | `--field "Severity=@value:High"` |
-| `@name:` | `{"name": "X"}` | `--field "Components=@name:Backend"` |
-| `@id:` | `{"id": "X"}` | `--field "Priority=@id:3"` |
+| Prefix    | Format           | Example                              |
+| --------- | ---------------- | ------------------------------------ |
+| `@value:` | `{"value": "X"}` | `--field "Severity=@value:High"`     |
+| `@name:`  | `{"name": "X"}`  | `--field "Components=@name:Backend"` |
+| `@id:`    | `{"id": "X"}`    | `--field "Priority=@id:3"`           |
 
 ### When to Use Explicit Formats
 
