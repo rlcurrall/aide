@@ -61,8 +61,7 @@ async function handler(argv: ArgumentsCamelCase<CreateArgs>): Promise<void> {
         const users = await client.searchUsers(args.assignee, 1);
         const foundUser = users[0];
         if (!foundUser) {
-          console.error(`Error: No user found matching '${args.assignee}'`);
-          process.exit(1);
+          throw new Error(`No user found matching '${args.assignee}'`);
         }
         createOptions.assignee = foundUser.accountId;
       } else {

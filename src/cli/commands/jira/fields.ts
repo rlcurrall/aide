@@ -230,8 +230,7 @@ async function handler(argv: ArgumentsCamelCase<FieldsArgs>): Promise<void> {
     );
 
     if (!projectMeta) {
-      console.error(`Error: Project '${project}' not found`);
-      process.exit(1);
+      throw new Error(`Project '${project}' not found`);
     }
 
     // If issue type specified, find it
@@ -242,13 +241,12 @@ async function handler(argv: ArgumentsCamelCase<FieldsArgs>): Promise<void> {
       );
 
       if (!foundType) {
-        console.error(
-          `Error: Issue type '${issueType}' not found in project ${project}`
+        const available = projectMeta.issuetypes
+          .map((it) => it.name)
+          .join(', ');
+        throw new Error(
+          `Issue type '${issueType}' not found in project ${project}\nAvailable types: ${available}`
         );
-        console.error(
-          `Available types: ${projectMeta.issuetypes.map((it) => it.name).join(', ')}`
-        );
-        process.exit(1);
       }
 
       issueTypes = [foundType];

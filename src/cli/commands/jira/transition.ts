@@ -72,12 +72,12 @@ async function handler(
 
     // Transition mode: require a status
     if (!args.status) {
-      console.error('Error: Status is required for transitioning.');
-      console.error('Use --list to see available transitions.');
-      console.error('');
-      console.error('Example: aide jira transition PROJ-123 "In Progress"');
-      console.error('Example: aide jira transition PROJ-123 --list');
-      process.exit(1);
+      throw new Error(
+        'Status is required for transitioning.\n' +
+          'Use --list to see available transitions.\n\n' +
+          'Example: aide jira transition PROJ-123 "In Progress"\n' +
+          'Example: aide jira transition PROJ-123 --list'
+      );
     }
 
     logProgress(`Transitioning ticket: ${ticketKey}`, format);
@@ -96,13 +96,12 @@ async function handler(
     );
 
     if (!transition) {
-      console.error(`Error: No transition found to status '${args.status}'`);
-      console.error('');
-      console.error('Available transitions:');
-      for (const t of response.transitions) {
-        console.error(`  ${t.name} -> ${t.to.name}`);
-      }
-      process.exit(1);
+      const available = response.transitions
+        .map((t) => `  ${t.name} -> ${t.to.name}`)
+        .join('\n');
+      throw new Error(
+        `No transition found to status '${args.status}'\n\nAvailable transitions:\n${available}`
+      );
     }
 
     // Build transition options

@@ -28,31 +28,28 @@ async function handler(argv: ArgumentsCamelCase<UpdateArgs>): Promise<void> {
   // Validate ticket key format (soft validation with warning)
   validateTicketKeyWithWarning(ticketKey);
 
-  // Check that at least one update field is provided
-  const hasUpdate =
-    args.summary ||
-    args.description ||
-    args.file ||
-    args.assignee ||
-    args.priority ||
-    args.labels ||
-    args.addLabels ||
-    args.removeLabels ||
-    (args.component && args.component.length > 0) ||
-    (args.field && args.field.length > 0);
-
-  if (!hasUpdate) {
-    console.error('Error: At least one field to update must be specified.');
-    console.error(
-      'Available options: --summary, --description, --file, --assignee,'
-    );
-    console.error(
-      '  --priority, --labels, --add-labels, --remove-labels, --component, --field'
-    );
-    process.exit(1);
-  }
-
   try {
+    // Check that at least one update field is provided
+    const hasUpdate =
+      args.summary ||
+      args.description ||
+      args.file ||
+      args.assignee ||
+      args.priority ||
+      args.labels ||
+      args.addLabels ||
+      args.removeLabels ||
+      (args.component && args.component.length > 0) ||
+      (args.field && args.field.length > 0);
+
+    if (!hasUpdate) {
+      throw new Error(
+        'At least one field to update must be specified.\n' +
+          'Available options: --summary, --description, --file, --assignee,\n' +
+          '  --priority, --labels, --add-labels, --remove-labels, --component, --field'
+      );
+    }
+
     const config = loadConfig();
     const client = new JiraClient(config);
 
@@ -92,8 +89,7 @@ async function handler(argv: ArgumentsCamelCase<UpdateArgs>): Promise<void> {
         const users = await client.searchUsers(args.assignee, 1);
         const foundUser = users[0];
         if (!foundUser) {
-          console.error(`Error: No user found matching '${args.assignee}'`);
-          process.exit(1);
+          throw new Error(`No user found matching '${args.assignee}'`);
         }
         updateOptions.assignee = { accountId: foundUser.accountId };
       } else {

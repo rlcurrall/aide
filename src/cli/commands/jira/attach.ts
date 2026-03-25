@@ -68,19 +68,17 @@ async function handler(argv: ArgumentsCamelCase<AttachArgs>): Promise<void> {
     args.delete,
   ].filter(Boolean);
 
-  if (operations.length === 0) {
-    console.error(
-      'Error: Specify an operation: --list, --upload, --download, or --delete'
-    );
-    process.exit(1);
-  }
-
-  if (operations.length > 1) {
-    console.error('Error: Only one operation can be performed at a time');
-    process.exit(1);
-  }
-
   try {
+    if (operations.length === 0) {
+      throw new Error(
+        'Specify an operation: --list, --upload, --download, or --delete'
+      );
+    }
+
+    if (operations.length > 1) {
+      throw new Error('Only one operation can be performed at a time');
+    }
+
     const config = loadConfig();
     const client = new JiraClient(config);
 
@@ -146,13 +144,12 @@ async function handler(argv: ArgumentsCamelCase<AttachArgs>): Promise<void> {
       );
 
       if (!attachment) {
-        console.error(`Error: Attachment '${args.download}' not found`);
-        console.error('');
-        console.error('Available attachments:');
-        for (const a of attachments) {
-          console.error(`  ${a.id}: ${a.filename}`);
-        }
-        process.exit(1);
+        const available = attachments
+          .map((a) => `  ${a.id}: ${a.filename}`)
+          .join('\n');
+        throw new Error(
+          `Attachment '${args.download}' not found\n\nAvailable attachments:\n${available}`
+        );
       }
 
       const attachmentId = attachment.id;
@@ -200,13 +197,12 @@ async function handler(argv: ArgumentsCamelCase<AttachArgs>): Promise<void> {
       );
 
       if (!attachment) {
-        console.error(`Error: Attachment '${args.delete}' not found`);
-        console.error('');
-        console.error('Available attachments:');
-        for (const a of attachments) {
-          console.error(`  ${a.id}: ${a.filename}`);
-        }
-        process.exit(1);
+        const available = attachments
+          .map((a) => `  ${a.id}: ${a.filename}`)
+          .join('\n');
+        throw new Error(
+          `Attachment '${args.delete}' not found\n\nAvailable attachments:\n${available}`
+        );
       }
 
       const attachmentId = attachment.id;
