@@ -6,7 +6,7 @@
  * @see https://docs.github.com/en/rest/pulls/comments
  */
 
-import { MissingRepoContextError } from '@lib/ado-utils.js';
+import { logProgress } from '@lib/cli-utils.js';
 import { handleCommandError } from '@lib/errors.js';
 import type {
   GitHubIssueComment,
@@ -15,7 +15,6 @@ import type {
 import {
   resolvePlatformContext,
   resolvePRId,
-  GitHubAuthError,
   type PlatformContext,
 } from '@lib/platform.js';
 import type { CreateThreadResponse } from '@lib/types.js';
@@ -167,68 +166,59 @@ function formatGitHubOutput(
 // ============================================================================
 
 async function handler(argv: ArgumentsCamelCase<PrCommentArgs>): Promise<void> {
-  const args = validateArgs(PrCommentArgsSchema, argv, 'pr-comment arguments');
-  const { format, comment, file, line, endLine } = args;
-
-  // Validate file/line requirements
-  if (file && !line) {
-    console.error('Error: --line is required when --file is specified.');
-    console.error(
-      'To comment on a specific file location, provide both --file and --line.'
-    );
-    process.exit(1);
-  }
-
-  if (line && !file) {
-    console.error('Error: --file is required when --line is specified.');
-    console.error(
-      'To comment on a specific file location, provide both --file and --line.'
-    );
-    process.exit(1);
-  }
-
-  if (endLine && !line) {
-    console.error('Error: --line is required when --end-line is specified.');
-    process.exit(1);
-  }
-
-  // Resolve platform context
-  let ctx: PlatformContext;
   try {
-    ctx = resolvePlatformContext(args.project, args.repo);
-    if (ctx.autoDiscovered && format !== 'json') {
+    const args = validateArgs(
+      PrCommentArgsSchema,
+      argv,
+      'pr-comment arguments'
+    );
+    const { format, comment, file, line, endLine } = args;
+
+    // Validate file/line requirements
+    if (file && !line) {
+      throw new Error(
+        '--line is required when --file is specified. To comment on a specific file location, provide both --file and --line.'
+      );
+    }
+
+    if (line && !file) {
+      throw new Error(
+        '--file is required when --line is specified. To comment on a specific file location, provide both --file and --line.'
+      );
+    }
+
+    if (endLine && !line) {
+      throw new Error('--line is required when --end-line is specified.');
+    }
+
+    // Resolve platform context
+    let ctx: PlatformContext = resolvePlatformContext(args.project, args.repo);
+    if (ctx.autoDiscovered) {
       if (ctx.platform === 'github') {
-        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
+        logProgress(
+          `Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`,
+          format
+        );
       } else {
-        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
+        logProgress(
+          `Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`,
+          format
+        );
       }
-      console.log('');
+      logProgress('', format);
     }
-  } catch (error) {
-    if (
-      error instanceof MissingRepoContextError ||
-      error instanceof GitHubAuthError
-    ) {
-      console.error(error.message);
-      process.exit(1);
-    }
-    throw error;
-  }
 
-  // Resolve PR ID
-  const resolved = await resolvePRId(args.pr, ctx, format);
-  const prId = resolved.prId;
-  ctx = resolved.ctx;
+    // Resolve PR ID
+    const resolved = await resolvePRId(args.pr, ctx, format);
+    const prId = resolved.prId;
+    ctx = resolved.ctx;
 
-  try {
-    if (format !== 'json') {
-      console.log(`Posting comment to PR #${prId}...`);
-      if (file) {
-        console.log(`File: ${file}`);
-        console.log(`Line: ${line}${endLine ? `-${endLine}` : ''}`);
-      }
-      console.log('');
+    logProgress(`Posting comment to PR #${prId}...`, format);
+    if (file) {
+      logProgress(`File: ${file}`, format);
+      logProgress(`Line: ${line}${endLine ? `-${endLine}` : ''}`, format);
     }
+    logProgress('', format);
 
     if (ctx.platform === 'github') {
       // GitHub path

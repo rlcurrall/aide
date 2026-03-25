@@ -3,16 +3,13 @@
  * Supports Azure DevOps and GitHub
  */
 
-import { MissingRepoContextError, buildPrUrl } from '@lib/ado-utils.js';
+import { buildPrUrl } from '@lib/ado-utils.js';
+import { logProgress } from '@lib/cli-utils.js';
 import { ensureRefPrefix, getCurrentBranch } from '@lib/git-utils.js';
 import { handleCommandError } from '@lib/errors.js';
 import type { AzureDevOpsPullRequest, GitRemoteInfo } from '@lib/types.js';
 import type { GitHubPullRequest } from '@lib/github-types.js';
-import {
-  resolvePlatformContext,
-  GitHubAuthError,
-  type PlatformContext,
-} from '@lib/platform.js';
+import { resolvePlatformContext } from '@lib/platform.js';
 import { getGitHubPRStatus } from '@lib/github-utils.js';
 import { validateArgs } from '@lib/validation.js';
 import {
@@ -126,63 +123,52 @@ async function handler(argv: ArgumentsCamelCase<PrCreateArgs>): Promise<void> {
   const { title, body, draft, format, tag: tags } = args;
   let { head, base } = args;
 
-  let ctx: PlatformContext;
   try {
-    ctx = resolvePlatformContext(args.project, args.repo);
-    if (ctx.autoDiscovered && format !== 'json') {
+    const ctx = resolvePlatformContext(args.project, args.repo);
+    if (ctx.autoDiscovered) {
       if (ctx.platform === 'github') {
-        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
+        logProgress(
+          `Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`,
+          format
+        );
       } else {
-        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
+        logProgress(
+          `Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`,
+          format
+        );
       }
-      console.log('');
+      logProgress('', format);
     }
-  } catch (error) {
-    if (
-      error instanceof MissingRepoContextError ||
-      error instanceof GitHubAuthError
-    ) {
-      console.error(error.message);
-      process.exit(1);
-    }
-    throw error;
-  }
 
-  // Auto-detect source branch from current git branch if not specified
-  if (!head) {
-    const currentBranch = getCurrentBranch();
-    if (currentBranch) {
-      head = currentBranch;
-      if (format !== 'json') {
-        console.log(`Using current branch as head: ${head}`);
+    // Auto-detect source branch from current git branch if not specified
+    if (!head) {
+      const currentBranch = getCurrentBranch();
+      if (currentBranch) {
+        head = currentBranch;
+        logProgress(`Using current branch as head: ${head}`, format);
+      } else {
+        throw new Error(
+          'Could not detect current branch. Please specify --head branch explicitly.'
+        );
       }
-    } else {
-      console.error('Error: Could not detect current branch.');
-      console.error('Please specify --head branch explicitly.');
-      process.exit(1);
     }
-  }
 
-  // Default target to main if not specified
-  if (!base) {
-    base = 'main';
-    if (format !== 'json') {
-      console.log(`Using default base branch: ${base}`);
+    // Default target to main if not specified
+    if (!base) {
+      base = 'main';
+      logProgress(`Using default base branch: ${base}`, format);
     }
-  }
 
-  if (format !== 'json') {
-    console.log('');
-    console.log(`Creating pull request...`);
-    console.log(`  Title: ${title}`);
-    console.log(`  Source: ${head}`);
-    console.log(`  Target: ${base}`);
-    if (draft) console.log(`  Draft: yes`);
-    if (tags && tags.length > 0) console.log(`  Tags: ${tags.join(', ')}`);
-    console.log('');
-  }
+    logProgress('', format);
+    logProgress(`Creating pull request...`, format);
+    logProgress(`  Title: ${title}`, format);
+    logProgress(`  Source: ${head}`, format);
+    logProgress(`  Target: ${base}`, format);
+    if (draft) logProgress(`  Draft: yes`, format);
+    if (tags && tags.length > 0)
+      logProgress(`  Tags: ${tags.join(', ')}`, format);
+    logProgress('', format);
 
-  try {
     if (ctx.platform === 'github') {
       const pr = await ctx.client.createPullRequest(
         ctx.owner,

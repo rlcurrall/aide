@@ -54,6 +54,27 @@ function extractTextFromContent(content: AdfInput): string {
     .join('');
 }
 
+/**
+ * Output type for format selection
+ */
+export type OutputFormat = 'text' | 'json' | 'markdown';
+
+/**
+ * Check if we should show progress messages (not json format)
+ */
+export function shouldShowProgress(format: OutputFormat): boolean {
+  return format !== 'json';
+}
+
+/**
+ * Log a progress message if not in json format
+ */
+export function logProgress(message: string, format: OutputFormat): void {
+  if (shouldShowProgress(format)) {
+    console.log(message);
+  }
+}
+
 export function formatTicketDetails(issue: JiraIssueResponse): string {
   if (issue.errorMessages || issue.errors) {
     return `Error: ${issue.errorMessages?.join(', ') || JSON.stringify(issue.errors) || 'Ticket not found or access denied'}`;

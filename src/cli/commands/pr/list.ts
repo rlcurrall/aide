@@ -3,15 +3,11 @@
  * Supports Azure DevOps and GitHub
  */
 
-import { MissingRepoContextError } from '@lib/ado-utils.js';
+import { logProgress } from '@lib/cli-utils.js';
 import { handleCommandError } from '@lib/errors.js';
 import type { AzureDevOpsPullRequest } from '@lib/types.js';
 import type { GitHubPullRequest } from '@lib/github-types.js';
-import {
-  resolvePlatformContext,
-  GitHubAuthError,
-  type PlatformContext,
-} from '@lib/platform.js';
+import { resolvePlatformContext, type PlatformContext } from '@lib/platform.js';
 import {
   getGitHubPRStatus,
   mapStatusToGitHubState,
@@ -162,16 +158,15 @@ async function handleGitHub(
   ctx: Extract<PlatformContext, { platform: 'github' }>,
   args: ListArgs
 ): Promise<void> {
-  const { format, status, limit } = args;
+  const { status, limit } = args;
+  const format = args.format ?? 'text';
   const createdBy = args.createdBy ?? args.author;
 
-  if (format !== 'json') {
-    console.log(`Fetching pull requests...`);
-    if (status) console.log(`Status: ${status}`);
-    if (createdBy) console.log(`Created by: ${createdBy}`);
-    if (limit) console.log(`Limit: ${limit}`);
-    console.log('');
-  }
+  logProgress('Fetching pull requests...', format);
+  if (status) logProgress(`Status: ${status}`, format);
+  if (createdBy) logProgress(`Created by: ${createdBy}`, format);
+  if (limit) logProgress(`Limit: ${limit}`, format);
+  logProgress('', format);
 
   const ghState = mapStatusToGitHubState(status);
   let prs = await ctx.client.listPullRequests(ctx.owner, ctx.repo, {
@@ -199,7 +194,7 @@ async function handleGitHub(
     prs = prs.filter((pr) => pr.user.login.toLowerCase().includes(searchTerm));
   }
 
-  const output = formatGitHubOutput(prs, format ?? 'text', {
+  const output = formatGitHubOutput(prs, format, {
     owner: ctx.owner,
     repo: ctx.repo,
   });
@@ -210,16 +205,15 @@ async function handleAdo(
   ctx: Extract<PlatformContext, { platform: 'azure-devops' }>,
   args: ListArgs
 ): Promise<void> {
-  const { format, status, limit } = args;
+  const { status, limit } = args;
+  const format = args.format ?? 'text';
   const createdBy = args.createdBy ?? args.author;
 
-  if (format !== 'json') {
-    console.log(`Fetching pull requests...`);
-    if (status) console.log(`Status: ${status}`);
-    if (createdBy) console.log(`Created by: ${createdBy}`);
-    if (limit) console.log(`Limit: ${limit}`);
-    console.log('');
-  }
+  logProgress('Fetching pull requests...', format);
+  if (status) logProgress(`Status: ${status}`, format);
+  if (createdBy) logProgress(`Created by: ${createdBy}`, format);
+  if (limit) logProgress(`Limit: ${limit}`, format);
+  logProgress('', format);
 
   const response = await ctx.client.listPullRequests(ctx.project, ctx.repo, {
     status,
@@ -240,7 +234,7 @@ async function handleAdo(
     });
   }
 
-  const output = formatAdoOutput(prs, format ?? 'text', {
+  const output = formatAdoOutput(prs, format, {
     project: ctx.project,
     repo: ctx.repo,
   });
@@ -249,30 +243,25 @@ async function handleAdo(
 
 async function handler(argv: ArgumentsCamelCase<ListArgs>): Promise<void> {
   const args = validateArgs(ListArgsSchema, argv, 'list arguments');
+  const format = args.format ?? 'text';
 
-  let ctx: PlatformContext;
   try {
-    ctx = resolvePlatformContext(args.project, args.repo);
-    if (ctx.autoDiscovered && args.format !== 'json') {
+    const ctx = resolvePlatformContext(args.project, args.repo);
+    if (ctx.autoDiscovered) {
       if (ctx.platform === 'github') {
-        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
+        logProgress(
+          `Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`,
+          format
+        );
       } else {
-        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
+        logProgress(
+          `Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`,
+          format
+        );
       }
-      console.log('');
+      logProgress('', format);
     }
-  } catch (error) {
-    if (
-      error instanceof MissingRepoContextError ||
-      error instanceof GitHubAuthError
-    ) {
-      console.error(error.message);
-      process.exit(1);
-    }
-    throw error;
-  }
 
-  try {
     if (ctx.platform === 'github') {
       await handleGitHub(ctx, args);
     } else {

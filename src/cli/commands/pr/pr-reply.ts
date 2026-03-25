@@ -5,13 +5,12 @@
  * @see https://docs.github.com/en/rest/pulls/comments#create-a-reply-for-a-review-comment
  */
 
-import { MissingRepoContextError } from '@lib/ado-utils.js';
+import { logProgress } from '@lib/cli-utils.js';
 import { handleCommandError } from '@lib/errors.js';
 import type { GitHubReviewComment } from '@lib/github-types.js';
 import {
   resolvePlatformContext,
   resolvePRId,
-  GitHubAuthError,
   type PlatformContext,
 } from '@lib/platform.js';
 import type { AzureDevOpsCreateCommentResponse } from '@lib/types.js';
@@ -136,38 +135,32 @@ function formatGitHubReplyOutput(
 // ============================================================================
 
 async function handler(argv: ArgumentsCamelCase<PrReplyArgs>): Promise<void> {
-  const args = validateArgs(PrReplyArgsSchema, argv, 'pr-reply arguments');
-  const { format, thread, parent, replyText } = args;
-
-  // Resolve platform context
-  let ctx: PlatformContext;
   try {
-    ctx = resolvePlatformContext(args.project, args.repo);
-    if (ctx.autoDiscovered && format !== 'json') {
+    const args = validateArgs(PrReplyArgsSchema, argv, 'pr-reply arguments');
+    const { format, thread, parent, replyText } = args;
+
+    // Resolve platform context
+    let ctx: PlatformContext = resolvePlatformContext(args.project, args.repo);
+    if (ctx.autoDiscovered) {
       if (ctx.platform === 'github') {
-        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
+        logProgress(
+          `Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`,
+          format
+        );
       } else {
-        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
+        logProgress(
+          `Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`,
+          format
+        );
       }
-      console.log('');
+      logProgress('', format);
     }
-  } catch (error) {
-    if (
-      error instanceof MissingRepoContextError ||
-      error instanceof GitHubAuthError
-    ) {
-      console.error(error.message);
-      process.exit(1);
-    }
-    throw error;
-  }
 
-  // Resolve PR ID
-  const resolved = await resolvePRId(args.pr, ctx, format);
-  const prId = resolved.prId;
-  ctx = resolved.ctx;
+    // Resolve PR ID
+    const resolved = await resolvePRId(args.pr, ctx, format);
+    const prId = resolved.prId;
+    ctx = resolved.ctx;
 
-  try {
     if (ctx.platform === 'github') {
       // GitHub path
       // On GitHub, the thread parameter is a review comment ID.
@@ -178,10 +171,8 @@ async function handler(argv: ArgumentsCamelCase<PrReplyArgs>): Promise<void> {
         );
       }
 
-      if (format !== 'json') {
-        console.log(`Posting reply to PR #${prId}, comment ${thread}...`);
-        console.log('');
-      }
+      logProgress(`Posting reply to PR #${prId}, comment ${thread}...`, format);
+      logProgress('', format);
 
       const response = await ctx.client.replyToReviewComment(
         ctx.owner,
@@ -195,13 +186,11 @@ async function handler(argv: ArgumentsCamelCase<PrReplyArgs>): Promise<void> {
       console.log(output);
     } else {
       // Azure DevOps path
-      if (format !== 'json') {
-        console.log(`Posting reply to PR #${prId}, thread ${thread}...`);
-        if (parent !== undefined && parent > 0) {
-          console.log(`Replying to comment #${parent}`);
-        }
-        console.log('');
+      logProgress(`Posting reply to PR #${prId}, thread ${thread}...`, format);
+      if (parent !== undefined && parent > 0) {
+        logProgress(`Replying to comment #${parent}`, format);
       }
+      logProgress('', format);
 
       const response = await ctx.client.createThreadComment(
         ctx.project,

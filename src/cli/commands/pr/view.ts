@@ -4,6 +4,7 @@
  */
 
 import { MissingRepoContextError, validatePRId } from '@lib/ado-utils.js';
+import { logProgress } from '@lib/cli-utils.js';
 import { extractBranchName } from '@lib/git-utils.js';
 import { handleCommandError } from '@lib/errors.js';
 import type { AzureDevOpsPullRequest } from '@lib/types.js';
@@ -150,145 +151,137 @@ function formatGitHubOutput(
 
 async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
   const args = validateArgs(ViewArgsSchema, argv, 'view arguments');
-  const { format } = args;
+  const format = args.format ?? 'text';
 
-  let ctx: PlatformContext | undefined;
   try {
-    ctx = resolvePlatformContext(args.project, args.repo);
-    if (ctx.autoDiscovered && format !== 'json') {
-      if (ctx.platform === 'github') {
-        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
-      } else {
-        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
+    let ctx: PlatformContext | undefined;
+    try {
+      ctx = resolvePlatformContext(args.project, args.repo);
+      if (ctx.autoDiscovered) {
+        if (ctx.platform === 'github') {
+          logProgress(
+            `Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`,
+            format
+          );
+        } else {
+          logProgress(
+            `Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`,
+            format
+          );
+        }
+        logProgress('', format);
       }
-      console.log('');
-    }
-  } catch (error) {
-    // May still succeed if PR URL is provided
-    if (
-      !(
-        error instanceof MissingRepoContextError ||
-        error instanceof GitHubAuthError
-      ) ||
-      !args.pr?.startsWith('http')
-    ) {
+    } catch (error) {
+      // May still succeed if PR URL is provided
       if (
-        error instanceof MissingRepoContextError ||
-        error instanceof GitHubAuthError
+        !(
+          error instanceof MissingRepoContextError ||
+          error instanceof GitHubAuthError
+        ) ||
+        !args.pr?.startsWith('http')
       ) {
-        console.error(error.message);
-        process.exit(1);
+        throw error;
       }
-      throw error;
+      // Will handle below via URL parsing
+      ctx = undefined;
     }
-    // Will handle below via URL parsing
-    ctx = undefined;
-  }
 
-  let prId: number | undefined;
+    let prId: number | undefined;
 
-  // Parse PR ID or URL, or auto-detect from current branch
-  if (args.pr) {
-    if (args.pr.startsWith('http')) {
-      const parsed = parsePRUrlAny(args.pr);
-      if (!parsed) {
-        console.error(`Error: Invalid PR URL: ${args.pr}`);
-        console.error('Expected Azure DevOps or GitHub PR URL format.');
-        process.exit(1);
-      }
-      prId = parsed.prId;
+    // Parse PR ID or URL, or auto-detect from current branch
+    if (args.pr) {
+      if (args.pr.startsWith('http')) {
+        const parsed = parsePRUrlAny(args.pr);
+        if (!parsed) {
+          throw new Error(
+            `Invalid PR URL: ${args.pr}. Expected Azure DevOps or GitHub PR URL format.`
+          );
+        }
+        prId = parsed.prId;
 
-      // URL overrides context - rebuild for the right platform
-      if (parsed.platform === 'github' && parsed.owner && parsed.ghRepo) {
-        const { GitHubClient } = await import('@lib/github-client.js');
-        ctx = {
-          platform: 'github',
-          owner: parsed.owner,
-          repo: parsed.ghRepo,
-          client: new GitHubClient(),
-          autoDiscovered: false,
-        };
-      } else if (
-        parsed.platform === 'azure-devops' &&
-        parsed.project &&
-        parsed.repo
-      ) {
-        const { loadAzureDevOpsConfig } = await import('@lib/config.js');
-        const { AzureDevOpsClient } = await import(
-          '@lib/azure-devops-client.js'
-        );
-        const config = loadAzureDevOpsConfig();
-        ctx = {
-          platform: 'azure-devops',
-          org: parsed.org ?? '',
-          project: parsed.project,
-          repo: parsed.repo,
-          client: new AzureDevOpsClient(config),
-          autoDiscovered: false,
-        };
+        // URL overrides context - rebuild for the right platform
+        if (parsed.platform === 'github' && parsed.owner && parsed.ghRepo) {
+          const { GitHubClient } = await import('@lib/github-client.js');
+          ctx = {
+            platform: 'github',
+            owner: parsed.owner,
+            repo: parsed.ghRepo,
+            client: new GitHubClient(),
+            autoDiscovered: false,
+          };
+        } else if (
+          parsed.platform === 'azure-devops' &&
+          parsed.project &&
+          parsed.repo
+        ) {
+          const { loadAzureDevOpsConfig } = await import('@lib/config.js');
+          const { AzureDevOpsClient } = await import(
+            '@lib/azure-devops-client.js'
+          );
+          const config = loadAzureDevOpsConfig();
+          ctx = {
+            platform: 'azure-devops',
+            org: parsed.org ?? '',
+            project: parsed.project,
+            repo: parsed.repo,
+            client: new AzureDevOpsClient(config),
+            autoDiscovered: false,
+          };
+        }
+      } else {
+        const validation = validatePRId(args.pr);
+        if (validation.valid) {
+          prId = validation.value;
+        } else {
+          throw new Error(
+            `Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
+          );
+        }
       }
     } else {
-      const validation = validatePRId(args.pr);
-      if (validation.valid) {
-        prId = validation.value;
-      } else {
-        console.error(
-          `Error: Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
+      // No PR ID provided - auto-detect from current branch
+      if (!ctx) {
+        throw new Error(
+          'Could not determine repository context. Provide a PR ID or full PR URL.'
         );
-        process.exit(1);
+      }
+
+      const result = await findPRByCurrentBranchAny(ctx);
+
+      if (result.branch) {
+        logProgress(
+          `Searching for PR from branch '${result.branch}'...`,
+          format
+        );
+      }
+
+      if (!result.success) {
+        throw new Error(result.error);
+      }
+
+      if (ctx.platform === 'github' && result.githubPr) {
+        prId = result.githubPr.number;
+        logProgress(`Found PR #${prId}: ${result.githubPr.title}`, format);
+        logProgress('', format);
+      } else if (result.pr) {
+        prId = result.pr.pullRequestId;
+        logProgress(`Found PR #${prId}: ${result.pr.title}`, format);
+        logProgress('', format);
       }
     }
-  } else {
-    // No PR ID provided - auto-detect from current branch
-    if (!ctx) {
-      console.error(
-        'Error: Could not determine repository context. Provide a PR ID or full PR URL.'
+
+    if (prId === undefined) {
+      throw new Error(
+        'Could not determine PR ID. Please provide a PR ID, full PR URL, or run from a branch with an associated PR.'
       );
-      process.exit(1);
     }
 
-    const result = await findPRByCurrentBranchAny(ctx);
-
-    if (format !== 'json' && result.branch) {
-      console.log(`Searching for PR from branch '${result.branch}'...`);
+    if (!ctx) {
+      throw new Error(
+        'Could not determine repository context. Provide a full PR URL.'
+      );
     }
 
-    if (!result.success) {
-      console.error(`Error: ${result.error}`);
-      process.exit(1);
-    }
-
-    if (ctx.platform === 'github' && result.githubPr) {
-      prId = result.githubPr.number;
-      if (format !== 'json') {
-        console.log(`Found PR #${prId}: ${result.githubPr.title}`);
-        console.log('');
-      }
-    } else if (result.pr) {
-      prId = result.pr.pullRequestId;
-      if (format !== 'json') {
-        console.log(`Found PR #${prId}: ${result.pr.title}`);
-        console.log('');
-      }
-    }
-  }
-
-  if (prId === undefined) {
-    console.error('Error: Could not determine PR ID.');
-    console.error(
-      'Please provide a PR ID, full PR URL, or run from a branch with an associated PR.'
-    );
-    process.exit(1);
-  }
-
-  if (!ctx) {
-    console.error(
-      'Error: Could not determine repository context. Provide a full PR URL.'
-    );
-    process.exit(1);
-  }
-
-  try {
     if (ctx.platform === 'github') {
       const pr = await ctx.client.getPullRequest(ctx.owner, ctx.repo, prId);
       const url = buildGitHubPrUrl(ctx.owner, ctx.repo, prId);

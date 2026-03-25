@@ -6,7 +6,7 @@
  * @see https://docs.github.com/en/rest/pulls/comments
  */
 
-import { MissingRepoContextError } from '@lib/ado-utils.js';
+import { logProgress } from '@lib/cli-utils.js';
 import { handleCommandError } from '@lib/errors.js';
 import type {
   GitHubIssueComment,
@@ -15,7 +15,6 @@ import type {
 import {
   resolvePlatformContext,
   resolvePRId,
-  GitHubAuthError,
   type PlatformContext,
 } from '@lib/platform.js';
 import type { AdoFlattenedComment } from '@lib/types.js';
@@ -679,46 +678,38 @@ function formatGitHubText(
 // ============================================================================
 
 async function handler(argv: ArgumentsCamelCase<CommentsArgs>): Promise<void> {
-  const args = validateArgs(CommentsArgsSchema, argv, 'comments arguments');
-  const { format, author, since, latest, includeSystem, threadStatus } = args;
-
-  let ctx: PlatformContext;
   try {
-    ctx = resolvePlatformContext(args.project, args.repo);
-    if (ctx.autoDiscovered && format !== 'json') {
+    const args = validateArgs(CommentsArgsSchema, argv, 'comments arguments');
+    const { format, author, since, latest, includeSystem, threadStatus } = args;
+
+    let ctx: PlatformContext = resolvePlatformContext(args.project, args.repo);
+    if (ctx.autoDiscovered) {
       if (ctx.platform === 'github') {
-        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
+        logProgress(
+          `Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`,
+          format
+        );
       } else {
-        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
+        logProgress(
+          `Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`,
+          format
+        );
       }
-      console.log('');
+      logProgress('', format);
     }
-  } catch (error) {
-    if (
-      error instanceof MissingRepoContextError ||
-      error instanceof GitHubAuthError
-    ) {
-      console.error(error.message);
-      process.exit(1);
-    }
-    throw error;
-  }
 
-  const resolved = await resolvePRId(args.pr, ctx, format);
-  const prId = resolved.prId;
-  ctx = resolved.ctx;
+    const resolved = await resolvePRId(args.pr, ctx, format);
+    const prId = resolved.prId;
+    ctx = resolved.ctx;
 
-  try {
-    if (format !== 'json') {
-      console.log(`Fetching comments for PR #${prId}...`);
-      if (author) console.log(`Filtering by author: ${author}`);
-      if (since) console.log(`Since date: ${since}`);
-      if (latest) console.log(`Latest: ${latest} comments`);
-      if (threadStatus && ctx.platform === 'azure-devops') {
-        console.log(`Thread status: ${threadStatus}`);
-      }
-      console.log('');
+    logProgress(`Fetching comments for PR #${prId}...`, format);
+    if (author) logProgress(`Filtering by author: ${author}`, format);
+    if (since) logProgress(`Since date: ${since}`, format);
+    if (latest) logProgress(`Latest: ${latest} comments`, format);
+    if (threadStatus && ctx.platform === 'azure-devops') {
+      logProgress(`Thread status: ${threadStatus}`, format);
     }
+    logProgress('', format);
 
     if (ctx.platform === 'github') {
       // Fetch both issue comments and review comments in parallel

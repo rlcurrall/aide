@@ -4,6 +4,7 @@
  */
 
 import { MissingRepoContextError, buildPrUrl } from '@lib/ado-utils.js';
+import { logProgress } from '@lib/cli-utils.js';
 import { ensureRefPrefix } from '@lib/git-utils.js';
 import { handleCommandError } from '@lib/errors.js';
 import type {
@@ -162,108 +163,93 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
 
   // Validate conflicting flags
   if (draft && publish) {
-    console.error('Error: Cannot use both --draft and --publish flags.');
-    process.exit(1);
+    throw new Error('Cannot use both --draft and --publish flags.');
   }
 
   if (abandon && activate) {
-    console.error('Error: Cannot use both --abandon and --activate flags.');
-    process.exit(1);
+    throw new Error('Cannot use both --abandon and --activate flags.');
   }
 
-  let ctx: PlatformContext | undefined;
   try {
-    ctx = resolvePlatformContext(args.project, args.repo);
-    if (ctx.autoDiscovered && format !== 'json') {
-      if (ctx.platform === 'github') {
-        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
-      } else {
-        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
+    let ctx: PlatformContext | undefined;
+    try {
+      ctx = resolvePlatformContext(args.project, args.repo);
+      if (ctx.autoDiscovered) {
+        if (ctx.platform === 'github') {
+          logProgress(
+            `Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`,
+            format
+          );
+        } else {
+          logProgress(
+            `Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`,
+            format
+          );
+        }
+        logProgress('', format);
       }
-      console.log('');
-    }
-  } catch (error) {
-    if (
-      !(
-        error instanceof MissingRepoContextError ||
-        error instanceof GitHubAuthError
-      ) ||
-      !args.pr?.startsWith('http')
-    ) {
+    } catch (error) {
       if (
-        error instanceof MissingRepoContextError ||
-        error instanceof GitHubAuthError
+        !(
+          error instanceof MissingRepoContextError ||
+          error instanceof GitHubAuthError
+        ) ||
+        !args.pr?.startsWith('http')
       ) {
-        console.error(error.message);
-        process.exit(1);
+        throw error;
       }
-      throw error;
+      // Will handle below via URL parsing
+      ctx = undefined;
     }
-    // Will handle below via URL parsing
-    ctx = undefined;
-  }
 
-  // Resolve PR ID from --pr flag or auto-detect from current branch
-  if (!ctx) {
-    console.error(
-      'Error: Could not determine repository context. Provide a PR ID or full PR URL.'
-    );
-    process.exit(1);
-  }
-  const resolved = await resolvePRId(args.pr, ctx, format);
-  const prId = resolved.prId;
-  ctx = resolved.ctx;
-
-  const hasTagOps =
-    (tagsToAdd && tagsToAdd.length > 0) ||
-    (tagsToRemove && tagsToRemove.length > 0);
-
-  // Check if there's anything to update
-  if (
-    title === undefined &&
-    description === undefined &&
-    target === undefined &&
-    !draft &&
-    !publish &&
-    !abandon &&
-    !activate &&
-    !hasTagOps
-  ) {
-    console.error('Error: No updates specified.');
-    console.error('');
-    console.error('Use one or more of these flags:');
-    console.error('  --title "New title"');
-    console.error('  --description "New description"');
-    console.error('  --target main (change target branch)');
-    console.error('  --draft       (mark as draft)');
-    console.error('  --publish     (publish draft PR)');
-    console.error('  --abandon     (abandon PR)');
-    console.error('  --activate    (reactivate abandoned PR)');
-    console.error('  --tag "tag-name"   (add a tag)');
-    console.error('  --remove-tag "tag" (remove a tag)');
-    process.exit(1);
-  }
-
-  if (format !== 'json') {
-    console.log(`Updating PR #${prId}...`);
-    if (title) console.log(`  Title: ${title}`);
-    if (description)
-      console.log(
-        `  Description: ${description.substring(0, 50)}${description.length > 50 ? '...' : ''}`
+    // Resolve PR ID from --pr flag or auto-detect from current branch
+    if (!ctx) {
+      throw new Error(
+        'Could not determine repository context. Provide a PR ID or full PR URL.'
       );
-    if (target) console.log(`  Target branch: ${target}`);
-    if (draft) console.log('  Setting as draft');
-    if (publish) console.log('  Publishing draft');
-    if (abandon) console.log('  Abandoning PR');
-    if (activate) console.log('  Reactivating PR');
-    if (tagsToAdd && tagsToAdd.length > 0)
-      console.log(`  Adding tags: ${tagsToAdd.join(', ')}`);
-    if (tagsToRemove && tagsToRemove.length > 0)
-      console.log(`  Removing tags: ${tagsToRemove.join(', ')}`);
-    console.log('');
-  }
+    }
+    const resolved = await resolvePRId(args.pr, ctx, format);
+    const prId = resolved.prId;
+    ctx = resolved.ctx;
 
-  try {
+    const hasTagOps =
+      (tagsToAdd && tagsToAdd.length > 0) ||
+      (tagsToRemove && tagsToRemove.length > 0);
+
+    // Check if there's anything to update
+    if (
+      title === undefined &&
+      description === undefined &&
+      target === undefined &&
+      !draft &&
+      !publish &&
+      !abandon &&
+      !activate &&
+      !hasTagOps
+    ) {
+      throw new Error(
+        'No updates specified. Use one or more of: --title, --description, --target, --draft, --publish, --abandon, --activate, --tag, --remove-tag'
+      );
+    }
+
+    logProgress(`Updating PR #${prId}...`, format);
+    if (title) logProgress(`  Title: ${title}`, format);
+    if (description)
+      logProgress(
+        `  Description: ${description.substring(0, 50)}${description.length > 50 ? '...' : ''}`,
+        format
+      );
+    if (target) logProgress(`  Target branch: ${target}`, format);
+    if (draft) logProgress('  Setting as draft', format);
+    if (publish) logProgress('  Publishing draft', format);
+    if (abandon) logProgress('  Abandoning PR', format);
+    if (activate) logProgress('  Reactivating PR', format);
+    if (tagsToAdd && tagsToAdd.length > 0)
+      logProgress(`  Adding tags: ${tagsToAdd.join(', ')}`, format);
+    if (tagsToRemove && tagsToRemove.length > 0)
+      logProgress(`  Removing tags: ${tagsToRemove.join(', ')}`, format);
+    logProgress('', format);
+
     if (ctx.platform === 'github') {
       // =======================================================================
       // GitHub path

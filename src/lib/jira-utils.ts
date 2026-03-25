@@ -23,11 +23,9 @@ export async function readContentFromFileOrArg(
       const file = Bun.file(filePath);
       return await file.text();
     } catch (error) {
-      console.error(`Error: Could not read file '${filePath}'`);
-      if (error instanceof Error) {
-        console.error(`Details: ${error.message}`);
-      }
-      process.exit(1);
+      const details =
+        error instanceof Error ? `\nDetails: ${error.message}` : '';
+      throw new Error(`Could not read file '${filePath}'${details}`);
     }
   }
 
@@ -35,11 +33,10 @@ export async function readContentFromFileOrArg(
     return content;
   }
 
-  console.error(`Error: ${capitalize(contentName)} content is required.`);
-  console.error(
-    `Provide ${contentName} text as an argument or use -f/--file to specify a file.`
+  throw new Error(
+    `${capitalize(contentName)} content is required.\n` +
+      `Provide ${contentName} text as an argument or use -f/--file to specify a file.`
   );
-  process.exit(1);
 }
 
 /**
@@ -49,11 +46,11 @@ export async function readContentFromFileOrArg(
  */
 export function validateTicketKeyWithWarning(ticketKey: string): void {
   if (!isValidTicketKeyFormat(ticketKey)) {
-    console.log(
+    console.error(
       `Warning: '${ticketKey}' doesn't match typical Jira ticket format (PROJECT-123)`
     );
-    console.log('Proceeding anyway...');
-    console.log('');
+    console.error('Proceeding anyway...');
+    console.error('');
   }
 }
 
@@ -185,26 +182,14 @@ function capitalize(str: string): string {
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
-/**
- * Output type for format selection
- */
-export type OutputFormat = 'text' | 'json' | 'markdown';
+// Re-export from cli-utils for backward compatibility
+export {
+  type OutputFormat,
+  shouldShowProgress,
+  logProgress,
+} from './cli-utils.js';
 
-/**
- * Check if we should show progress messages (not json format)
- */
-export function shouldShowProgress(format: OutputFormat): boolean {
-  return format !== 'json';
-}
-
-/**
- * Log a progress message if not in json format
- */
-export function logProgress(message: string, format: OutputFormat): void {
-  if (shouldShowProgress(format)) {
-    console.log(message);
-  }
-}
+import { type OutputFormat, logProgress } from './cli-utils.js';
 
 /**
  * Jira wiki syntax patterns that users might accidentally use
@@ -239,23 +224,23 @@ export function warnIfJiraWikiSyntax(
   }
 
   if (detected.length > 0) {
-    console.log('Warning: Description appears to use Jira wiki syntax.');
-    console.log(
+    console.error('Warning: Description appears to use Jira wiki syntax.');
+    console.error(
       'Tip: Use markdown instead - it will be automatically converted.'
     );
-    console.log('');
-    console.log('Detected patterns:');
+    console.error('');
+    console.error('Detected patterns:');
     for (const desc of detected) {
-      console.log(`  - ${desc}`);
+      console.error(`  - ${desc}`);
     }
-    console.log('');
-    console.log('Quick conversion guide:');
-    console.log('  h2. Heading    ->  ## Heading');
-    console.log('  {{code}}       ->  `code`');
-    console.log('  {code}...{code}->  ```...```');
-    console.log('  # list item    ->  1. list item');
-    console.log('  * list item    ->  - list item');
-    console.log('');
+    console.error('');
+    console.error('Quick conversion guide:');
+    console.error('  h2. Heading    ->  ## Heading');
+    console.error('  {{code}}       ->  `code`');
+    console.error('  {code}...{code}->  ```...```');
+    console.error('  # list item    ->  1. list item');
+    console.error('  * list item    ->  - list item');
+    console.error('');
     return true;
   }
 
@@ -320,13 +305,14 @@ export async function processCustomFields(
 
   // Report resolution errors
   if (errors.length > 0) {
-    for (const err of errors) {
-      console.error(`Error: ${err.error}`);
+    const messages = errors.map((err) => {
+      let msg = err.error;
       if (err.suggestions && err.suggestions.length > 0) {
-        console.error(`  Did you mean: ${err.suggestions.join(', ')}?`);
+        msg += `\n  Did you mean: ${err.suggestions.join(', ')}?`;
       }
-    }
-    process.exit(1);
+      return msg;
+    });
+    throw new Error(messages.join('\n'));
   }
 
   // Log resolved field mappings
@@ -348,10 +334,10 @@ export async function processCustomFields(
   } = formatFieldValues(resolved, fieldPairs);
 
   if (!formatSuccess) {
-    for (const err of formatErrors) {
-      console.error(`Error formatting "${err.name}": ${err.error}`);
-    }
-    process.exit(1);
+    const messages = formatErrors.map(
+      (err) => `Error formatting "${err.name}": ${err.error}`
+    );
+    throw new Error(messages.join('\n'));
   }
 
   // Log formatting applied
@@ -373,9 +359,7 @@ export async function processCustomFields(
   const { valid, results } = validateFieldValues(resolved, formattedPairs);
 
   if (!valid) {
-    const errorOutput = formatValidationErrors(results);
-    console.error(errorOutput);
-    process.exit(1);
+    throw new Error(formatValidationErrors(results));
   }
 
   // Build custom fields object with resolved keys and formatted values

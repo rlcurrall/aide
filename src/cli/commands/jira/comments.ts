@@ -7,7 +7,6 @@ import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 import { loadConfig } from '@lib/config.js';
 import { JiraClient } from '@lib/jira-client.js';
 import { validateArgs } from '@lib/validation.js';
-import { isValidTicketKeyFormat } from '@schemas/common.js';
 import {
   filterComments,
   formatCommentsOutput,
@@ -19,6 +18,7 @@ import {
   type CommentsArgs,
 } from '@schemas/jira/comments.js';
 import { handleCommandError } from '@lib/errors.js';
+import { validateTicketKeyWithWarning, logProgress } from '@lib/jira-utils.js';
 
 /**
  * Fetch all comments with pagination support
@@ -60,25 +60,17 @@ async function handler(argv: ArgumentsCamelCase<CommentsArgs>): Promise<void> {
   const { ticketKey, format, author, since, latest, maxResults, all } = args;
 
   // Validate ticket key format (soft validation with warning)
-  if (!isValidTicketKeyFormat(ticketKey)) {
-    console.log(
-      `Warning: '${ticketKey}' doesn't match typical Jira ticket format (PROJECT-123)`
-    );
-    console.log('Proceeding anyway...');
-    console.log('');
-  }
+  validateTicketKeyWithWarning(ticketKey);
 
   try {
     const config = loadConfig();
     const client = new JiraClient(config);
 
-    if (format !== 'json') {
-      console.log(`Fetching comments for ticket: ${ticketKey}`);
-      if (author) console.log(`Filtering by author: ${author}`);
-      if (since) console.log(`Since date: ${since}`);
-      if (latest) console.log(`Latest: ${latest} comments`);
-      console.log('');
-    }
+    logProgress(`Fetching comments for ticket: ${ticketKey}`, format);
+    if (author) logProgress(`Filtering by author: ${author}`, format);
+    if (since) logProgress(`Since date: ${since}`, format);
+    if (latest) logProgress(`Latest: ${latest} comments`, format);
+    logProgress('', format);
 
     // Fetch comments
     let comments: JiraComment[];

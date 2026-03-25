@@ -24,6 +24,7 @@ import {
 } from './github-utils.js';
 import { loadAzureDevOpsConfig } from './config.js';
 import { getGitRemoteUrl } from './git-utils.js';
+import { logProgress, type OutputFormat } from './cli-utils.js';
 
 // ============================================================================
 // Platform Types
@@ -194,7 +195,7 @@ export interface ResolvedPR {
 export async function resolvePRId(
   prArg: string | undefined,
   ctx: PlatformContext,
-  format: string
+  format: OutputFormat
 ): Promise<ResolvedPR> {
   let prId: number | undefined;
   let resolvedCtx = ctx;
@@ -203,9 +204,9 @@ export async function resolvePRId(
     if (prArg.startsWith('http')) {
       const parsed = parsePRUrlAny(prArg);
       if (!parsed) {
-        console.error(`Error: Invalid PR URL: ${prArg}`);
-        console.error('Expected Azure DevOps or GitHub PR URL format.');
-        process.exit(1);
+        throw new Error(
+          `Invalid PR URL: ${prArg}. Expected Azure DevOps or GitHub PR URL format.`
+        );
       }
       prId = parsed.prId;
 
@@ -238,46 +239,38 @@ export async function resolvePRId(
       if (validation.valid) {
         prId = validation.value;
       } else {
-        console.error(
-          `Error: Could not parse '${prArg}' as a PR ID. Expected a positive number or full PR URL.`
+        throw new Error(
+          `Could not parse '${prArg}' as a PR ID. Expected a positive number or full PR URL.`
         );
-        process.exit(1);
       }
     }
   } else {
     // Auto-detect from current branch
     const result = await findPRByCurrentBranchAny(resolvedCtx);
 
-    if (format !== 'json' && result.branch) {
-      console.log(`Searching for PR from branch '${result.branch}'...`);
+    if (result.branch) {
+      logProgress(`Searching for PR from branch '${result.branch}'...`, format);
     }
 
     if (!result.success) {
-      console.error(`Error: ${result.error}`);
-      process.exit(1);
+      throw new Error(result.error);
     }
 
     if (resolvedCtx.platform === 'github' && result.githubPr) {
       prId = result.githubPr.number;
-      if (format !== 'json') {
-        console.log(`Found PR #${prId}: ${result.githubPr.title}`);
-        console.log('');
-      }
+      logProgress(`Found PR #${prId}: ${result.githubPr.title}`, format);
+      logProgress('', format);
     } else if (result.pr) {
       prId = result.pr.pullRequestId;
-      if (format !== 'json') {
-        console.log(`Found PR #${prId}: ${result.pr.title}`);
-        console.log('');
-      }
+      logProgress(`Found PR #${prId}: ${result.pr.title}`, format);
+      logProgress('', format);
     }
   }
 
   if (prId === undefined) {
-    console.error('Error: Could not determine PR ID.');
-    console.error(
-      'Please provide a PR ID, full PR URL, or run from a branch with an associated PR.'
+    throw new Error(
+      'Could not determine PR ID. Please provide a PR ID, full PR URL, or run from a branch with an associated PR.'
     );
-    process.exit(1);
   }
 
   return { prId, ctx: resolvedCtx };

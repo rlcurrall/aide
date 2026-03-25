@@ -5,6 +5,7 @@
  */
 
 import { MissingRepoContextError } from '@lib/ado-utils.js';
+import { logProgress } from '@lib/cli-utils.js';
 import {
   extractBranchName,
   fetchMissingBranches,
@@ -27,7 +28,11 @@ import {
   type PlatformContext,
 } from '@lib/platform.js';
 import { validateArgs } from '@lib/validation.js';
-import { DiffArgsSchema, type DiffArgs } from '@schemas/pr/diff.js';
+import {
+  DiffArgsSchema,
+  type DiffArgs,
+  type OutputFormat,
+} from '@schemas/pr/diff.js';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 // ============================================================================
@@ -736,73 +741,70 @@ function formatGitHubJsonOutput(
 // ============================================================================
 
 async function handler(argv: ArgumentsCamelCase<DiffArgs>): Promise<void> {
-  const args = validateArgs(DiffArgsSchema, argv, 'diff arguments');
-  const { format } = args;
-
-  // Validate mutually exclusive flags
-  const modeFlags = [args.stat, args.files, !!args.file].filter(Boolean).length;
-  if (modeFlags > 1) {
-    console.error(
-      'Error: --stat, --files, and --file are mutually exclusive. Use only one.'
-    );
-    process.exit(1);
-  }
-
-  // Determine mode
-  let mode: DiffMode = 'full';
-  if (args.stat) mode = 'stat';
-  else if (args.files) mode = 'files';
-  else if (args.file) mode = 'file';
-
-  // Resolve platform context
-  let ctx: PlatformContext | undefined;
   try {
-    ctx = resolvePlatformContext(args.project, args.repo);
-    if (ctx.autoDiscovered && format !== 'json') {
-      if (ctx.platform === 'github') {
-        console.log(`Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`);
-      } else {
-        console.log(`Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`);
-      }
-      console.log('');
+    const args = validateArgs(DiffArgsSchema, argv, 'diff arguments');
+    const { format } = args;
+
+    // Validate mutually exclusive flags
+    const modeFlags = [args.stat, args.files, !!args.file].filter(
+      Boolean
+    ).length;
+    if (modeFlags > 1) {
+      throw new Error(
+        '--stat, --files, and --file are mutually exclusive. Use only one.'
+      );
     }
-  } catch (error) {
-    if (
-      !(
-        error instanceof MissingRepoContextError ||
-        error instanceof GitHubAuthError
-      ) ||
-      !args.pr?.startsWith('http')
-    ) {
+
+    // Determine mode
+    let mode: DiffMode = 'full';
+    if (args.stat) mode = 'stat';
+    else if (args.files) mode = 'files';
+    else if (args.file) mode = 'file';
+
+    // Resolve platform context
+    let ctx: PlatformContext | undefined;
+    try {
+      ctx = resolvePlatformContext(args.project, args.repo);
+      if (ctx.autoDiscovered) {
+        if (ctx.platform === 'github') {
+          logProgress(
+            `Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`,
+            format
+          );
+        } else {
+          logProgress(
+            `Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`,
+            format
+          );
+        }
+        logProgress('', format);
+      }
+    } catch (error) {
       if (
-        error instanceof MissingRepoContextError ||
-        error instanceof GitHubAuthError
+        !(
+          error instanceof MissingRepoContextError ||
+          error instanceof GitHubAuthError
+        ) ||
+        !args.pr?.startsWith('http')
       ) {
-        console.error(error.message);
-        process.exit(1);
+        throw error;
       }
-      throw error;
+      // Will handle below via URL parsing
+      ctx = undefined;
     }
-    // Will handle below via URL parsing
-    ctx = undefined;
-  }
 
-  // Resolve PR ID (handles URL parsing, numeric ID, and auto-detect from branch)
-  if (!ctx) {
-    console.error(
-      'Error: Could not determine repository context. Provide a PR ID or full PR URL.'
-    );
-    process.exit(1);
-  }
-  const resolved = await resolvePRId(args.pr, ctx, format);
-  ctx = resolved.ctx;
-  const prId = resolved.prId;
-
-  try {
-    if (format !== 'json') {
-      console.log(`Fetching diff for PR #${prId}...`);
-      console.log('');
+    // Resolve PR ID (handles URL parsing, numeric ID, and auto-detect from branch)
+    if (!ctx) {
+      throw new Error(
+        'Could not determine repository context. Provide a PR ID or full PR URL.'
+      );
     }
+    const resolved = await resolvePRId(args.pr, ctx, format);
+    ctx = resolved.ctx;
+    const prId = resolved.prId;
+
+    logProgress(`Fetching diff for PR #${prId}...`, format);
+    logProgress('', format);
 
     if (ctx.platform === 'github') {
       await handleGitHubDiff(ctx, prId, args, mode, format);
@@ -823,15 +825,12 @@ async function handleAdoDiff(
   prId: number,
   args: DiffArgs,
   mode: DiffMode,
-  format: string
+  format: OutputFormat
 ): Promise<void> {
   const pr = await ctx.client.getPullRequest(ctx.project, ctx.repo, prId);
 
   if (args.file && !isGitRepository()) {
-    console.error(
-      'Error: Single file diff requires being in a git repository.'
-    );
-    process.exit(1);
+    throw new Error('Single file diff requires being in a git repository.');
   }
 
   // Ensure branches are available locally
@@ -843,11 +842,11 @@ async function handleAdoDiff(
       fetch: args.fetch,
     });
 
-    if (format !== 'json' && branchResult.fetched.length > 0) {
+    if (branchResult.fetched.length > 0) {
       for (const branch of branchResult.fetched) {
-        console.log(`Fetched branch '${branch}'`);
+        logProgress(`Fetched branch '${branch}'`, format);
       }
-      console.log('');
+      logProgress('', format);
     }
   }
 
@@ -860,11 +859,9 @@ async function handleAdoDiff(
   // --file mode unsupported in ADO API fallback
   if (args.file && diffResult.source === 'api-fallback') {
     const sourceBranch = extractBranchName(pr.sourceRefName);
-    console.error(
-      `Error: Single file diff requires branch to be available locally.`
+    throw new Error(
+      `Single file diff requires branch to be available locally. Run: git fetch origin ${sourceBranch}`
     );
-    console.error(`Run: git fetch origin ${sourceBranch}`);
-    process.exit(1);
   }
 
   let output: string;
@@ -884,7 +881,7 @@ async function handleGitHubDiff(
   prId: number,
   args: DiffArgs,
   mode: DiffMode,
-  format: string
+  format: OutputFormat
 ): Promise<void> {
   const pr = await ctx.client.getPullRequest(ctx.owner, ctx.repo, prId);
 
@@ -900,11 +897,11 @@ async function handleGitHubDiff(
       fetch: args.fetch,
     });
 
-    if (format !== 'json' && branchResult.fetched.length > 0) {
+    if (branchResult.fetched.length > 0) {
       for (const branch of branchResult.fetched) {
-        console.log(`Fetched branch '${branch}'`);
+        logProgress(`Fetched branch '${branch}'`, format);
       }
-      console.log('');
+      logProgress('', format);
     }
   }
 
@@ -919,14 +916,12 @@ async function handleGitHubDiff(
     const ghFiles = (diffResult as GitHubApiDiffResult).files;
     const matchingFile = ghFiles.find((f) => f.filename === args.file);
     if (!matchingFile) {
-      console.error(`Error: File '${args.file}' not found in PR changes.`);
-      process.exit(1);
+      throw new Error(`File '${args.file}' not found in PR changes.`);
     }
     if (!matchingFile.patch) {
-      console.error(
-        `Error: No diff available for '${args.file}' (binary file or too large).`
+      throw new Error(
+        `No diff available for '${args.file}' (binary file or too large).`
       );
-      process.exit(1);
     }
     console.log(matchingFile.patch);
     return;
