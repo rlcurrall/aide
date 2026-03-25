@@ -281,6 +281,40 @@ export interface JiraTransitionOptions {
 }
 
 // ============================================================================
+// Jira Agile Types (Sprint & Board)
+// ============================================================================
+
+export interface JiraBoard {
+  id: number;
+  name: string;
+  type: 'scrum' | 'kanban' | 'simple';
+  location?: {
+    projectId?: number;
+    projectKey?: string;
+    projectName?: string;
+    displayName?: string;
+  };
+}
+
+export interface JiraSprint {
+  id: number;
+  name: string;
+  state: 'future' | 'active' | 'closed';
+  startDate?: string;
+  endDate?: string;
+  completeDate?: string;
+  originBoardId?: number;
+  goal?: string;
+}
+
+export interface JiraAgilePageResponse<T> {
+  maxResults: number;
+  startAt: number;
+  isLast: boolean;
+  values: T[];
+}
+
+// ============================================================================
 // Azure DevOps Types
 // ============================================================================
 

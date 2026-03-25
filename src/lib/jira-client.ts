@@ -13,6 +13,9 @@ import type {
   JiraCreateMetaResponse,
   JiraUser,
   AdfDocument,
+  JiraBoard,
+  JiraSprint,
+  JiraAgilePageResponse,
 } from './types.js';
 
 export class JiraClient {
@@ -615,6 +618,86 @@ export class JiraClient {
         throw new Error(`Failed to delete attachment: ${error.message}`);
       }
       throw new Error('Failed to delete attachment: Unknown error');
+    }
+  }
+
+  // ==========================================================================
+  // Agile API Methods (Boards & Sprints)
+  // ==========================================================================
+
+  /**
+   * List boards, optionally filtered by project key
+   */
+  async listBoards(
+    projectKeyOrId?: string,
+    maxResults: number = 50
+  ): Promise<JiraAgilePageResponse<JiraBoard>> {
+    const params = new URLSearchParams({ maxResults: String(maxResults) });
+    if (projectKeyOrId) {
+      params.set('projectKeyOrId', projectKeyOrId);
+    }
+    const url = `${this.config.url}/rest/agile/1.0/board?${params}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: this.getAuthHeaders(),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
+
+      return (await response.json()) as JiraAgilePageResponse<JiraBoard>;
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new Error(`Failed to list boards: ${error.message}`);
+      }
+      throw new Error('Failed to list boards: Unknown error');
+    }
+  }
+
+  /**
+   * Get sprints for a board, optionally filtered by state
+   */
+  async getSprintsForBoard(
+    boardId: number,
+    state?: 'future' | 'active' | 'closed',
+    maxResults: number = 50
+  ): Promise<JiraAgilePageResponse<JiraSprint>> {
+    const params = new URLSearchParams({ maxResults: String(maxResults) });
+    if (state) {
+      params.set('state', state);
+    }
+    const url = `${this.config.url}/rest/agile/1.0/board/${boardId}/sprint?${params}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: this.getAuthHeaders(),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        if (
+          response.status === 400 &&
+          errorText.toLowerCase().includes('does not support sprints')
+        ) {
+          throw new Error(
+            `Board ${boardId} does not support sprints. ` +
+              `Kanban boards use a continuous flow without sprints.`
+          );
+        }
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
+
+      return (await response.json()) as JiraAgilePageResponse<JiraSprint>;
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new Error(`Failed to get sprints for board: ${error.message}`);
+      }
+      throw new Error('Failed to get sprints for board: Unknown error');
     }
   }
 }

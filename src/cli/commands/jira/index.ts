@@ -17,6 +17,8 @@ import deleteCommentCommand from './delete-comment.js';
 import editCommentCommand from './edit-comment.js';
 import attachCommand from './attach.js';
 import fieldsCommand from './fields.js';
+import boardsCommand from './boards.js';
+import sprintCommand from './sprint.js';
 
 export const jiraCommands: CommandModule = {
   command: 'jira <command>',
@@ -35,6 +37,8 @@ export const jiraCommands: CommandModule = {
       .command(editCommentCommand)
       .command(attachCommand)
       .command(fieldsCommand)
+      .command(boardsCommand)
+      .command(sprintCommand)
       .demandCommand(1, 'Please specify a jira command')
       .example('$0 jira search "assignee = currentUser()"', 'Search tickets')
       .example('$0 jira view PROJ-123', 'Get ticket details')
@@ -52,6 +56,12 @@ export const jiraCommands: CommandModule = {
       .example(
         '$0 jira fields VNT -t Task --show-values',
         'List fields with values'
+      )
+      .example('$0 jira boards PROJ', 'List boards for a project')
+      .example('$0 jira sprint 123', 'Get active sprint for board')
+      .example(
+        '$0 jira search "assignee = currentUser()" --sprint-board 123',
+        'Search in active sprint'
       ),
   handler: () => {
     // This won't be called due to demandCommand

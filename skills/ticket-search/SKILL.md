@@ -25,11 +25,12 @@ aide jira search "JQL query" [maxResults] [--format text|json|markdown]
 
 ### Flags
 
-| Flag         | Description                                         |
-| ------------ | --------------------------------------------------- |
-| `maxResults` | Maximum results to return (positional, default: 50) |
-| `--limit`    | Alias for maxResults                                |
-| `--format`   | Output format: text, json, markdown                 |
+| Flag             | Description                                               |
+| ---------------- | --------------------------------------------------------- |
+| `maxResults`     | Maximum results to return (positional, default: 50)       |
+| `--limit`        | Alias for maxResults                                      |
+| `--sprint-board` | Board ID to auto-resolve active sprint and prepend to JQL |
+| `--format`       | Output format: text, json, markdown                       |
 
 ## Common JQL Patterns
 
@@ -76,6 +77,16 @@ aide jira search "updated >= startOfWeek()"
 
 # Resolved this month
 aide jira search "resolved >= startOfMonth()"
+```
+
+### Sprint Queries
+
+```bash
+# Search within active sprint (auto-resolves sprint ID from board)
+aide jira search "assignee = currentUser()" --sprint-board 123
+
+# All issues in active sprint
+aide jira search "status != Closed" --sprint-board 123
 ```
 
 ### Text Search

@@ -107,6 +107,14 @@ aide jira create -p PROJ -t Bug -s "Bug" --field "Severity=High"
 # Discover available fields for a project/issue type
 aide jira fields PROJ -t Bug --show-values
 
+# List boards and get active sprint
+aide jira boards PROJ
+aide jira sprint 123                    # active sprint for board
+aide jira sprint 123 --state future     # future sprints
+
+# Search within active sprint
+aide jira search "assignee = currentUser()" --sprint-board 123
+
 # Change workflow status
 aide jira transition PROJ-123 "In Progress"
 aide jira transition PROJ-123 --list  # show available transitions
