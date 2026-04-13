@@ -224,9 +224,11 @@ export function warnIfJiraWikiSyntax(
   }
 
   if (detected.length > 0) {
-    console.error('Warning: Description appears to use Jira wiki syntax.');
     console.error(
-      'Tip: Use markdown instead - it will be automatically converted.'
+      'Warning: Description appears to use Jira wiki syntax, which is not supported.'
+    );
+    console.error(
+      'Tip: Use markdown instead. Aide converts markdown to Jira format automatically.'
     );
     console.error('');
     console.error('Detected patterns:');
