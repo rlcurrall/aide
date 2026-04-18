@@ -8,6 +8,15 @@
 
 import { StringDecoder } from 'node:string_decoder';
 
+export class UserCancelledError extends Error {
+  readonly exitCode = 130;
+  override readonly name = 'UserCancelledError';
+  constructor() {
+    super('Cancelled by user');
+    Object.setPrototypeOf(this, UserCancelledError.prototype);
+  }
+}
+
 export interface ReadLineOptions {
   label: string;
   masked?: boolean;
@@ -229,9 +238,7 @@ async function readRaw(masked: boolean): Promise<string> {
         const step = stepRawInput(buf, ch, masked);
         if (step.action === 'cancel') {
           process.stdout.write('\n');
-          stdin.setRawMode(wasRaw);
-          stdin.pause();
-          process.exit(130);
+          throw new UserCancelledError();
         }
         if (step.action === 'submit') {
           process.stdout.write('\n');

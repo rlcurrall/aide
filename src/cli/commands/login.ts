@@ -16,7 +16,7 @@ import {
   password,
   type Prompter,
 } from '@lib/prompts.js';
-import { setSecret, KeyringUnavailableError } from '@lib/secrets.js';
+import { setSecret } from '@lib/secrets.js';
 import {
   StoredJiraSchema,
   StoredAdoSchema,
@@ -177,18 +177,6 @@ export async function loginGithub(
 // yargs wiring
 // ---------------------------------------------------------------------------
 
-async function runAndExit(fn: () => Promise<void>): Promise<void> {
-  try {
-    await fn();
-  } catch (err) {
-    if (err instanceof KeyringUnavailableError) {
-      console.error(err.message);
-      process.exit(1);
-    }
-    throw err;
-  }
-}
-
 interface JiraArgs {
   url?: string;
   email?: string;
@@ -216,14 +204,12 @@ const command: CommandModule = {
           email: { type: 'string', describe: 'Jira email' },
           token: { type: 'string', describe: 'Jira API token' },
         },
-        handler: (argv: ArgumentsCamelCase<JiraArgs>) =>
-          runAndExit(() =>
-            loginJira({
-              url: argv.url,
-              email: argv.email,
-              token: argv.token,
-            })
-          ),
+        handler: async (argv: ArgumentsCamelCase<JiraArgs>) =>
+          await loginJira({
+            url: argv.url,
+            email: argv.email,
+            token: argv.token,
+          }),
       })
       .command({
         command: 'ado',
@@ -237,14 +223,12 @@ const command: CommandModule = {
             describe: 'Auth method (default: pat)',
           },
         },
-        handler: (argv: ArgumentsCamelCase<AdoArgs>) =>
-          runAndExit(() =>
-            loginAdo({
-              orgUrl: argv['org-url'],
-              pat: argv.pat,
-              authMethod: argv['auth-method'],
-            })
-          ),
+        handler: async (argv: ArgumentsCamelCase<AdoArgs>) =>
+          await loginAdo({
+            orgUrl: argv['org-url'],
+            pat: argv.pat,
+            authMethod: argv['auth-method'],
+          }),
       })
       .command({
         command: 'github',
@@ -252,10 +236,9 @@ const command: CommandModule = {
         builder: {
           token: { type: 'string', describe: 'GitHub token' },
         },
-        handler: (argv: ArgumentsCamelCase<GithubArgs>) =>
-          runAndExit(async () => {
-            await loginGithub({ token: argv.token });
-          }),
+        handler: async (argv: ArgumentsCamelCase<GithubArgs>) => {
+          await loginGithub({ token: argv.token });
+        },
       })
       .demandCommand(1, 'Specify a service: jira, ado, or github'),
   handler: () => {

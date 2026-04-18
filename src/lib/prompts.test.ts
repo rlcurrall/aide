@@ -17,6 +17,7 @@ import {
   applyChar,
   classifyControlChar,
   stepRawInput,
+  UserCancelledError,
   type Prompter,
   type ReadLineOptions,
 } from './prompts.js';
@@ -141,6 +142,15 @@ describe('confirm', () => {
     const p = new ScriptedPrompter(['']);
     await confirm({ label: 'Save?', default: false, prompter: p });
     expect(p.readCalls[0]?.label).toContain('[y/N]');
+  });
+});
+
+describe('UserCancelledError', () => {
+  test('UserCancelledError has exitCode 130', () => {
+    const err = new UserCancelledError();
+    expect(err.exitCode).toBe(130);
+    expect(err.name).toBe('UserCancelledError');
+    expect(err).toBeInstanceOf(Error);
   });
 });
 

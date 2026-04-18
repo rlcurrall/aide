@@ -8,7 +8,6 @@ import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 import {
   deleteSecret,
-  KeyringUnavailableError,
   type SecretName,
 } from '@lib/secrets.js';
 
@@ -35,19 +34,11 @@ const command: CommandModule<object, Args> = {
     },
   },
   handler: async (argv: ArgumentsCamelCase<Args>) => {
-    try {
-      const result = await logout(argv.service);
-      if (result === 'removed') {
-        console.log(`Removed stored credentials for ${argv.service}.`);
-      } else {
-        console.log(`No stored credentials for ${argv.service}.`);
-      }
-    } catch (err) {
-      if (err instanceof KeyringUnavailableError) {
-        console.error(err.message);
-        process.exit(1);
-      }
-      throw err;
+    const result = await logout(argv.service);
+    if (result === 'removed') {
+      console.log(`Removed stored credentials for ${argv.service}.`);
+    } else {
+      console.log(`No stored credentials for ${argv.service}.`);
     }
   },
 };
