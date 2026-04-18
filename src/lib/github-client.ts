@@ -3,9 +3,11 @@
  *
  * Uses `gh` CLI as primary transport (leveraging existing auth), with
  * direct HTTP + GITHUB_TOKEN as fallback for CI/headless environments.
+ * Falls back to a keyring-stored token as a third credential source.
  */
 
 import { spawnSync } from 'bun';
+import * as v from 'valibot';
 import type {
   GitHubPullRequest,
   GitHubIssueComment,
@@ -16,6 +18,9 @@ import type {
   GitHubListPROptions,
   GitHubCreateReviewCommentOptions,
 } from './github-types.js';
+import { isGhCliAvailable } from './gh-utils.js';
+import { getSecret, KeyringUnavailableError } from './secrets.js';
+import { StoredGithubSchema } from '@schemas/config.js';
 
 type TransportMode = 'gh-cli' | 'token';
 
@@ -28,9 +33,27 @@ export class GitHubAuthError extends Error {
       'GitHub authentication not available.\n\n' +
         'Either:\n' +
         '  1. Install the GitHub CLI and run: gh auth login\n' +
-        '  2. Set the GITHUB_TOKEN or GH_TOKEN environment variable'
+        "  2. Run 'aide login github' to save a token\n" +
+        '  3. Set the GITHUB_TOKEN or GH_TOKEN environment variable'
     );
     this.name = 'GitHubAuthError';
+  }
+}
+
+async function tryReadStoredToken(): Promise<string | null> {
+  let raw: string | null;
+  try {
+    raw = await getSecret('github');
+  } catch (err) {
+    if (err instanceof KeyringUnavailableError) return null;
+    throw err;
+  }
+  if (raw === null) return null;
+  try {
+    const parsed = v.parse(StoredGithubSchema, JSON.parse(raw));
+    return parsed.token;
+  } catch {
+    return null;
   }
 }
 
@@ -38,39 +61,28 @@ export class GitHubClient {
   private mode: TransportMode;
   private token?: string;
 
-  /**
-   * @throws {GitHubAuthError} if neither gh CLI nor GITHUB_TOKEN/GH_TOKEN is available
-   */
-  constructor() {
-    // Check gh CLI availability
-    if (GitHubClient.isGhCliAvailable()) {
-      this.mode = 'gh-cli';
-    } else {
-      const token = Bun.env.GITHUB_TOKEN || Bun.env.GH_TOKEN;
-      if (!token) {
-        throw new GitHubAuthError();
-      }
-      this.mode = 'token';
-      this.token = token;
-    }
+  private constructor(mode: TransportMode, token?: string) {
+    this.mode = mode;
+    this.token = token;
   }
 
-  private static _ghCliAvailable: boolean | null = null;
-
-  static isGhCliAvailable(): boolean {
-    if (GitHubClient._ghCliAvailable !== null) {
-      return GitHubClient._ghCliAvailable;
+  /**
+   * Create a GitHubClient, checking gh CLI, env vars, and keyring in order.
+   * @throws {GitHubAuthError} if no auth source is available
+   */
+  static async create(): Promise<GitHubClient> {
+    if (isGhCliAvailable()) {
+      return new GitHubClient('gh-cli');
     }
-    try {
-      const result = spawnSync(['gh', 'auth', 'status'], {
-        stdout: 'ignore',
-        stderr: 'ignore',
-      });
-      GitHubClient._ghCliAvailable = result.exitCode === 0;
-    } catch {
-      GitHubClient._ghCliAvailable = false;
+    const envToken = Bun.env.GITHUB_TOKEN || Bun.env.GH_TOKEN;
+    if (envToken) {
+      return new GitHubClient('token', envToken);
     }
-    return GitHubClient._ghCliAvailable;
+    const stored = await tryReadStoredToken();
+    if (stored) {
+      return new GitHubClient('token', stored);
+    }
+    throw new GitHubAuthError();
   }
 
   // ===========================================================================

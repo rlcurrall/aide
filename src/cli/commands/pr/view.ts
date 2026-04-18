@@ -206,7 +206,7 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
             platform: 'github',
             owner: parsed.owner,
             repo: parsed.ghRepo,
-            client: new GitHubClient(),
+            client: await GitHubClient.create(),
             autoDiscovered: false,
           };
         } else if (

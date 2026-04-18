@@ -11,10 +11,10 @@
  * - Shows configuration status warnings when env vars are missing
  */
 
-import { spawnSync } from 'bun';
 import type { CommandModule } from 'yargs';
 
 import { getSecret, KeyringUnavailableError } from '@lib/secrets.js';
+import { isGhCliAvailable } from '@lib/gh-utils.js';
 
 async function hasStoredSecret(name: 'jira' | 'ado' | 'github'): Promise<boolean> {
   try {
@@ -52,15 +52,7 @@ async function isPRPlatformConfigured(): Promise<boolean> {
   if (await hasStoredSecret('github')) return true;
 
   // GitHub via gh CLI
-  try {
-    const result = spawnSync(['gh', 'auth', 'status'], {
-      stdout: 'ignore',
-      stderr: 'ignore',
-    });
-    if (result.exitCode === 0) return true;
-  } catch {
-    // gh not available
-  }
+  if (isGhCliAvailable()) return true;
 
   return false;
 }
