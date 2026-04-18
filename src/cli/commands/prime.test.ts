@@ -11,7 +11,13 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { buildPrimeOutput } from './prime.js';
 import { installMockSecrets, type Store } from '@lib/test-helpers.js';
 
-const JIRA_VARS = ['JIRA_URL', 'JIRA_EMAIL', 'JIRA_USERNAME', 'JIRA_API_TOKEN', 'JIRA_TOKEN'];
+const JIRA_VARS = [
+  'JIRA_URL',
+  'JIRA_EMAIL',
+  'JIRA_USERNAME',
+  'JIRA_API_TOKEN',
+  'JIRA_TOKEN',
+];
 const ADO_VARS = ['AZURE_DEVOPS_ORG_URL', 'AZURE_DEVOPS_PAT'];
 const GH_VARS = ['GITHUB_TOKEN', 'GH_TOKEN'];
 
@@ -64,13 +70,40 @@ describe('buildPrimeOutput', () => {
   test('reports Jira configured when only keyring has credentials', async () => {
     store.set(
       'aide:jira',
-      JSON.stringify({ url: 'https://x.atlassian.net', email: 'a@b.c', apiToken: 't' })
+      JSON.stringify({
+        url: 'https://x.atlassian.net',
+        email: 'a@b.c',
+        apiToken: 't',
+      })
     );
     const output = await buildPrimeOutput({ ghAvailable: () => false });
     expect(output).toMatch(/Jira: Configured/i);
   });
 
   test('omits the Configuration Status section when everything is configured', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_EMAIL = 'a@b.c';
+    Bun.env.JIRA_API_TOKEN = 't';
+    Bun.env.AZURE_DEVOPS_ORG_URL = 'https://dev.azure.com/x';
+    Bun.env.AZURE_DEVOPS_PAT = 'p';
+    const output = await buildPrimeOutput({ ghAvailable: () => false });
+    expect(output).not.toContain('Configuration Status');
+  });
+
+  test('reports Jira misconfigured when stored blob fails schema', async () => {
+    store.set('aide:jira', JSON.stringify({ url: 'not-a-url' }));
+    const output = await buildPrimeOutput({ ghAvailable: () => false });
+    expect(output).toMatch(/Jira: Misconfigured/i);
+    expect(output).not.toMatch(/Jira: Configured$/m);
+  });
+
+  test('reports PR misconfigured when stored github token blob fails schema', async () => {
+    store.set('aide:github', JSON.stringify({ wrongField: 'x' }));
+    const output = await buildPrimeOutput({ ghAvailable: () => false });
+    expect(output).toMatch(/Pull Requests: Misconfigured/i);
+  });
+
+  test('still omits status section when everything is configured via env', async () => {
     Bun.env.JIRA_URL = 'https://x.atlassian.net';
     Bun.env.JIRA_EMAIL = 'a@b.c';
     Bun.env.JIRA_API_TOKEN = 't';

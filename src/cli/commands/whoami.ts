@@ -18,7 +18,12 @@ import {
 import { isGhCliAvailable } from '@lib/gh-utils.js';
 
 export type ServiceName = 'jira' | 'ado' | 'github';
-export type WhoamiSource = 'env' | 'keyring' | 'gh-cli' | 'not-configured';
+export type WhoamiSource =
+  | 'env'
+  | 'keyring'
+  | 'gh-cli'
+  | 'not-configured'
+  | 'corrupted';
 
 export interface WhoamiStatus {
   service: ServiceName;
@@ -44,11 +49,7 @@ export async function getWhoamiStatus(
   opts: { ghAvailable?: () => boolean } = {}
 ): Promise<WhoamiStatus[]> {
   const ghCheck = opts.ghAvailable ?? isGhCliAvailable;
-  return [
-    await statusJira(),
-    await statusAdo(),
-    await statusGithub(ghCheck),
-  ];
+  return [await statusJira(), await statusAdo(), await statusGithub(ghCheck)];
 }
 
 // ---------------------------------------------------------------------------
@@ -68,11 +69,18 @@ async function statusJira(): Promise<WhoamiStatus> {
   }
 
   const stored = await tryReadStored('jira', StoredJiraSchema);
-  if (stored) {
+  if (stored.kind === 'found') {
     return {
       service: 'jira',
       source: 'keyring',
-      identity: `${stored.email} at ${redactUrlUserInfo(stored.url)}`,
+      identity: `${stored.value.email} at ${redactUrlUserInfo(stored.value.url)}`,
+    };
+  }
+  if (stored.kind === 'corrupted') {
+    return {
+      service: 'jira',
+      source: 'corrupted',
+      identity: "run 'aide login jira' to reconfigure",
     };
   }
 
@@ -92,20 +100,25 @@ async function statusAdo(): Promise<WhoamiStatus> {
   }
 
   const stored = await tryReadStored('ado', StoredAdoSchema);
-  if (stored) {
+  if (stored.kind === 'found') {
     return {
       service: 'ado',
       source: 'keyring',
-      identity: `${redactUrlUserInfo(stored.orgUrl)} (${stored.authMethod})`,
+      identity: `${redactUrlUserInfo(stored.value.orgUrl)} (${stored.value.authMethod})`,
+    };
+  }
+  if (stored.kind === 'corrupted') {
+    return {
+      service: 'ado',
+      source: 'corrupted',
+      identity: "run 'aide login ado' to reconfigure",
     };
   }
 
   return { service: 'ado', source: 'not-configured', identity: null };
 }
 
-async function statusGithub(
-  ghAvailable: () => boolean
-): Promise<WhoamiStatus> {
+async function statusGithub(ghAvailable: () => boolean): Promise<WhoamiStatus> {
   if (ghAvailable()) {
     return { service: 'github', source: 'gh-cli', identity: null };
   }
@@ -113,29 +126,42 @@ async function statusGithub(
     return { service: 'github', source: 'env', identity: null };
   }
   const stored = await tryReadStored('github', StoredGithubSchema);
-  if (stored) {
+  if (stored.kind === 'found') {
     return { service: 'github', source: 'keyring', identity: null };
+  }
+  if (stored.kind === 'corrupted') {
+    return {
+      service: 'github',
+      source: 'corrupted',
+      identity: "run 'aide login github' to reconfigure",
+    };
   }
   return { service: 'github', source: 'not-configured', identity: null };
 }
 
+type StoredResult<T> =
+  | { kind: 'found'; value: T }
+  | { kind: 'missing' }
+  | { kind: 'corrupted' };
+
 async function tryReadStored<T>(
   name: 'jira' | 'ado' | 'github',
   schema: v.BaseSchema<unknown, T, v.BaseIssue<unknown>>
-): Promise<T | null> {
+): Promise<StoredResult<T>> {
   let raw: string | null;
   try {
     raw = await getSecret(name);
   } catch (err) {
-    if (err instanceof KeyringUnavailableError) return null;
+    if (err instanceof KeyringUnavailableError) return { kind: 'missing' };
     throw err;
   }
-  if (raw === null) return null;
+  if (raw === null) return { kind: 'missing' };
   try {
     const json = JSON.parse(raw);
-    return v.parse(schema, json);
+    const value = v.parse(schema, json);
+    return { kind: 'found', value };
   } catch {
-    return null;
+    return { kind: 'corrupted' };
   }
 }
 
@@ -154,6 +180,8 @@ function formatStatus(s: WhoamiStatus): string {
       return `${pad}  keyring     ${s.identity ?? ''}`.trimEnd();
     case 'gh-cli':
       return `${pad}  gh CLI`;
+    case 'corrupted':
+      return `${pad}  corrupted   ${s.identity ?? ''}`.trimEnd();
   }
 }
 
