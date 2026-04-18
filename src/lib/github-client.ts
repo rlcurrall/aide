@@ -49,12 +49,23 @@ async function tryReadStoredToken(): Promise<string | null> {
     throw err;
   }
   if (raw === null) return null;
+
+  let json: unknown;
   try {
-    const parsed = v.parse(StoredGithubSchema, JSON.parse(raw));
-    return parsed.token;
+    json = JSON.parse(raw);
   } catch {
-    return null;
+    throw new Error(
+      "Stored GitHub credentials are malformed. Re-run 'aide login github' to reconfigure."
+    );
   }
+  const parsed = v.safeParse(StoredGithubSchema, json);
+  if (!parsed.success) {
+    throw new Error(
+      "Stored GitHub credentials failed validation. " +
+        "Re-run 'aide login github' to reconfigure."
+    );
+  }
+  return parsed.output.token;
 }
 
 export class GitHubClient {
@@ -70,8 +81,11 @@ export class GitHubClient {
    * Create a GitHubClient, checking gh CLI, env vars, and keyring in order.
    * @throws {GitHubAuthError} if no auth source is available
    */
-  static async create(): Promise<GitHubClient> {
-    if (isGhCliAvailable()) {
+  static async create(
+    opts: { ghAvailable?: () => boolean } = {}
+  ): Promise<GitHubClient> {
+    const ghCheck = opts.ghAvailable ?? isGhCliAvailable;
+    if (ghCheck()) {
       return new GitHubClient('gh-cli');
     }
     const envToken = Bun.env.GITHUB_TOKEN || Bun.env.GH_TOKEN;
