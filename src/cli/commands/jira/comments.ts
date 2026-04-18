@@ -63,7 +63,7 @@ async function handler(argv: ArgumentsCamelCase<CommentsArgs>): Promise<void> {
   validateTicketKeyWithWarning(ticketKey);
 
   try {
-    const config = loadConfig();
+    const { config } = await loadConfig();
     const client = new JiraClient(config);
 
     logProgress(`Fetching comments for ticket: ${ticketKey}`, format);

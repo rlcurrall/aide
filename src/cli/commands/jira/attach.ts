@@ -79,7 +79,7 @@ async function handler(argv: ArgumentsCamelCase<AttachArgs>): Promise<void> {
       throw new Error('Only one operation can be performed at a time');
     }
 
-    const config = loadConfig();
+    const { config } = await loadConfig();
     const client = new JiraClient(config);
 
     // List attachments

@@ -682,7 +682,7 @@ async function handler(argv: ArgumentsCamelCase<CommentsArgs>): Promise<void> {
     const args = validateArgs(CommentsArgsSchema, argv, 'comments arguments');
     const { format, author, since, latest, includeSystem, threadStatus } = args;
 
-    let ctx: PlatformContext = resolvePlatformContext(args.project, args.repo);
+    let ctx: PlatformContext = await resolvePlatformContext(args.project, args.repo);
     if (ctx.autoDiscovered) {
       if (ctx.platform === 'github') {
         logProgress(

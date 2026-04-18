@@ -173,7 +173,7 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
   try {
     let ctx: PlatformContext | undefined;
     try {
-      ctx = resolvePlatformContext(args.project, args.repo);
+      ctx = await resolvePlatformContext(args.project, args.repo);
       if (ctx.autoDiscovered) {
         if (ctx.platform === 'github') {
           logProgress(
@@ -417,7 +417,7 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
 
       // Build PR URL for output
       const { loadAzureDevOpsConfig } = await import('@lib/config.js');
-      const config = loadAzureDevOpsConfig();
+      const { config } = await loadAzureDevOpsConfig();
       const repoInfo: GitRemoteInfo = {
         org: ctx.org,
         project: ctx.project,

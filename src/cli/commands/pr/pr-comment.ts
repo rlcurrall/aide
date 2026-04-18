@@ -192,7 +192,7 @@ async function handler(argv: ArgumentsCamelCase<PrCommentArgs>): Promise<void> {
     }
 
     // Resolve platform context
-    let ctx: PlatformContext = resolvePlatformContext(args.project, args.repo);
+    let ctx: PlatformContext = await resolvePlatformContext(args.project, args.repo);
     if (ctx.autoDiscovered) {
       if (ctx.platform === 'github') {
         logProgress(

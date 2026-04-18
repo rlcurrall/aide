@@ -28,7 +28,7 @@ async function handler(
   validateTicketKeyWithWarning(ticketKey);
 
   try {
-    const config = loadConfig();
+    const { config } = await loadConfig();
     const client = new JiraClient(config);
 
     logProgress(

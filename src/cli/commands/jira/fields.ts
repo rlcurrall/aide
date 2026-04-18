@@ -217,7 +217,7 @@ async function handler(argv: ArgumentsCamelCase<FieldsArgs>): Promise<void> {
   } = args;
 
   try {
-    const config = loadConfig();
+    const { config } = await loadConfig();
     const client = new JiraClient(config);
 
     logProgress(`Fetching field metadata for project ${project}...`, format);

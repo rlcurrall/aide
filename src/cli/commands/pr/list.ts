@@ -246,7 +246,7 @@ async function handler(argv: ArgumentsCamelCase<ListArgs>): Promise<void> {
   const format = args.format ?? 'text';
 
   try {
-    const ctx = resolvePlatformContext(args.project, args.repo);
+    const ctx = await resolvePlatformContext(args.project, args.repo);
     if (ctx.autoDiscovered) {
       if (ctx.platform === 'github') {
         logProgress(

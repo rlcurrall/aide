@@ -156,7 +156,7 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
   try {
     let ctx: PlatformContext | undefined;
     try {
-      ctx = resolvePlatformContext(args.project, args.repo);
+      ctx = await resolvePlatformContext(args.project, args.repo);
       if (ctx.autoDiscovered) {
         if (ctx.platform === 'github') {
           logProgress(
@@ -218,7 +218,7 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
           const { AzureDevOpsClient } = await import(
             '@lib/azure-devops-client.js'
           );
-          const config = loadAzureDevOpsConfig();
+          const { config } = await loadAzureDevOpsConfig();
           ctx = {
             platform: 'azure-devops',
             org: parsed.org ?? '',
