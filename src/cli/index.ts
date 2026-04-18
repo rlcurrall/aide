@@ -17,6 +17,7 @@ import { pluginCommands } from './commands/plugin/index.js';
 import primeCommand from './commands/prime.js';
 import upgradeCommand from './commands/upgrade.js';
 import loginCommand from './commands/login.js';
+import logoutCommand from './commands/logout.js';
 
 async function main(): Promise<number> {
   // Clean up any old backup files from previous upgrades
@@ -35,9 +36,10 @@ async function main(): Promise<number> {
       .command(primeCommand)
       .command(upgradeCommand)
       .command(loginCommand)
+      .command(logoutCommand)
       .demandCommand(
         1,
-        'Please specify a command (jira, pr, plugin, prime, upgrade, login)'
+        'Please specify a command (jira, pr, plugin, prime, upgrade, login, logout)'
       )
       .strict()
       .wrap(Math.min(100, process.stdout.columns || 80))
