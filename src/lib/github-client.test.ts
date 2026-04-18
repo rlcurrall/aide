@@ -12,7 +12,9 @@
  * Every describe block in this file sets AIDE_SECRET_SERVICE_OVERRIDE
  * explicitly so reordering is safe. Do NOT rely on cross-block env var
  * state — a future describe inserted between these could silently clobber
- * a scoped override.
+ * a scoped override. Mock blocks use a fake service name (MOCK_SERVICE) so
+ * that if installMockSecrets is ever forgotten, writes hit a scoped fake
+ * rather than the real 'aide' production credentials.
  */
 
 import {
@@ -57,6 +59,8 @@ function restoreGhEnv(snap: {
   else Bun.env.GH_TOKEN = snap.ghToken;
 }
 
+const MOCK_SERVICE = 'aide-test-mock';
+
 describe('GitHubClient.create() — gh-cli branch (mocked)', () => {
   let envSnap: ReturnType<typeof clearGhEnv>;
   let store: Store;
@@ -64,7 +68,7 @@ describe('GitHubClient.create() — gh-cli branch (mocked)', () => {
 
   beforeEach(() => {
     envSnap = clearGhEnv();
-    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = MOCK_SERVICE;
     store = new Map();
     restoreSecrets = installMockSecrets(store);
   });
@@ -76,7 +80,10 @@ describe('GitHubClient.create() — gh-cli branch (mocked)', () => {
 
   test('uses gh CLI when ghAvailable returns true, ignoring other sources', async () => {
     Bun.env.GITHUB_TOKEN = 'env-token';
-    store.set('aide:github', JSON.stringify({ token: 'stored-token' }));
+    store.set(
+      `${MOCK_SERVICE}:github`,
+      JSON.stringify({ token: 'stored-token' })
+    );
     const client = await GitHubClient.create({ ghAvailable: () => true });
     expect(client).toBeInstanceOf(GitHubClient);
     // No direct introspection of mode is exposed; success without throwing
@@ -91,7 +98,7 @@ describe('GitHubClient.create() — env-token branch (mocked)', () => {
 
   beforeEach(() => {
     envSnap = clearGhEnv();
-    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = MOCK_SERVICE;
     store = new Map();
     restoreSecrets = installMockSecrets(store);
   });
@@ -121,7 +128,7 @@ describe('GitHubClient.create() — missing sources', () => {
 
   beforeEach(() => {
     envSnap = clearGhEnv();
-    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = MOCK_SERVICE;
     store = new Map();
     restoreSecrets = installMockSecrets(store);
   });
@@ -138,14 +145,14 @@ describe('GitHubClient.create() — missing sources', () => {
   });
 
   test('throws descriptive error when stored JSON is malformed', async () => {
-    store.set('aide:github', '{not json');
+    store.set(`${MOCK_SERVICE}:github`, '{not json');
     await expect(
       GitHubClient.create({ ghAvailable: () => false })
     ).rejects.toThrow(/re-run 'aide login github'/i);
   });
 
   test('throws descriptive error when stored blob fails schema', async () => {
-    store.set('aide:github', JSON.stringify({ token: '' }));
+    store.set(`${MOCK_SERVICE}:github`, JSON.stringify({ token: '' }));
     await expect(
       GitHubClient.create({ ghAvailable: () => false })
     ).rejects.toThrow(/re-run 'aide login github'/i);
@@ -157,39 +164,43 @@ describe('GitHubClient.create() — missing sources', () => {
 const keyringReady = await isKeyringAvailable();
 const describeIfKeyring = keyringReady ? describe : describe.skip;
 
-describeIfKeyring('GitHubClient.create() — keyring branch (real keyring)', () => {
-  const service = uniqueTestService();
-  const prevOverride = Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
-  let envSnap: ReturnType<typeof clearGhEnv>;
+describeIfKeyring(
+  'GitHubClient.create() — keyring branch (real keyring)',
+  () => {
+    const service = uniqueTestService();
+    const prevOverride = Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    let envSnap: ReturnType<typeof clearGhEnv>;
 
-  beforeAll(() => {
-    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = service;
-  });
-
-  afterAll(async () => {
-    await cleanupTestService(service, ['jira', 'ado', 'github']);
-    if (prevOverride === undefined) delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
-    else Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = prevOverride;
-  });
-
-  beforeEach(async () => {
-    envSnap = clearGhEnv();
-    await cleanupTestService(service, ['github']);
-  });
-
-  afterEach(() => {
-    restoreGhEnv(envSnap);
-  });
-
-  test('uses stored token from real keyring when gh and env are unavailable', async () => {
-    // Seed the real keyring with a valid blob
-    await Bun.secrets.set({
-      service,
-      name: 'github',
-      value: JSON.stringify({ token: 'keyring-token' }),
+    beforeAll(() => {
+      Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = service;
     });
 
-    const client = await GitHubClient.create({ ghAvailable: () => false });
-    expect(client).toBeInstanceOf(GitHubClient);
-  });
-});
+    afterAll(async () => {
+      await cleanupTestService(service, ['jira', 'ado', 'github']);
+      if (prevOverride === undefined)
+        delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+      else Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = prevOverride;
+    });
+
+    beforeEach(async () => {
+      envSnap = clearGhEnv();
+      await cleanupTestService(service, ['github']);
+    });
+
+    afterEach(() => {
+      restoreGhEnv(envSnap);
+    });
+
+    test('uses stored token from real keyring when gh and env are unavailable', async () => {
+      // Seed the real keyring with a valid blob
+      await Bun.secrets.set({
+        service,
+        name: 'github',
+        value: JSON.stringify({ token: 'keyring-token' }),
+      });
+
+      const client = await GitHubClient.create({ ghAvailable: () => false });
+      expect(client).toBeInstanceOf(GitHubClient);
+    });
+  }
+);

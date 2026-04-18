@@ -172,11 +172,9 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
         logProgress('', format);
       }
     } catch (error) {
-      // May still succeed if PR URL is provided.
-      // Note: plain Error thrown by tryReadStoredToken (malformed credentials)
-      // is NOT MissingRepoContextError or GitHubAuthError, so it always falls
-      // through to the rethrow below — retrying GitHubClient.create() a second
-      // time would hit the same corrupted blob and fail identically.
+      // URL fallback only for context-discovery failures. ConfigError from
+      // GitHubClient.create() (malformed stored creds) always rethrows —
+      // retrying with a URL would hit the same corrupted blob.
       if (
         !(
           error instanceof MissingRepoContextError ||
@@ -186,7 +184,6 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
       ) {
         throw error;
       }
-      // Will handle below via URL parsing
       ctx = undefined;
     }
 
