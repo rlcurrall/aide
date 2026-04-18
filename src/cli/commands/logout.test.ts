@@ -1,23 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { logout } from './logout.js';
-
-type Store = Map<string, string>;
-
-function installMockSecrets(store: Store) {
-  const original = (Bun as unknown as { secrets: unknown }).secrets;
-  (Bun as unknown as { secrets: unknown }).secrets = {
-    async get(opts: { service: string; name: string }) {
-      return store.get(`${opts.service}:${opts.name}`) ?? null;
-    },
-    async set() {},
-    async delete(opts: { service: string; name: string }) {
-      return store.delete(`${opts.service}:${opts.name}`);
-    },
-  };
-  return () => {
-    (Bun as unknown as { secrets: unknown }).secrets = original;
-  };
-}
+import { installMockSecrets, type Store } from '@lib/test-helpers.js';
 
 describe('logout', () => {
   let store: Store;
@@ -25,6 +8,7 @@ describe('logout', () => {
 
   beforeEach(() => {
     store = new Map();
+    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
     restore = installMockSecrets(store);
   });
 

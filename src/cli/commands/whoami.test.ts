@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { getWhoamiStatus, type WhoamiStatus } from './whoami.js';
+import { installMockSecrets, type Store } from '@lib/test-helpers.js';
 
 const JIRA_VARS = [
   'JIRA_URL',
@@ -31,24 +32,6 @@ function restoreEnv(snap: Map<string, string | undefined>) {
   }
 }
 
-type Store = Map<string, string>;
-
-function installMockSecrets(store: Store) {
-  const original = (Bun as unknown as { secrets: unknown }).secrets;
-  (Bun as unknown as { secrets: unknown }).secrets = {
-    async get(opts: { service: string; name: string }) {
-      return store.get(`${opts.service}:${opts.name}`) ?? null;
-    },
-    async set() {},
-    async delete() {
-      return false;
-    },
-  };
-  return () => {
-    (Bun as unknown as { secrets: unknown }).secrets = original;
-  };
-}
-
 describe('getWhoamiStatus', () => {
   let snap: Map<string, string | undefined>;
   let store: Store;
@@ -57,6 +40,7 @@ describe('getWhoamiStatus', () => {
   beforeEach(() => {
     snap = saveEnv([...JIRA_VARS, ...ADO_VARS, ...GITHUB_VARS]);
     store = new Map();
+    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
     restoreSecrets = installMockSecrets(store);
   });
 

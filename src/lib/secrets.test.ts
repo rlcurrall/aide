@@ -1,113 +1,128 @@
 /**
  * Tests for secrets.ts
  *
- * We mock `Bun.secrets` so these tests exercise the wrapper's branching
- * without touching the real OS credential store. The wrapper exists so the
- * rest of the codebase has one place that translates raw Bun.secrets errors
- * into domain-typed errors (KeyringUnavailableError) and a null "not found"
- * return.
+ * Success-path tests run against the real OS keyring under a scoped service
+ * name, so they verify the actual Bun.secrets integration rather than just a
+ * local mock. Unavailable-error paths still use the mock (can't easily
+ * simulate a missing secret service on a host that has one).
  */
 
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import {
+  describe,
+  test,
+  expect,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  afterEach,
+} from 'bun:test';
 
 import {
   getSecret,
   setSecret,
   deleteSecret,
   KeyringUnavailableError,
-  AIDE_SERVICE,
 } from './secrets.js';
+import {
+  installMockSecrets,
+  isKeyringAvailable,
+  uniqueTestService,
+  cleanupTestService,
+  type Store,
+} from './test-helpers.js';
 
-type Store = Map<string, string>;
+// ---------------------------------------------------------------------------
+// Real-keyring integration tests
+// ---------------------------------------------------------------------------
 
-function installMockSecrets(store: Store, throwOn?: 'get' | 'set' | 'delete') {
-  const originalSecrets = (Bun as unknown as { secrets: unknown }).secrets;
-  (Bun as unknown as { secrets: unknown }).secrets = {
-    async get(opts: { service: string; name: string }) {
-      if (throwOn === 'get') throw new Error('keyring unavailable');
-      return store.get(`${opts.service}:${opts.name}`) ?? null;
-    },
-    async set(opts: { service: string; name: string; value: string }): Promise<void> {
-      if (throwOn === 'set') throw new Error('keyring unavailable');
-      store.set(`${opts.service}:${opts.name}`, opts.value);
-    },
-    async delete(opts: { service: string; name: string }) {
-      if (throwOn === 'delete') throw new Error('keyring unavailable');
-      return store.delete(`${opts.service}:${opts.name}`);
-    },
-  };
-  return () => {
-    (Bun as unknown as { secrets: unknown }).secrets = originalSecrets;
-  };
-}
+const keyringReady = await isKeyringAvailable();
+const describeIfKeyring = keyringReady ? describe : describe.skip;
 
-describe('secrets wrapper', () => {
+describeIfKeyring('secrets wrapper (real keyring)', () => {
+  const service = uniqueTestService();
+  const prevOverride = Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+
+  beforeAll(() => {
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = service;
+  });
+
+  afterAll(async () => {
+    await cleanupTestService(service, ['jira', 'ado', 'github']);
+    if (prevOverride === undefined) {
+      delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    } else {
+      Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = prevOverride;
+    }
+  });
+
+  beforeEach(async () => {
+    // Each test starts from a clean slate for jira/ado/github within the scoped service
+    await cleanupTestService(service, ['jira', 'ado', 'github']);
+  });
+
+  test('getSecret returns null when entry is missing', async () => {
+    const result = await getSecret('jira');
+    expect(result).toBeNull();
+  });
+
+  test('setSecret + getSecret round-trips the exact value', async () => {
+    const payload = '{"url":"https://x.atlassian.net","email":"y","apiToken":"z"}';
+    await setSecret('jira', payload);
+    const result = await getSecret('jira');
+    expect(result).toBe(payload);
+  });
+
+  test('deleteSecret removes an existing entry and returns true', async () => {
+    await setSecret('github', '{"token":"gh"}');
+    const removed = await deleteSecret('github');
+    expect(removed).toBe(true);
+    expect(await getSecret('github')).toBeNull();
+  });
+
+  test('deleteSecret returns false when there was nothing to remove', async () => {
+    const removed = await deleteSecret('github');
+    expect(removed).toBe(false);
+  });
+
+  test('setSecret overwrites an existing entry', async () => {
+    await setSecret('ado', '{"orgUrl":"https://first","pat":"a","authMethod":"pat"}');
+    await setSecret('ado', '{"orgUrl":"https://second","pat":"b","authMethod":"bearer"}');
+    const result = await getSecret('ado');
+    expect(result).toContain('second');
+    expect(result).toContain('bearer');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keyring-unavailable error translation (mock-only — can't easily simulate
+// a real backend failure on a host where the keyring works).
+// ---------------------------------------------------------------------------
+
+describe('secrets wrapper (keyring unavailable)', () => {
   let store: Store;
   let restore: () => void;
 
   beforeEach(() => {
     store = new Map();
+    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
   });
 
   afterEach(() => {
     restore?.();
   });
 
-  test('AIDE_SERVICE is the constant "aide"', () => {
-    expect(AIDE_SERVICE).toBe('aide');
-  });
-
-  test('getSecret returns null when entry is missing', async () => {
-    restore = installMockSecrets(store);
-    const result = await getSecret('jira');
-    expect(result).toBeNull();
-  });
-
-  test('getSecret returns stored string when present', async () => {
-    restore = installMockSecrets(store);
-    store.set('aide:jira', '{"url":"x","email":"y","apiToken":"z"}');
-    const result = await getSecret('jira');
-    expect(result).toBe('{"url":"x","email":"y","apiToken":"z"}');
-  });
-
   test('getSecret throws KeyringUnavailableError on backend failure', async () => {
     restore = installMockSecrets(store, 'get');
-    await expect(getSecret('jira')).rejects.toBeInstanceOf(
-      KeyringUnavailableError
-    );
-  });
-
-  test('setSecret writes the value', async () => {
-    restore = installMockSecrets(store);
-    await setSecret('ado', '{"orgUrl":"x","pat":"y"}');
-    expect(store.get('aide:ado')).toBe('{"orgUrl":"x","pat":"y"}');
+    await expect(getSecret('jira')).rejects.toBeInstanceOf(KeyringUnavailableError);
   });
 
   test('setSecret throws KeyringUnavailableError on backend failure', async () => {
     restore = installMockSecrets(store, 'set');
-    await expect(setSecret('ado', 'x')).rejects.toBeInstanceOf(
-      KeyringUnavailableError
-    );
-  });
-
-  test('deleteSecret removes an existing entry and returns true', async () => {
-    restore = installMockSecrets(store);
-    store.set('aide:github', '{"token":"x"}');
-    const removed = await deleteSecret('github');
-    expect(removed).toBe(true);
-    expect(store.has('aide:github')).toBe(false);
-  });
-
-  test('deleteSecret returns false when there was nothing to remove', async () => {
-    restore = installMockSecrets(store);
-    const removed = await deleteSecret('github');
-    expect(removed).toBe(false);
+    await expect(setSecret('ado', 'x')).rejects.toBeInstanceOf(KeyringUnavailableError);
   });
 
   test('deleteSecret throws KeyringUnavailableError on backend failure', async () => {
     restore = installMockSecrets(store, 'delete');
-    await expect(deleteSecret('github')).rejects.toBeInstanceOf(
-      KeyringUnavailableError
-    );
+    await expect(deleteSecret('github')).rejects.toBeInstanceOf(KeyringUnavailableError);
   });
 });
