@@ -50,7 +50,7 @@ describe('loadConfig (Jira)', () => {
   beforeEach(() => {
     snap = saveEnv(JIRA_VARS);
     store = new Map();
-    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
     restoreSecrets = installMockSecrets(store);
   });
 
@@ -127,7 +127,7 @@ describe('loadAzureDevOpsConfig', () => {
   beforeEach(() => {
     snap = saveEnv(ADO_VARS);
     store = new Map();
-    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
     restoreSecrets = installMockSecrets(store);
   });
 

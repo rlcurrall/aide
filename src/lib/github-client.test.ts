@@ -8,6 +8,11 @@
  * manipulation. The corrupted-blob test uses the shared installMockSecrets
  * helper since we need to plant malformed data without writing invalid UTF-8
  * to the real keyring.
+ *
+ * Every describe block in this file sets AIDE_SECRET_SERVICE_OVERRIDE
+ * explicitly so reordering is safe. Do NOT rely on cross-block env var
+ * state — a future describe inserted between these could silently clobber
+ * a scoped override.
  */
 
 import {
@@ -59,7 +64,7 @@ describe('GitHubClient.create() — gh-cli branch (mocked)', () => {
 
   beforeEach(() => {
     envSnap = clearGhEnv();
-    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
     store = new Map();
     restoreSecrets = installMockSecrets(store);
   });
@@ -86,7 +91,7 @@ describe('GitHubClient.create() — env-token branch (mocked)', () => {
 
   beforeEach(() => {
     envSnap = clearGhEnv();
-    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
     store = new Map();
     restoreSecrets = installMockSecrets(store);
   });
@@ -116,7 +121,7 @@ describe('GitHubClient.create() — missing sources', () => {
 
   beforeEach(() => {
     envSnap = clearGhEnv();
-    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
     store = new Map();
     restoreSecrets = installMockSecrets(store);
   });
