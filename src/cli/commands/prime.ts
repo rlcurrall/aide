@@ -67,7 +67,7 @@ async function buildConfigStatusSection(
     lines.push('- Jira: Misconfigured (run `aide login jira` to reconfigure)');
   } else {
     lines.push(
-      '- Jira: Not configured (set JIRA_URL, JIRA_EMAIL/JIRA_USERNAME, JIRA_API_TOKEN/JIRA_TOKEN)'
+      '- Jira: Not configured (run `aide login jira`, or set JIRA_URL, JIRA_EMAIL/JIRA_USERNAME, JIRA_API_TOKEN/JIRA_TOKEN)'
     );
   }
 
@@ -79,7 +79,7 @@ async function buildConfigStatusSection(
     );
   } else {
     lines.push(
-      '- Pull Requests: Not configured (run `gh auth login` for GitHub, or set AZURE_DEVOPS_ORG_URL + AZURE_DEVOPS_PAT for Azure DevOps)'
+      '- Pull Requests: Not configured (run `gh auth login`, `aide login github`, or `aide login ado`)'
     );
   }
 
@@ -127,6 +127,10 @@ aide jira comment PROJ-123 "Work completed, ready for review"
 
 # Get recent comments
 aide jira comments PROJ-123 --latest 5
+
+# Edit or delete a comment
+aide jira edit-comment PROJ-123 <comment-id> "Updated text"
+aide jira delete-comment PROJ-123 <comment-id>
 
 # Manage attachments
 aide jira attach PROJ-123 --list
