@@ -6,6 +6,8 @@
  * suppress echo for password fields and handle Ctrl+C cleanly.
  */
 
+import { StringDecoder } from 'node:string_decoder';
+
 export interface ReadLineOptions {
   label: string;
   masked?: boolean;
@@ -110,36 +112,6 @@ export async function confirm(opts: ConfirmOptions): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// withSpinner
-// ---------------------------------------------------------------------------
-//
-// Minimal ASCII spinner for network calls during login. Writes to stderr so
-// it doesn't pollute stdout when a command's result is piped.
-
-const SPINNER_FRAMES = ['-', '\\', '|', '/'];
-
-export async function withSpinner<T>(
-  label: string,
-  fn: () => Promise<T>
-): Promise<T> {
-  if (!process.stderr.isTTY) {
-    return fn();
-  }
-  let frame = 0;
-  const interval = setInterval(() => {
-    process.stderr.write(`\r${SPINNER_FRAMES[frame]} ${label}`);
-    frame = (frame + 1) % SPINNER_FRAMES.length;
-  }, 80);
-  try {
-    const result = await fn();
-    return result;
-  } finally {
-    clearInterval(interval);
-    process.stderr.write(`\r${' '.repeat(label.length + 2)}\r`);
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Raw stdin reader
 // ---------------------------------------------------------------------------
 //
@@ -147,6 +119,38 @@ export async function withSpinner<T>(
 // masked input and handle Ctrl+C cleanly. Printable chars are echoed as they
 // arrive when masked=false, and suppressed (no asterisks) when masked=true.
 // Backspace deletes the last char. Enter terminates. Ctrl+C exits with 130.
+//
+// StringDecoder is used so that multi-byte UTF-8 sequences (accented chars,
+// CJK, emoji) are decoded correctly before we iterate code points.
+// \r is discarded; \n submits the line (handles both LF and CRLF terminals).
+
+/**
+ * Apply a single decoded code point to the buffer. Exported for unit testing.
+ *
+ * Returns the new buffer string and any bytes to write back to the TTY.
+ */
+export function applyChar(
+  buf: string,
+  ch: string,
+  masked: boolean
+): { buf: string; writeToTty: string } {
+  const code = ch.charCodeAt(0);
+
+  // Backspace / DEL
+  if (code === 0x7f || code === 0x08) {
+    if (buf.length === 0) return { buf, writeToTty: '' };
+    const newBuf = Array.from(buf).slice(0, -1).join('');
+    const tty = masked ? '' : '\b \b';
+    return { buf: newBuf, writeToTty: tty };
+  }
+
+  // Ignore control characters (except the special ones handled in readRaw)
+  if (code < 0x20) return { buf, writeToTty: '' };
+
+  const newBuf = buf + ch;
+  const tty = masked ? '' : ch;
+  return { buf: newBuf, writeToTty: tty };
+}
 
 async function readRaw(masked: boolean): Promise<string> {
   const stdin = process.stdin;
@@ -159,31 +163,33 @@ async function readRaw(masked: boolean): Promise<string> {
   stdin.setRawMode(true);
   stdin.resume();
 
+  const decoder = new StringDecoder('utf8');
   let buf = '';
   try {
     for await (const chunk of stdin as AsyncIterable<Buffer>) {
-      for (const byte of chunk) {
-        if (byte === 0x03) {
-          // Ctrl+C
+      const decoded = decoder.write(chunk);
+      for (const ch of decoded) {
+        const code = ch.charCodeAt(0);
+
+        // Ctrl+C: restore terminal state before exiting so raw mode isn't
+        // left enabled on compiled Windows binaries.
+        if (code === 0x03) {
           process.stdout.write('\n');
+          stdin.setRawMode(wasRaw);
+          stdin.pause();
           process.exit(130);
         }
-        if (byte === 0x0d || byte === 0x0a) {
+
+        // Submit on LF; discard CR (handles both LF-only and CRLF terminals).
+        if (code === 0x0a) {
           process.stdout.write('\n');
           return buf;
         }
-        if (byte === 0x7f || byte === 0x08) {
-          // Backspace / DEL
-          if (buf.length > 0) {
-            buf = buf.slice(0, -1);
-            if (!masked) process.stdout.write('\b \b');
-          }
-          continue;
-        }
-        if (byte < 0x20) continue; // ignore other control chars
-        const ch = String.fromCharCode(byte);
-        buf += ch;
-        if (!masked) process.stdout.write(ch);
+        if (code === 0x0d) continue; // discard CR
+
+        const result = applyChar(buf, ch, masked);
+        buf = result.buf;
+        if (result.writeToTty) process.stdout.write(result.writeToTty);
       }
     }
     return buf;

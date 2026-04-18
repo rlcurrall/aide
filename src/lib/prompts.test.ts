@@ -8,11 +8,13 @@
  */
 
 import { describe, test, expect } from 'bun:test';
+import { StringDecoder } from 'node:string_decoder';
 
 import {
   text,
   password,
   confirm,
+  applyChar,
   type Prompter,
   type ReadLineOptions,
 } from './prompts.js';
@@ -137,5 +139,65 @@ describe('confirm', () => {
     const p = new ScriptedPrompter(['']);
     await confirm({ label: 'Save?', default: false, prompter: p });
     expect(p.readCalls[0]?.label).toContain('[y/N]');
+  });
+});
+
+describe('applyChar (UTF-8 code-point handling)', () => {
+  test('accumulates ASCII characters correctly', () => {
+    let buf = '';
+    for (const ch of 'hello') {
+      ({ buf } = applyChar(buf, ch, false));
+    }
+    expect(buf).toBe('hello');
+  });
+
+  test('accumulates multi-byte UTF-8 characters correctly', () => {
+    // StringDecoder correctly reassembles these from raw bytes before we iterate.
+    const input = 'café'; // 'é' is U+00E9, two UTF-8 bytes
+    let buf = '';
+    for (const ch of input) {
+      ({ buf } = applyChar(buf, ch, false));
+    }
+    expect(buf).toBe('café');
+    expect(Array.from(buf)).toHaveLength(4); // 4 code points, not 5 bytes
+  });
+
+  test('backspace removes the last code point, not a raw byte', () => {
+    // Build up a buffer with an emoji (U+1F600, surrogate pair in UTF-16).
+    const emoji = '\u{1F600}'; // represented as 2 UTF-16 code units
+    let buf = emoji; // pre-loaded
+
+    // Applying backspace should remove the whole emoji.
+    const { buf: after } = applyChar(buf, '\x7f', false);
+    expect(after).toBe('');
+  });
+
+  test('backspace on a string ending with surrogate pair removes full emoji', () => {
+    let buf = 'hi\u{1F600}'; // "hi" + emoji
+    ({ buf } = applyChar(buf, '\x7f', false));
+    expect(buf).toBe('hi');
+  });
+
+  test('StringDecoder reassembles multi-byte sequence split across chunks', () => {
+    // 'é' (U+00E9) encoded as two bytes [0xc3, 0xa9].
+    const decoder = new StringDecoder('utf8');
+    const firstChunk = decoder.write(Buffer.from([0xc3])); // incomplete sequence
+    const secondChunk = decoder.write(Buffer.from([0xa9])); // completes it
+    const combined = firstChunk + secondChunk;
+    // After reassembly the single code point 'é' must be present.
+    expect(combined).toBe('é');
+    expect(Array.from(combined)).toHaveLength(1);
+  });
+
+  test('masked mode suppresses TTY echo but still accumulates buffer', () => {
+    let buf = '';
+    let echoed = '';
+    for (const ch of 'secret') {
+      const result = applyChar(buf, ch, true);
+      buf = result.buf;
+      echoed += result.writeToTty;
+    }
+    expect(buf).toBe('secret');
+    expect(echoed).toBe(''); // nothing echoed in masked mode
   });
 });
