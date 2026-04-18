@@ -262,7 +262,7 @@ export async function findPRByCurrentBranch(
   const sourceRefName = `refs/heads/${branch}`;
 
   try {
-    const config = loadAzureDevOpsConfig();
+    const { config } = await loadAzureDevOpsConfig();
     const client = new AzureDevOpsClient(config);
 
     // Query for PRs with this source branch - search all statuses to find abandoned PRs too

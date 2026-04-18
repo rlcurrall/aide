@@ -38,7 +38,7 @@ async function handler(argv: ArgumentsCamelCase<BoardsArgs>): Promise<void> {
   const { project, format } = args;
 
   try {
-    const config = loadConfig();
+    const { config } = await loadConfig();
     const client = new JiraClient(config);
 
     const label = project ? `boards for project ${project}` : 'all boards';

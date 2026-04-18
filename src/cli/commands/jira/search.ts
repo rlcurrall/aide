@@ -19,7 +19,7 @@ async function handler(argv: ArgumentsCamelCase<SearchArgs>): Promise<void> {
   const format = validated.format;
 
   try {
-    const config = loadConfig();
+    const { config } = await loadConfig();
     const client = new JiraClient(config);
 
     let query = validated.query;

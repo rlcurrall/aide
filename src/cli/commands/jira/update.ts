@@ -50,7 +50,7 @@ async function handler(argv: ArgumentsCamelCase<UpdateArgs>): Promise<void> {
       );
     }
 
-    const config = loadConfig();
+    const { config } = await loadConfig();
     const client = new JiraClient(config);
 
     logProgress(`Updating ticket: ${ticketKey}`, format);

@@ -53,7 +53,7 @@ async function handler(argv: ArgumentsCamelCase<SprintArgs>): Promise<void> {
   const { boardId, state, format } = args;
 
   try {
-    const config = loadConfig();
+    const { config } = await loadConfig();
     const client = new JiraClient(config);
 
     logProgress(`Fetching ${state} sprint(s) for board ${boardId}...`, format);

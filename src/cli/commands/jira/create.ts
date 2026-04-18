@@ -25,7 +25,7 @@ async function handler(argv: ArgumentsCamelCase<CreateArgs>): Promise<void> {
   const { project, type, summary, format } = args;
 
   try {
-    const config = loadConfig();
+    const { config } = await loadConfig();
     const client = new JiraClient(config);
 
     logProgress(`Creating ${type} in project ${project}...`, format);

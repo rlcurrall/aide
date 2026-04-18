@@ -85,10 +85,10 @@ export function detectPlatformFromRemote(remoteUrl: string): Platform | null {
  *
  * @throws MissingRepoContextError if context cannot be resolved
  */
-export function resolvePlatformContext(
+export async function resolvePlatformContext(
   project?: string,
   repo?: string
-): PlatformContext {
+): Promise<PlatformContext> {
   const remoteUrl = getGitRemoteUrl();
 
   // Try GitHub first (since it's the new path)
@@ -111,7 +111,7 @@ export function resolvePlatformContext(
   // Fall back to Azure DevOps
   try {
     const adoContext = resolveAdoRepoContext(project, repo);
-    const config = loadAzureDevOpsConfig();
+    const { config } = await loadAzureDevOpsConfig();
     const client = new AzureDevOpsClient(config);
     return {
       platform: 'azure-devops',
@@ -224,7 +224,7 @@ export async function resolvePRId(
         parsed.project &&
         parsed.repo
       ) {
-        const config = loadAzureDevOpsConfig();
+        const { config } = await loadAzureDevOpsConfig();
         resolvedCtx = {
           platform: 'azure-devops',
           org: parsed.org ?? '',

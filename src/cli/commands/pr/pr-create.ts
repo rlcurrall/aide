@@ -124,7 +124,7 @@ async function handler(argv: ArgumentsCamelCase<PrCreateArgs>): Promise<void> {
   let { head, base } = args;
 
   try {
-    const ctx = resolvePlatformContext(args.project, args.repo);
+    const ctx = await resolvePlatformContext(args.project, args.repo);
     if (ctx.autoDiscovered) {
       if (ctx.platform === 'github') {
         logProgress(
@@ -201,7 +201,7 @@ async function handler(argv: ArgumentsCamelCase<PrCreateArgs>): Promise<void> {
       const targetRefName = ensureRefPrefix(base);
 
       const { loadAzureDevOpsConfig } = await import('@lib/config.js');
-      const config = loadAzureDevOpsConfig();
+      const { config } = await loadAzureDevOpsConfig();
 
       const pr = await ctx.client.createPullRequest(
         ctx.project,
