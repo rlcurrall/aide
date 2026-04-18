@@ -111,6 +111,7 @@ src/
     ado-utils.ts          # Azure DevOps-specific utilities
     cli-utils.ts          # CLI formatting helpers
     comment-utils.ts      # Comment filtering utilities
+    prompts.ts            # Interactive prompt helpers (text, password, confirm)
     types.ts              # TypeScript interfaces
 
 skills/                   # Claude Code skills (auto-discovered by Claude)
