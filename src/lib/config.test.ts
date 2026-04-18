@@ -9,6 +9,7 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 
 import { loadConfig, loadAzureDevOpsConfig } from './config.js';
+import { installMockSecrets, type Store } from './test-helpers.js';
 
 const JIRA_VARS = [
   'JIRA_URL',
@@ -41,26 +42,6 @@ function restoreEnv(snap: Map<string, string | undefined>) {
   }
 }
 
-type Store = Map<string, string>;
-
-function installMockSecrets(store: Store) {
-  const originalSecrets = (Bun as unknown as { secrets: unknown }).secrets;
-  (Bun as unknown as { secrets: unknown }).secrets = {
-    async get(opts: { service: string; name: string }) {
-      return store.get(`${opts.service}:${opts.name}`) ?? null;
-    },
-    async set(opts: { service: string; name: string; value: string }) {
-      store.set(`${opts.service}:${opts.name}`, opts.value);
-    },
-    async delete() {
-      return false;
-    },
-  };
-  return () => {
-    (Bun as unknown as { secrets: unknown }).secrets = originalSecrets;
-  };
-}
-
 describe('loadConfig (Jira)', () => {
   let snap: Map<string, string | undefined>;
   let store: Store;
@@ -69,6 +50,7 @@ describe('loadConfig (Jira)', () => {
   beforeEach(() => {
     snap = saveEnv(JIRA_VARS);
     store = new Map();
+    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
     restoreSecrets = installMockSecrets(store);
   });
 
@@ -127,20 +109,12 @@ describe('loadConfig (Jira)', () => {
   });
 
   test('throws "keyring unreachable" error when secret-service is unavailable', async () => {
-    const original = (Bun as unknown as { secrets: unknown }).secrets;
-    (Bun as unknown as { secrets: unknown }).secrets = {
-      async get() {
-        throw new Error('no secret service');
-      },
-      async set() {},
-      async delete() {
-        return false;
-      },
-    };
+    restoreSecrets(); // remove the default mock first
+    const localRestore = installMockSecrets(store, 'get');
     try {
       await expect(loadConfig()).rejects.toThrow(/keyring is unreachable/i);
     } finally {
-      (Bun as unknown as { secrets: unknown }).secrets = original;
+      localRestore();
     }
   });
 });
@@ -153,6 +127,7 @@ describe('loadAzureDevOpsConfig', () => {
   beforeEach(() => {
     snap = saveEnv(ADO_VARS);
     store = new Map();
+    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
     restoreSecrets = installMockSecrets(store);
   });
 

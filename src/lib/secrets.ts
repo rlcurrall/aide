@@ -3,10 +3,22 @@
  *
  * The rest of the codebase imports from here so there's one place that
  * decides what "not found" vs "keyring unavailable" looks like. Every
- * secret aide stores lives under service="aide".
+ * secret aide stores lives under service="aide" by default.
+ *
+ * Tests can override the service name by setting AIDE_SECRET_SERVICE_OVERRIDE
+ * so they use the real OS keyring without colliding with production entries.
  */
 
-export const AIDE_SERVICE = 'aide';
+const AIDE_SERVICE_DEFAULT = 'aide';
+
+/**
+ * Resolve the active keyring service name. Honors
+ * AIDE_SECRET_SERVICE_OVERRIDE so tests can scope to a unique service
+ * without colliding with production entries.
+ */
+function activeService(): string {
+  return Bun.env.AIDE_SECRET_SERVICE_OVERRIDE ?? AIDE_SERVICE_DEFAULT;
+}
 
 export type SecretName = 'jira' | 'ado' | 'github';
 
@@ -28,7 +40,7 @@ export class KeyringUnavailableError extends Error {
 
 export async function getSecret(name: SecretName): Promise<string | null> {
   try {
-    return await Bun.secrets.get({ service: AIDE_SERVICE, name });
+    return await Bun.secrets.get({ service: activeService(), name });
   } catch (err) {
     throw new KeyringUnavailableError(err);
   }
@@ -39,7 +51,7 @@ export async function setSecret(
   value: string
 ): Promise<void> {
   try {
-    await Bun.secrets.set({ service: AIDE_SERVICE, name, value });
+    await Bun.secrets.set({ service: activeService(), name, value });
   } catch (err) {
     throw new KeyringUnavailableError(err);
   }
@@ -47,7 +59,7 @@ export async function setSecret(
 
 export async function deleteSecret(name: SecretName): Promise<boolean> {
   try {
-    return await Bun.secrets.delete({ service: AIDE_SERVICE, name });
+    return await Bun.secrets.delete({ service: activeService(), name });
   } catch (err) {
     throw new KeyringUnavailableError(err);
   }

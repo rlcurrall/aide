@@ -10,6 +10,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 
 import { loginJira, loginAdo, loginGithub } from './login.js';
 import type { Prompter, ReadLineOptions } from '@lib/prompts.js';
+import { installMockSecrets, type Store } from '@lib/test-helpers.js';
 
 class ScriptedPrompter implements Prompter {
   private inputs: string[];
@@ -27,32 +28,13 @@ class ScriptedPrompter implements Prompter {
   }
 }
 
-type Store = Map<string, string>;
-
-function installMockSecrets(store: Store) {
-  const original = (Bun as unknown as { secrets: unknown }).secrets;
-  (Bun as unknown as { secrets: unknown }).secrets = {
-    async get(opts: { service: string; name: string }) {
-      return store.get(`${opts.service}:${opts.name}`) ?? null;
-    },
-    async set(opts: { service: string; name: string; value: string }): Promise<void> {
-      store.set(`${opts.service}:${opts.name}`, opts.value);
-    },
-    async delete(opts: { service: string; name: string }) {
-      return store.delete(`${opts.service}:${opts.name}`);
-    },
-  };
-  return () => {
-    (Bun as unknown as { secrets: unknown }).secrets = original;
-  };
-}
-
 describe('loginJira', () => {
   let store: Store;
   let restore: () => void;
 
   beforeEach(() => {
     store = new Map();
+    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
     restore = installMockSecrets(store);
   });
 
@@ -102,6 +84,7 @@ describe('loginAdo', () => {
 
   beforeEach(() => {
     store = new Map();
+    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
     restore = installMockSecrets(store);
   });
 
@@ -138,6 +121,7 @@ describe('loginGithub', () => {
 
   beforeEach(() => {
     store = new Map();
+    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
     restore = installMockSecrets(store);
   });
 
