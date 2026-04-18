@@ -12,75 +12,126 @@
  */
 
 import type { CommandModule } from 'yargs';
+import * as v from 'valibot';
 
 import { getSecret, KeyringUnavailableError } from '@lib/secrets.js';
 import { isGhCliAvailable } from '@lib/gh-utils.js';
+import {
+  StoredJiraSchema,
+  StoredAdoSchema,
+  StoredGithubSchema,
+} from '@schemas/config.js';
 
-async function hasStoredSecret(name: 'jira' | 'ado' | 'github'): Promise<boolean> {
+type StoredCheck = 'found' | 'missing' | 'corrupted' | 'unreachable';
+type ConfigState = 'configured' | 'not-configured' | 'misconfigured';
+
+async function checkStoredSecret(
+  name: 'jira' | 'ado' | 'github'
+): Promise<StoredCheck> {
+  let raw: string | null;
   try {
-    const raw = await getSecret(name);
-    return raw !== null;
+    raw = await getSecret(name);
   } catch (err) {
-    if (err instanceof KeyringUnavailableError) return false;
+    if (err instanceof KeyringUnavailableError) return 'unreachable';
     throw err;
   }
+  if (raw === null) return 'missing';
+
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    return 'corrupted';
+  }
+
+  const schema =
+    name === 'jira'
+      ? StoredJiraSchema
+      : name === 'ado'
+        ? StoredAdoSchema
+        : StoredGithubSchema;
+  const result = v.safeParse(schema, json);
+  return result.success ? 'found' : 'corrupted';
 }
 
 /**
  * Check if Jira environment variables or keyring are configured
  */
-async function isJiraConfigured(): Promise<boolean> {
+async function isJiraConfigured(): Promise<ConfigState> {
   const hasUrl = !!process.env.JIRA_URL;
   const hasEmail = !!(process.env.JIRA_EMAIL || process.env.JIRA_USERNAME);
   const hasToken = !!(process.env.JIRA_API_TOKEN || process.env.JIRA_TOKEN);
-  if (hasUrl && hasEmail && hasToken) return true;
-  return await hasStoredSecret('jira');
+  if (hasUrl && hasEmail && hasToken) return 'configured';
+
+  const check = await checkStoredSecret('jira');
+  if (check === 'found') return 'configured';
+  if (check === 'corrupted') return 'misconfigured';
+  return 'not-configured';
 }
 
 /**
  * Check if any PR platform is configured (Azure DevOps or GitHub via gh CLI/token/keyring)
  */
-async function isPRPlatformConfigured(ghAvailable: () => boolean): Promise<boolean> {
-  // Azure DevOps
+async function isPRPlatformConfigured(
+  ghAvailable: () => boolean
+): Promise<ConfigState> {
+  // Azure DevOps env
   const hasAdoOrgUrl = !!process.env.AZURE_DEVOPS_ORG_URL;
   const hasAdoPat = !!process.env.AZURE_DEVOPS_PAT;
-  if (hasAdoOrgUrl && hasAdoPat) return true;
-  if (await hasStoredSecret('ado')) return true;
+  if (hasAdoOrgUrl && hasAdoPat) return 'configured';
 
-  // GitHub via token
-  if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) return true;
-  if (await hasStoredSecret('github')) return true;
+  // Azure DevOps keyring
+  const adoCheck = await checkStoredSecret('ado');
+  if (adoCheck === 'found') return 'configured';
+  const adoCorrupted = adoCheck === 'corrupted';
+
+  // GitHub via token env
+  if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) return 'configured';
+
+  // GitHub via keyring
+  const ghCheck = await checkStoredSecret('github');
+  if (ghCheck === 'found') return 'configured';
+  const ghCorrupted = ghCheck === 'corrupted';
 
   // GitHub via gh CLI
-  if (ghAvailable()) return true;
+  if (ghAvailable()) return 'configured';
 
-  return false;
+  if (adoCorrupted || ghCorrupted) return 'misconfigured';
+  return 'not-configured';
 }
 
 /**
  * Build configuration status section if any service is not configured
  */
-async function buildConfigStatusSection(ghAvailable: () => boolean): Promise<string> {
-  const jiraConfigured = await isJiraConfigured();
-  const prConfigured = await isPRPlatformConfigured(ghAvailable);
+async function buildConfigStatusSection(
+  ghAvailable: () => boolean
+): Promise<string> {
+  const jiraState = await isJiraConfigured();
+  const prState = await isPRPlatformConfigured(ghAvailable);
 
   // If everything is configured, return empty string (no status section needed)
-  if (jiraConfigured && prConfigured) {
+  if (jiraState === 'configured' && prState === 'configured') {
     return '';
   }
 
   const lines: string[] = ['## Configuration Status', ''];
 
-  if (jiraConfigured) {
+  if (jiraState === 'configured') {
     lines.push('- Jira: Configured');
+  } else if (jiraState === 'misconfigured') {
+    lines.push('- Jira: Misconfigured (run `aide login jira` to reconfigure)');
   } else {
     lines.push(
       '- Jira: Not configured (set JIRA_URL, JIRA_EMAIL/JIRA_USERNAME, JIRA_API_TOKEN/JIRA_TOKEN)'
     );
   }
 
-  if (prConfigured) {
+  if (prState === 'configured') {
     lines.push('- Pull Requests: Configured');
+  } else if (prState === 'misconfigured') {
+    lines.push(
+      '- Pull Requests: Misconfigured (run `aide login github` or `aide login ado` to reconfigure)'
+    );
   } else {
     lines.push(
       '- Pull Requests: Not configured (run `gh auth login` for GitHub, or set AZURE_DEVOPS_ORG_URL + AZURE_DEVOPS_PAT for Azure DevOps)'

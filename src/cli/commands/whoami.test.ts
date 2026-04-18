@@ -153,4 +153,26 @@ describe('getWhoamiStatus', () => {
     expect(jira.identity).not.toContain('user:pass');
     expect(jira.identity).toContain('example.atlassian.net');
   });
+
+  test('reports corrupted when stored jira blob fails schema', async () => {
+    store.set('aide:jira', JSON.stringify({ url: 'not-a-url' }));
+    const statuses = await getWhoamiStatus({ ghAvailable: () => false });
+    const jira = statuses.find((s) => s.service === 'jira') as WhoamiStatus;
+    expect(jira.source).toBe('corrupted');
+    expect(jira.identity).toMatch(/aide login jira/i);
+  });
+
+  test('reports corrupted when stored ado blob is invalid JSON', async () => {
+    store.set('aide:ado', 'not-json-at-all');
+    const statuses = await getWhoamiStatus({ ghAvailable: () => false });
+    const ado = statuses.find((s) => s.service === 'ado') as WhoamiStatus;
+    expect(ado.source).toBe('corrupted');
+  });
+
+  test('reports corrupted for github when stored token blob fails schema', async () => {
+    store.set('aide:github', JSON.stringify({ wrongField: 'x' }));
+    const statuses = await getWhoamiStatus({ ghAvailable: () => false });
+    const gh = statuses.find((s) => s.service === 'github') as WhoamiStatus;
+    expect(gh.source).toBe('corrupted');
+  });
 });
