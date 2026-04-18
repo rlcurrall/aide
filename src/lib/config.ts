@@ -2,94 +2,169 @@ import * as v from 'valibot';
 import {
   JiraConfigSchema,
   AzureDevOpsConfigSchema,
+  StoredJiraSchema,
+  StoredAdoSchema,
   type JiraConfig,
   type AzureDevOpsConfig,
 } from '../schemas/config.js';
+import { getSecret, KeyringUnavailableError } from './secrets.js';
 
-/**
- * Print helpful error message for Jira configuration issues
- */
-function printJiraConfigError(field: string): void {
-  console.error(`Error: Missing or invalid Jira configuration: ${field}`);
-  console.error('Please set the following environment variables:');
-  console.error('  - JIRA_URL (your Jira instance URL)');
-  console.error('  - JIRA_EMAIL or JIRA_USERNAME (your email/username)');
-  console.error('  - JIRA_API_TOKEN or JIRA_TOKEN (your API token)');
-  console.error('');
-  if (field.includes('apiToken') || field.includes('API token')) {
-    console.error(
-      'Generate an API token at: https://id.atlassian.com/manage-profile/security/api-tokens'
-    );
-  }
-  console.error('You can also create a .env file (copy from .env.example)');
+export type ConfigSource = 'env' | 'keyring';
+
+export interface LoadedConfig<T> {
+  config: T;
+  source: ConfigSource;
 }
 
-/**
- * Print helpful error message for Azure DevOps configuration issues
- */
-function printAzureDevOpsConfigError(field: string): void {
-  console.error(
-    `Error: Missing or invalid Azure DevOps configuration: ${field}`
-  );
-  console.error('Please set the following environment variables:');
-  console.error(
-    '  - AZURE_DEVOPS_ORG_URL (e.g., https://dev.azure.com/yourorg)'
-  );
-  console.error('  - AZURE_DEVOPS_PAT (your Personal Access Token)');
-  console.error(
-    '  - AZURE_DEVOPS_AUTH_METHOD (optional, default: pat, can be: pat or bearer)'
-  );
-  console.error('');
-  if (field.includes('pat') || field.includes('PAT')) {
-    console.error(
-      'Generate a PAT at: https://dev.azure.com/yourorg/_usersSettings/tokens'
-    );
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigError';
   }
-  console.error('You can also create a .env file with these variables');
 }
 
-export function loadConfig(): JiraConfig {
-  // Bun automatically loads .env files, so we can use Bun.env directly
-  const rawConfig = {
-    url: Bun.env.JIRA_URL,
-    email: Bun.env.JIRA_EMAIL || Bun.env.JIRA_USERNAME,
-    apiToken: Bun.env.JIRA_API_TOKEN || Bun.env.JIRA_TOKEN,
+// ---------------------------------------------------------------------------
+// Jira
+// ---------------------------------------------------------------------------
+
+function readJiraFromEnv(): JiraConfig | null {
+  const url = Bun.env.JIRA_URL;
+  const email = Bun.env.JIRA_EMAIL || Bun.env.JIRA_USERNAME;
+  const apiToken = Bun.env.JIRA_API_TOKEN || Bun.env.JIRA_TOKEN;
+  if (!url || !email || !apiToken) return null;
+  const parsed = v.safeParse(JiraConfigSchema, {
+    url,
+    email,
+    apiToken,
     defaultProject: Bun.env.JIRA_DEFAULT_PROJECT,
-  };
-
-  const result = v.safeParse(JiraConfigSchema, rawConfig);
-
-  if (!result.success) {
-    // Find the first issue and provide a helpful error message
-    const firstIssue = result.issues[0];
-    const fieldPath =
-      firstIssue?.path?.map((p) => p.key).join('.') || 'configuration';
-    printJiraConfigError(fieldPath);
-    process.exit(1);
+  });
+  if (!parsed.success) {
+    throw new ConfigError(
+      `Invalid Jira environment variables: ${formatIssues(parsed.issues)}`
+    );
   }
-
-  return result.output;
+  return parsed.output;
 }
 
-export function loadAzureDevOpsConfig(): AzureDevOpsConfig {
-  // Bun automatically loads .env files, so we can use Bun.env directly
-  const rawConfig = {
-    orgUrl: Bun.env.AZURE_DEVOPS_ORG_URL,
-    pat: Bun.env.AZURE_DEVOPS_PAT,
+async function readJiraFromKeyring(): Promise<JiraConfig | null> {
+  let raw: string | null;
+  try {
+    raw = await getSecret('jira');
+  } catch (err) {
+    if (err instanceof KeyringUnavailableError) return null;
+    throw err;
+  }
+  if (raw === null) return null;
+
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    throw new ConfigError(
+      'Stored Jira credentials are malformed. Re-run via aide login jira.'
+    );
+  }
+  const parsed = v.safeParse(StoredJiraSchema, json);
+  if (!parsed.success) {
+    throw new ConfigError(
+      'Stored Jira credentials failed validation: ' +
+        formatIssues(parsed.issues) +
+        '. Re-run via aide login jira.'
+    );
+  }
+  return { ...parsed.output };
+}
+
+export async function loadConfig(): Promise<LoadedConfig<JiraConfig>> {
+  const fromEnv = readJiraFromEnv();
+  if (fromEnv) return { config: fromEnv, source: 'env' };
+
+  const fromKeyring = await readJiraFromKeyring();
+  if (fromKeyring) return { config: fromKeyring, source: 'keyring' };
+
+  throw new ConfigError(
+    "Jira is not configured. Run 'aide login jira', or set JIRA_URL, " +
+      'JIRA_EMAIL (or JIRA_USERNAME), and JIRA_API_TOKEN (or JIRA_TOKEN).'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Azure DevOps
+// ---------------------------------------------------------------------------
+
+function readAdoFromEnv(): AzureDevOpsConfig | null {
+  const orgUrl = Bun.env.AZURE_DEVOPS_ORG_URL;
+  const pat = Bun.env.AZURE_DEVOPS_PAT;
+  if (!orgUrl || !pat) return null;
+  const parsed = v.safeParse(AzureDevOpsConfigSchema, {
+    orgUrl,
+    pat,
     authMethod: Bun.env.AZURE_DEVOPS_AUTH_METHOD || 'pat',
     defaultProject: Bun.env.AZURE_DEVOPS_DEFAULT_PROJECT,
-  };
-
-  const result = v.safeParse(AzureDevOpsConfigSchema, rawConfig);
-
-  if (!result.success) {
-    // Find the first issue and provide a helpful error message
-    const firstIssue = result.issues[0];
-    const fieldPath =
-      firstIssue?.path?.map((p) => p.key).join('.') || 'configuration';
-    printAzureDevOpsConfigError(fieldPath);
-    process.exit(1);
+  });
+  if (!parsed.success) {
+    throw new ConfigError(
+      `Invalid Azure DevOps environment variables: ${formatIssues(
+        parsed.issues
+      )}`
+    );
   }
+  return parsed.output;
+}
 
-  return result.output;
+async function readAdoFromKeyring(): Promise<AzureDevOpsConfig | null> {
+  let raw: string | null;
+  try {
+    raw = await getSecret('ado');
+  } catch (err) {
+    if (err instanceof KeyringUnavailableError) return null;
+    throw err;
+  }
+  if (raw === null) return null;
+
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    throw new ConfigError(
+      "Stored Azure DevOps credentials are malformed. Re-run 'aide login ado'."
+    );
+  }
+  const parsed = v.safeParse(StoredAdoSchema, json);
+  if (!parsed.success) {
+    throw new ConfigError(
+      "Stored Azure DevOps credentials failed validation: " +
+        formatIssues(parsed.issues) +
+        ". Re-run 'aide login ado'."
+    );
+  }
+  return { ...parsed.output };
+}
+
+export async function loadAzureDevOpsConfig(): Promise<
+  LoadedConfig<AzureDevOpsConfig>
+> {
+  const fromEnv = readAdoFromEnv();
+  if (fromEnv) return { config: fromEnv, source: 'env' };
+
+  const fromKeyring = await readAdoFromKeyring();
+  if (fromKeyring) return { config: fromKeyring, source: 'keyring' };
+
+  throw new ConfigError(
+    "Azure DevOps is not configured. Run 'aide login ado', or set " +
+      'AZURE_DEVOPS_ORG_URL and AZURE_DEVOPS_PAT.'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function formatIssues(issues: readonly v.BaseIssue<unknown>[]): string {
+  return issues
+    .map((i) => {
+      const path = i.path?.map((p) => p.key).join('.') ?? '';
+      return path ? `${path}: ${i.message}` : i.message;
+    })
+    .join('; ');
 }
