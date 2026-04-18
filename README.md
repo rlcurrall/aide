@@ -82,6 +82,11 @@ bun run dev <command>
 ## Quick Start
 
 ```bash
+# Set up credentials (stores in OS keyring)
+aide login jira     # prompts for Jira URL, email, API token
+aide login ado      # prompts for Azure DevOps org URL and PAT
+aide whoami         # show what's configured and where it came from
+
 # Get help
 aide --help
 aide jira --help
@@ -117,13 +122,21 @@ aide <service> <action> [options]
 
 ### Jira Commands
 
-| Command                                       | Description              |
-| --------------------------------------------- | ------------------------ |
-| `aide jira search <jql>`                      | Search tickets using JQL |
-| `aide jira view <key>`                        | Get ticket details       |
-| `aide jira comment <key> <text>`              | Add comment to ticket    |
-| `aide jira comments <key>`                    | Get ticket comments      |
-| `aide jira update <key> --description <text>` | Update ticket fields     |
+| Command                                       | Description                        |
+| --------------------------------------------- | ---------------------------------- |
+| `aide jira search <jql>`                      | Search tickets using JQL           |
+| `aide jira view <key>`                        | Get ticket details                 |
+| `aide jira create -p PROJ -t Task -s "..."`   | Create a ticket                    |
+| `aide jira update <key>`                      | Update ticket fields               |
+| `aide jira transition <key> <status>`         | Change workflow status             |
+| `aide jira comment <key> <text>`              | Add comment to ticket              |
+| `aide jira comments <key>`                    | Get ticket comments                |
+| `aide jira delete-comment <key> <id>`         | Delete a comment                   |
+| `aide jira edit-comment <key> <id> <text>`    | Edit a comment                     |
+| `aide jira attach <key>`                      | Manage attachments                 |
+| `aide jira fields <project>`                  | Discover available fields          |
+| `aide jira boards <project>`                  | List boards for a project          |
+| `aide jira sprint <board-id>`                 | Get sprint info for a board        |
 
 ### Pull Request Commands
 
