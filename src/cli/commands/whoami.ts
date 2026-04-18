@@ -7,15 +7,12 @@
  */
 
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import * as v from 'valibot';
 
-import { getSecret, KeyringUnavailableError } from '@lib/secrets.js';
 import {
-  StoredJiraSchema,
-  StoredAdoSchema,
-  StoredGithubSchema,
-} from '@schemas/config.js';
-import { isGhCliAvailable } from '@lib/gh-utils.js';
+  probeJiraConfig,
+  probeAdoConfig,
+  probeGithubConfig,
+} from '@lib/config.js';
 
 export type ServiceName = 'jira' | 'ado' | 'github';
 export type WhoamiSource =
@@ -48,8 +45,7 @@ function redactUrlUserInfo(raw: string): string {
 export async function getWhoamiStatus(
   opts: { ghAvailable?: () => boolean } = {}
 ): Promise<WhoamiStatus[]> {
-  const ghCheck = opts.ghAvailable ?? isGhCliAvailable;
-  return [await statusJira(), await statusAdo(), await statusGithub(ghCheck)];
+  return [await statusJira(), await statusAdo(), await statusGithub(opts)];
 }
 
 // ---------------------------------------------------------------------------
@@ -57,26 +53,23 @@ export async function getWhoamiStatus(
 // ---------------------------------------------------------------------------
 
 async function statusJira(): Promise<WhoamiStatus> {
-  const envUrl = Bun.env.JIRA_URL;
-  const envEmail = Bun.env.JIRA_EMAIL || Bun.env.JIRA_USERNAME;
-  const envToken = Bun.env.JIRA_API_TOKEN || Bun.env.JIRA_TOKEN;
-  if (envUrl && envEmail && envToken) {
+  const status = await probeJiraConfig();
+
+  if (status.kind === 'env') {
     return {
       service: 'jira',
       source: 'env',
-      identity: `${envEmail} at ${redactUrlUserInfo(envUrl)}`,
+      identity: `${status.value.email} at ${redactUrlUserInfo(status.value.url)}`,
     };
   }
-
-  const stored = await tryReadStored('jira', StoredJiraSchema);
-  if (stored.kind === 'found') {
+  if (status.kind === 'keyring') {
     return {
       service: 'jira',
       source: 'keyring',
-      identity: `${stored.value.email} at ${redactUrlUserInfo(stored.value.url)}`,
+      identity: `${status.value.email} at ${redactUrlUserInfo(status.value.url)}`,
     };
   }
-  if (stored.kind === 'corrupted') {
+  if (status.kind === 'malformed') {
     return {
       service: 'jira',
       source: 'corrupted',
@@ -88,26 +81,23 @@ async function statusJira(): Promise<WhoamiStatus> {
 }
 
 async function statusAdo(): Promise<WhoamiStatus> {
-  const envOrg = Bun.env.AZURE_DEVOPS_ORG_URL;
-  const envPat = Bun.env.AZURE_DEVOPS_PAT;
-  const envAuth = Bun.env.AZURE_DEVOPS_AUTH_METHOD || 'pat';
-  if (envOrg && envPat) {
+  const status = await probeAdoConfig();
+
+  if (status.kind === 'env') {
     return {
       service: 'ado',
       source: 'env',
-      identity: `${redactUrlUserInfo(envOrg)} (${envAuth})`,
+      identity: `${redactUrlUserInfo(status.value.orgUrl)} (${status.value.authMethod})`,
     };
   }
-
-  const stored = await tryReadStored('ado', StoredAdoSchema);
-  if (stored.kind === 'found') {
+  if (status.kind === 'keyring') {
     return {
       service: 'ado',
       source: 'keyring',
-      identity: `${redactUrlUserInfo(stored.value.orgUrl)} (${stored.value.authMethod})`,
+      identity: `${redactUrlUserInfo(status.value.orgUrl)} (${status.value.authMethod})`,
     };
   }
-  if (stored.kind === 'corrupted') {
+  if (status.kind === 'malformed') {
     return {
       service: 'ado',
       source: 'corrupted',
@@ -118,51 +108,31 @@ async function statusAdo(): Promise<WhoamiStatus> {
   return { service: 'ado', source: 'not-configured', identity: null };
 }
 
-async function statusGithub(ghAvailable: () => boolean): Promise<WhoamiStatus> {
-  if (ghAvailable()) {
-    return { service: 'github', source: 'gh-cli', identity: null };
-  }
-  if (Bun.env.GITHUB_TOKEN || Bun.env.GH_TOKEN) {
+async function statusGithub(opts: {
+  ghAvailable?: () => boolean;
+}): Promise<WhoamiStatus> {
+  const status = await probeGithubConfig(opts);
+
+  if (status.kind === 'env') {
+    const src = status.value.source;
+    if (src === 'gh-cli') {
+      return { service: 'github', source: 'gh-cli', identity: null };
+    }
+    // source === 'env' (GITHUB_TOKEN / GH_TOKEN)
     return { service: 'github', source: 'env', identity: null };
   }
-  const stored = await tryReadStored('github', StoredGithubSchema);
-  if (stored.kind === 'found') {
+  if (status.kind === 'keyring') {
     return { service: 'github', source: 'keyring', identity: null };
   }
-  if (stored.kind === 'corrupted') {
+  if (status.kind === 'malformed') {
     return {
       service: 'github',
       source: 'corrupted',
       identity: "run 'aide login github' to reconfigure",
     };
   }
+
   return { service: 'github', source: 'not-configured', identity: null };
-}
-
-type StoredResult<T> =
-  | { kind: 'found'; value: T }
-  | { kind: 'missing' }
-  | { kind: 'corrupted' };
-
-async function tryReadStored<T>(
-  name: 'jira' | 'ado' | 'github',
-  schema: v.BaseSchema<unknown, T, v.BaseIssue<unknown>>
-): Promise<StoredResult<T>> {
-  let raw: string | null;
-  try {
-    raw = await getSecret(name);
-  } catch (err) {
-    if (err instanceof KeyringUnavailableError) return { kind: 'missing' };
-    throw err;
-  }
-  if (raw === null) return { kind: 'missing' };
-  try {
-    const json = JSON.parse(raw);
-    const value = v.parse(schema, json);
-    return { kind: 'found', value };
-  } catch {
-    return { kind: 'corrupted' };
-  }
 }
 
 // ---------------------------------------------------------------------------

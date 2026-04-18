@@ -16,6 +16,32 @@ import type { SecretName } from './secrets.js';
 
 export type Store = Map<string, string>;
 
+// ---------------------------------------------------------------------------
+// Environment variable helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Snapshot and clear the given env vars. Returns a map for later restoration.
+ */
+export function saveEnv(keys: string[]): Map<string, string | undefined> {
+  const snap = new Map<string, string | undefined>();
+  for (const k of keys) {
+    snap.set(k, Bun.env[k]);
+    delete Bun.env[k];
+  }
+  return snap;
+}
+
+/**
+ * Restore env vars from a snapshot produced by `saveEnv`.
+ */
+export function restoreEnv(snap: Map<string, string | undefined>): void {
+  for (const [k, v] of snap) {
+    if (v === undefined) delete Bun.env[k];
+    else Bun.env[k] = v;
+  }
+}
+
 /**
  * Swap `Bun.secrets` with an in-memory map. Returns a restore function.
  *
@@ -33,7 +59,11 @@ export function installMockSecrets(
       if (throwOn === 'get') throw new Error('keyring unavailable');
       return store.get(`${opts.service}:${opts.name}`) ?? null;
     },
-    async set(opts: { service: string; name: string; value: string }): Promise<void> {
+    async set(opts: {
+      service: string;
+      name: string;
+      value: string;
+    }): Promise<void> {
       if (throwOn === 'set') throw new Error('keyring unavailable');
       store.set(`${opts.service}:${opts.name}`, opts.value);
     },

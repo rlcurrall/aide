@@ -1,5 +1,5 @@
 /**
- * Tests for config.ts loaders.
+ * Tests for config.ts loaders and probes.
  *
  * Each test scopes env-var mutation and Bun.secrets mocking to the test,
  * restoring both afterward. Source reporting is part of the contract because
@@ -8,8 +8,19 @@
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 
-import { loadConfig, loadAzureDevOpsConfig } from './config.js';
-import { installMockSecrets, type Store } from './test-helpers.js';
+import {
+  loadConfig,
+  loadAzureDevOpsConfig,
+  probeJiraConfig,
+  probeAdoConfig,
+  probeGithubConfig,
+} from './config.js';
+import {
+  installMockSecrets,
+  saveEnv,
+  restoreEnv,
+  type Store,
+} from './test-helpers.js';
 
 const JIRA_VARS = [
   'JIRA_URL',
@@ -25,22 +36,7 @@ const ADO_VARS = [
   'AZURE_DEVOPS_AUTH_METHOD',
   'AZURE_DEVOPS_DEFAULT_PROJECT',
 ];
-
-function saveEnv(keys: string[]): Map<string, string | undefined> {
-  const snap = new Map<string, string | undefined>();
-  for (const k of keys) {
-    snap.set(k, Bun.env[k]);
-    delete Bun.env[k];
-  }
-  return snap;
-}
-
-function restoreEnv(snap: Map<string, string | undefined>) {
-  for (const [k, v] of snap) {
-    if (v === undefined) delete Bun.env[k];
-    else Bun.env[k] = v;
-  }
-}
+const GITHUB_VARS = ['GITHUB_TOKEN', 'GH_TOKEN'];
 
 describe('loadConfig (Jira)', () => {
   let snap: Map<string, string | undefined>;
@@ -88,7 +84,11 @@ describe('loadConfig (Jira)', () => {
   test('uses keyring when env is empty', async () => {
     store.set(
       'aide:jira',
-      JSON.stringify({ url: 'https://k.atlassian.net', email: 'k@k.k', apiToken: 'k' })
+      JSON.stringify({
+        url: 'https://k.atlassian.net',
+        email: 'k@k.k',
+        apiToken: 'k',
+      })
     );
     const { source } = await loadConfig();
     expect(source).toBe('keyring');
@@ -179,9 +179,235 @@ describe('loadAzureDevOpsConfig', () => {
     restoreSecrets(); // tear down the default mock that was installed in beforeEach
     const localRestore = installMockSecrets(store, 'get');
     try {
-      await expect(loadAzureDevOpsConfig()).rejects.toThrow(/keyring is unreachable/i);
+      await expect(loadAzureDevOpsConfig()).rejects.toThrow(
+        /keyring is unreachable/i
+      );
     } finally {
       localRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Probe tests
+// ---------------------------------------------------------------------------
+
+describe('probeJiraConfig', () => {
+  let snap: Map<string, string | undefined>;
+  let store: Store;
+  let restoreSecrets: () => void;
+
+  beforeEach(() => {
+    snap = saveEnv(JIRA_VARS);
+    store = new Map();
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
+    restoreSecrets = installMockSecrets(store);
+  });
+
+  afterEach(() => {
+    restoreEnv(snap);
+    restoreSecrets();
+  });
+
+  test('returns env kind when env vars are set', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_EMAIL = 'a@b.c';
+    Bun.env.JIRA_API_TOKEN = 'tkn';
+    const status = await probeJiraConfig();
+    expect(status.kind).toBe('env');
+    if (status.kind === 'env') {
+      expect(status.value.url).toBe('https://x.atlassian.net');
+      expect(status.value.email).toBe('a@b.c');
+    }
+  });
+
+  test('returns keyring kind when only keyring has credentials', async () => {
+    store.set(
+      'aide:jira',
+      JSON.stringify({
+        url: 'https://k.atlassian.net',
+        email: 'k@k.k',
+        apiToken: 'k',
+      })
+    );
+    const status = await probeJiraConfig();
+    expect(status.kind).toBe('keyring');
+    if (status.kind === 'keyring') {
+      expect(status.value.url).toBe('https://k.atlassian.net');
+    }
+  });
+
+  test('returns missing when nothing is configured', async () => {
+    const status = await probeJiraConfig();
+    expect(status.kind).toBe('missing');
+  });
+
+  test('returns unreachable when keyring daemon is down', async () => {
+    restoreSecrets();
+    restoreSecrets = installMockSecrets(store, 'get');
+    const status = await probeJiraConfig();
+    expect(status.kind).toBe('unreachable');
+  });
+
+  test('returns malformed for bad keyring JSON', async () => {
+    store.set('aide:jira', '{not json');
+    const status = await probeJiraConfig();
+    expect(status.kind).toBe('malformed');
+    if (status.kind === 'malformed') {
+      expect(status.reason).toMatch(/aide login jira/i);
+    }
+  });
+
+  test('returns malformed when stored blob fails schema', async () => {
+    store.set('aide:jira', JSON.stringify({ url: 'not-a-url' }));
+    const status = await probeJiraConfig();
+    expect(status.kind).toBe('malformed');
+    if (status.kind === 'malformed') {
+      expect(status.reason).toMatch(/aide login jira/i);
+    }
+  });
+
+  test('returns malformed when env URL is invalid', async () => {
+    Bun.env.JIRA_URL = 'not-a-url';
+    Bun.env.JIRA_EMAIL = 'a@b.c';
+    Bun.env.JIRA_API_TOKEN = 'tkn';
+    const status = await probeJiraConfig();
+    expect(status.kind).toBe('malformed');
+    if (status.kind === 'malformed') {
+      expect(status.reason).toMatch(/Invalid Jira environment variables/i);
+    }
+  });
+});
+
+describe('probeAdoConfig', () => {
+  let snap: Map<string, string | undefined>;
+  let store: Store;
+  let restoreSecrets: () => void;
+
+  beforeEach(() => {
+    snap = saveEnv(ADO_VARS);
+    store = new Map();
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
+    restoreSecrets = installMockSecrets(store);
+  });
+
+  afterEach(() => {
+    restoreEnv(snap);
+    restoreSecrets();
+  });
+
+  test('returns env kind when env vars are set', async () => {
+    Bun.env.AZURE_DEVOPS_ORG_URL = 'https://dev.azure.com/x';
+    Bun.env.AZURE_DEVOPS_PAT = 'pat';
+    const status = await probeAdoConfig();
+    expect(status.kind).toBe('env');
+    if (status.kind === 'env') {
+      expect(status.value.orgUrl).toBe('https://dev.azure.com/x');
+    }
+  });
+
+  test('returns keyring kind when only keyring has credentials', async () => {
+    store.set(
+      'aide:ado',
+      JSON.stringify({
+        orgUrl: 'https://dev.azure.com/org',
+        pat: 't',
+        authMethod: 'pat',
+      })
+    );
+    const status = await probeAdoConfig();
+    expect(status.kind).toBe('keyring');
+  });
+
+  test('returns missing when nothing is configured', async () => {
+    const status = await probeAdoConfig();
+    expect(status.kind).toBe('missing');
+  });
+
+  test('returns unreachable when keyring daemon is down', async () => {
+    restoreSecrets();
+    restoreSecrets = installMockSecrets(store, 'get');
+    const status = await probeAdoConfig();
+    expect(status.kind).toBe('unreachable');
+  });
+
+  test('returns malformed when stored blob fails schema', async () => {
+    store.set('aide:ado', JSON.stringify({ orgUrl: 'not-a-url' }));
+    const status = await probeAdoConfig();
+    expect(status.kind).toBe('malformed');
+    if (status.kind === 'malformed') {
+      expect(status.reason).toMatch(/aide login ado/i);
+    }
+  });
+});
+
+describe('probeGithubConfig', () => {
+  let snap: Map<string, string | undefined>;
+  let store: Store;
+  let restoreSecrets: () => void;
+
+  beforeEach(() => {
+    snap = saveEnv(GITHUB_VARS);
+    store = new Map();
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
+    restoreSecrets = installMockSecrets(store);
+  });
+
+  afterEach(() => {
+    restoreEnv(snap);
+    restoreSecrets();
+  });
+
+  test('returns env/gh-cli when gh CLI is available', async () => {
+    const status = await probeGithubConfig({ ghAvailable: () => true });
+    expect(status.kind).toBe('env');
+    if (status.kind === 'env') {
+      expect(status.value.source).toBe('gh-cli');
+    }
+  });
+
+  test('gh-cli takes precedence over GITHUB_TOKEN', async () => {
+    Bun.env.GITHUB_TOKEN = 'ghp_xxx';
+    const status = await probeGithubConfig({ ghAvailable: () => true });
+    expect(status.kind).toBe('env');
+    if (status.kind === 'env') {
+      expect(status.value.source).toBe('gh-cli');
+    }
+  });
+
+  test('returns env/env when GITHUB_TOKEN is set and gh is absent', async () => {
+    Bun.env.GITHUB_TOKEN = 'ghp_xxx';
+    const status = await probeGithubConfig({ ghAvailable: () => false });
+    expect(status.kind).toBe('env');
+    if (status.kind === 'env') {
+      expect(status.value.source).toBe('env');
+    }
+  });
+
+  test('returns keyring when stored token is present', async () => {
+    store.set('aide:github', JSON.stringify({ token: 'ghp_stored' }));
+    const status = await probeGithubConfig({ ghAvailable: () => false });
+    expect(status.kind).toBe('keyring');
+  });
+
+  test('returns missing when nothing is configured', async () => {
+    const status = await probeGithubConfig({ ghAvailable: () => false });
+    expect(status.kind).toBe('missing');
+  });
+
+  test('returns unreachable when keyring daemon is down', async () => {
+    restoreSecrets();
+    restoreSecrets = installMockSecrets(store, 'get');
+    const status = await probeGithubConfig({ ghAvailable: () => false });
+    expect(status.kind).toBe('unreachable');
+  });
+
+  test('returns malformed when stored blob fails schema', async () => {
+    store.set('aide:github', JSON.stringify({ wrongField: 'x' }));
+    const status = await probeGithubConfig({ ghAvailable: () => false });
+    expect(status.kind).toBe('malformed');
+    if (status.kind === 'malformed') {
+      expect(status.reason).toMatch(/aide login github/i);
     }
   });
 });
