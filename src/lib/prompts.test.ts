@@ -16,6 +16,7 @@ import {
   confirm,
   applyChar,
   classifyControlChar,
+  stepRawInput,
   type Prompter,
   type ReadLineOptions,
 } from './prompts.js';
@@ -119,9 +120,9 @@ describe('confirm', () => {
 
   test('returns default when input is empty', async () => {
     const p = new ScriptedPrompter(['']);
-    expect(
-      await confirm({ label: 'Save?', default: true, prompter: p })
-    ).toBe(true);
+    expect(await confirm({ label: 'Save?', default: true, prompter: p })).toBe(
+      true
+    );
   });
 
   test('re-prompts on unrecognized input', async () => {
@@ -174,6 +175,77 @@ describe('classifyControlChar (CRLF and control-code classification)', () => {
 
   test('returns none for emoji', () => {
     expect(classifyControlChar('😀')).toBe('none');
+  });
+});
+
+describe('stepRawInput (CRLF loop state transitions)', () => {
+  test('CRLF sequence: \\r is discarded, \\n submits', () => {
+    // Simulate typing 'a', then Windows CRLF terminator
+    let state = stepRawInput('', 'a', false);
+    expect(state.action).toBe('continue');
+    expect(state.buf).toBe('a');
+    expect(state.writeToTty).toBe('a');
+
+    state = stepRawInput(state.buf, '\r', false);
+    expect(state.action).toBe('continue');
+    expect(state.buf).toBe('a'); // CR must not append
+    expect(state.writeToTty).toBe('');
+
+    state = stepRawInput(state.buf, '\n', false);
+    expect(state.action).toBe('submit');
+    expect(state.buf).toBe('a');
+  });
+
+  test('bare \\r without following \\n does not submit', () => {
+    const state = stepRawInput('hello', '\r', false);
+    expect(state.action).toBe('continue');
+    expect(state.buf).toBe('hello');
+  });
+
+  test('Ctrl+C returns cancel action', () => {
+    const state = stepRawInput('partial', '\x03', false);
+    expect(state.action).toBe('cancel');
+  });
+
+  test('LF submits immediately', () => {
+    const state = stepRawInput('done', '\n', false);
+    expect(state.action).toBe('submit');
+    expect(state.buf).toBe('done');
+  });
+
+  test('backspace erases last char and emits erase sequence (unmasked)', () => {
+    const state = stepRawInput('ab', '\x7f', false);
+    expect(state.action).toBe('continue');
+    expect(state.buf).toBe('a');
+    expect(state.writeToTty).toBe('\b \b');
+  });
+
+  test('backspace in masked mode does not emit erase (hides caret movement)', () => {
+    const state = stepRawInput('ab', '\x7f', true);
+    expect(state.buf).toBe('a');
+    expect(state.writeToTty).toBe('');
+  });
+
+  test('masked printable char updates buffer but does not echo', () => {
+    const state = stepRawInput('', 'p', true);
+    expect(state.buf).toBe('p');
+    expect(state.writeToTty).toBe('');
+  });
+
+  test('regression: CR inside a typed sequence does not corrupt the buffer', () => {
+    // If discard branch is removed, CR would fall through to applyChar,
+    // which would also discard it (code < 0x20), so we need a stronger
+    // assertion: the pipeline end-to-end should submit 'hi' after a CRLF.
+    let buf = '';
+    for (const ch of ['h', 'i', '\r', '\n']) {
+      const s = stepRawInput(buf, ch, false);
+      buf = s.buf;
+      if (s.action === 'submit') {
+        expect(buf).toBe('hi');
+        return;
+      }
+    }
+    throw new Error('expected submit');
   });
 });
 

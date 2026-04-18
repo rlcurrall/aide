@@ -51,7 +51,8 @@ export async function text(opts: TextOptions): Promise<string> {
 
   for (;;) {
     const raw = await prompter.readLine({ label });
-    const value = raw.length === 0 && opts.default !== undefined ? opts.default : raw;
+    const value =
+      raw.length === 0 && opts.default !== undefined ? opts.default : raw;
     const err = opts.validate?.(value);
     if (err) {
       prompter.writeLine(`  ${err}`);
@@ -97,7 +98,11 @@ export interface ConfirmOptions {
 export async function confirm(opts: ConfirmOptions): Promise<boolean> {
   const prompter = opts.prompter ?? defaultPrompter;
   const hint =
-    opts.default === true ? '[Y/n]' : opts.default === false ? '[y/N]' : '[y/n]';
+    opts.default === true
+      ? '[Y/n]'
+      : opts.default === false
+        ? '[y/N]'
+        : '[y/n]';
   const label = `${opts.label} ${hint}: `;
 
   for (;;) {
@@ -147,6 +152,35 @@ export function classifyControlChar(
   return 'none';
 }
 
+export interface StepResult {
+  buf: string;
+  writeToTty: string;
+  action: 'continue' | 'submit' | 'cancel';
+}
+
+/**
+ * Apply a single decoded code point to the raw-input state. Pure function
+ * combining classifyControlChar + applyChar with the loop's branching
+ * behavior (discard CR, submit on LF, cancel on Ctrl+C). Exported for
+ * unit testing so the CRLF contract is exercised end-to-end.
+ */
+export function stepRawInput(
+  buf: string,
+  ch: string,
+  masked: boolean
+): StepResult {
+  const kind = classifyControlChar(ch);
+  if (kind === 'cancel') return { buf, writeToTty: '', action: 'cancel' };
+  if (kind === 'submit') return { buf, writeToTty: '', action: 'submit' };
+  if (kind === 'discard') return { buf, writeToTty: '', action: 'continue' };
+  const applied = applyChar(buf, ch, masked);
+  return {
+    buf: applied.buf,
+    writeToTty: applied.writeToTty,
+    action: 'continue',
+  };
+}
+
 /**
  * Apply a single decoded code point to the buffer. Exported for unit testing.
  *
@@ -192,27 +226,19 @@ async function readRaw(masked: boolean): Promise<string> {
     for await (const chunk of stdin as AsyncIterable<Buffer>) {
       const decoded = decoder.write(chunk);
       for (const ch of decoded) {
-        const kind = classifyControlChar(ch);
-
-        // Ctrl+C: restore terminal state before exiting so raw mode isn't
-        // left enabled on compiled Windows binaries.
-        if (kind === 'cancel') {
+        const step = stepRawInput(buf, ch, masked);
+        if (step.action === 'cancel') {
           process.stdout.write('\n');
           stdin.setRawMode(wasRaw);
           stdin.pause();
           process.exit(130);
         }
-
-        // Submit on LF; discard CR (handles both LF-only and CRLF terminals).
-        if (kind === 'submit') {
+        if (step.action === 'submit') {
           process.stdout.write('\n');
-          return buf;
+          return step.buf;
         }
-        if (kind === 'discard') continue; // discard CR
-
-        const result = applyChar(buf, ch, masked);
-        buf = result.buf;
-        if (result.writeToTty) process.stdout.write(result.writeToTty);
+        buf = step.buf;
+        if (step.writeToTty) process.stdout.write(step.writeToTty);
       }
     }
     return buf;
