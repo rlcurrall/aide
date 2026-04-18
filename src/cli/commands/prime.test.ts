@@ -9,7 +9,12 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 
 import { buildPrimeOutput } from './prime.js';
-import { installMockSecrets, type Store } from '@lib/test-helpers.js';
+import {
+  installMockSecrets,
+  saveEnv,
+  restoreEnv,
+  type Store,
+} from '@lib/test-helpers.js';
 
 const JIRA_VARS = [
   'JIRA_URL',
@@ -20,22 +25,6 @@ const JIRA_VARS = [
 ];
 const ADO_VARS = ['AZURE_DEVOPS_ORG_URL', 'AZURE_DEVOPS_PAT'];
 const GH_VARS = ['GITHUB_TOKEN', 'GH_TOKEN'];
-
-function saveEnv(keys: string[]): Map<string, string | undefined> {
-  const snap = new Map<string, string | undefined>();
-  for (const k of keys) {
-    snap.set(k, Bun.env[k]);
-    delete Bun.env[k];
-  }
-  return snap;
-}
-
-function restoreEnv(snap: Map<string, string | undefined>) {
-  for (const [k, v] of snap) {
-    if (v === undefined) delete Bun.env[k];
-    else Bun.env[k] = v;
-  }
-}
 
 describe('buildPrimeOutput', () => {
   let snap: Map<string, string | undefined>;

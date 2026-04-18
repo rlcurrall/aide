@@ -12,93 +12,15 @@
  */
 
 import type { CommandModule } from 'yargs';
-import * as v from 'valibot';
 
-import { getSecret, KeyringUnavailableError } from '@lib/secrets.js';
-import { isGhCliAvailable } from '@lib/gh-utils.js';
 import {
-  StoredJiraSchema,
-  StoredAdoSchema,
-  StoredGithubSchema,
-} from '@schemas/config.js';
+  probeJiraConfig,
+  probeAdoConfig,
+  probeGithubConfig,
+} from '@lib/config.js';
+import { isGhCliAvailable } from '@lib/gh-utils.js';
 
-type StoredCheck = 'found' | 'missing' | 'corrupted' | 'unreachable';
 type ConfigState = 'configured' | 'not-configured' | 'misconfigured';
-
-async function checkStoredSecret(
-  name: 'jira' | 'ado' | 'github'
-): Promise<StoredCheck> {
-  let raw: string | null;
-  try {
-    raw = await getSecret(name);
-  } catch (err) {
-    if (err instanceof KeyringUnavailableError) return 'unreachable';
-    throw err;
-  }
-  if (raw === null) return 'missing';
-
-  let json: unknown;
-  try {
-    json = JSON.parse(raw);
-  } catch {
-    return 'corrupted';
-  }
-
-  const schema =
-    name === 'jira'
-      ? StoredJiraSchema
-      : name === 'ado'
-        ? StoredAdoSchema
-        : StoredGithubSchema;
-  const result = v.safeParse(schema, json);
-  return result.success ? 'found' : 'corrupted';
-}
-
-/**
- * Check if Jira environment variables or keyring are configured
- */
-async function isJiraConfigured(): Promise<ConfigState> {
-  const hasUrl = !!process.env.JIRA_URL;
-  const hasEmail = !!(process.env.JIRA_EMAIL || process.env.JIRA_USERNAME);
-  const hasToken = !!(process.env.JIRA_API_TOKEN || process.env.JIRA_TOKEN);
-  if (hasUrl && hasEmail && hasToken) return 'configured';
-
-  const check = await checkStoredSecret('jira');
-  if (check === 'found') return 'configured';
-  if (check === 'corrupted') return 'misconfigured';
-  return 'not-configured';
-}
-
-/**
- * Check if any PR platform is configured (Azure DevOps or GitHub via gh CLI/token/keyring)
- */
-async function isPRPlatformConfigured(
-  ghAvailable: () => boolean
-): Promise<ConfigState> {
-  // Azure DevOps env
-  const hasAdoOrgUrl = !!process.env.AZURE_DEVOPS_ORG_URL;
-  const hasAdoPat = !!process.env.AZURE_DEVOPS_PAT;
-  if (hasAdoOrgUrl && hasAdoPat) return 'configured';
-
-  // Azure DevOps keyring
-  const adoCheck = await checkStoredSecret('ado');
-  if (adoCheck === 'found') return 'configured';
-  const adoCorrupted = adoCheck === 'corrupted';
-
-  // GitHub via token env
-  if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) return 'configured';
-
-  // GitHub via keyring
-  const ghCheck = await checkStoredSecret('github');
-  if (ghCheck === 'found') return 'configured';
-  const ghCorrupted = ghCheck === 'corrupted';
-
-  // GitHub via gh CLI
-  if (ghAvailable()) return 'configured';
-
-  if (adoCorrupted || ghCorrupted) return 'misconfigured';
-  return 'not-configured';
-}
 
 /**
  * Build configuration status section if any service is not configured
@@ -106,8 +28,31 @@ async function isPRPlatformConfigured(
 async function buildConfigStatusSection(
   ghAvailable: () => boolean
 ): Promise<string> {
-  const jiraState = await isJiraConfigured();
-  const prState = await isPRPlatformConfigured(ghAvailable);
+  const [jiraStatus, adoStatus, ghStatus] = await Promise.all([
+    probeJiraConfig(),
+    probeAdoConfig(),
+    probeGithubConfig({ ghAvailable }),
+  ]);
+
+  function toState(kind: string): ConfigState {
+    if (kind === 'env' || kind === 'keyring') return 'configured';
+    if (kind === 'malformed') return 'misconfigured';
+    return 'not-configured';
+  }
+
+  const jiraState = toState(jiraStatus.kind);
+
+  // PR platform is configured if either ADO or GitHub is available
+  let prState: ConfigState;
+  const adoState = toState(adoStatus.kind);
+  const ghState = toState(ghStatus.kind);
+  if (adoState === 'configured' || ghState === 'configured') {
+    prState = 'configured';
+  } else if (adoState === 'misconfigured' || ghState === 'misconfigured') {
+    prState = 'misconfigured';
+  } else {
+    prState = 'not-configured';
+  }
 
   // If everything is configured, return empty string (no status section needed)
   if (jiraState === 'configured' && prState === 'configured') {
@@ -249,10 +194,12 @@ export async function buildPrimeOutput(
   return parts.join('\n').trim();
 }
 
-export default {
+const command: CommandModule = {
   command: 'prime',
   describe: 'Output aide context for session start hook',
   async handler() {
     console.log(await buildPrimeOutput());
   },
-} satisfies CommandModule;
+};
+
+export default command;

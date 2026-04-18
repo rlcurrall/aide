@@ -21,6 +21,7 @@ import type {
 import { isGhCliAvailable } from './gh-utils.js';
 import { getSecret, KeyringUnavailableError } from './secrets.js';
 import { StoredGithubSchema } from '@schemas/config.js';
+import { ConfigError } from './config.js';
 
 type TransportMode = 'gh-cli' | 'token';
 
@@ -54,14 +55,14 @@ async function tryReadStoredToken(): Promise<string | null> {
   try {
     json = JSON.parse(raw);
   } catch {
-    throw new Error(
+    throw new ConfigError(
       "Stored GitHub credentials are malformed. Re-run 'aide login github' to reconfigure."
     );
   }
   const parsed = v.safeParse(StoredGithubSchema, json);
   if (!parsed.success) {
-    throw new Error(
-      "Stored GitHub credentials failed validation. " +
+    throw new ConfigError(
+      'Stored GitHub credentials failed validation. ' +
         "Re-run 'aide login github' to reconfigure."
     );
   }

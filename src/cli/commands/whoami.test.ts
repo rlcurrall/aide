@@ -1,6 +1,11 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { getWhoamiStatus, type WhoamiStatus } from './whoami.js';
-import { installMockSecrets, type Store } from '@lib/test-helpers.js';
+import {
+  installMockSecrets,
+  saveEnv,
+  restoreEnv,
+  type Store,
+} from '@lib/test-helpers.js';
 
 const JIRA_VARS = [
   'JIRA_URL',
@@ -15,22 +20,6 @@ const ADO_VARS = [
   'AZURE_DEVOPS_AUTH_METHOD',
 ];
 const GITHUB_VARS = ['GITHUB_TOKEN', 'GH_TOKEN'];
-
-function saveEnv(keys: string[]): Map<string, string | undefined> {
-  const snap = new Map<string, string | undefined>();
-  for (const k of keys) {
-    snap.set(k, Bun.env[k]);
-    delete Bun.env[k];
-  }
-  return snap;
-}
-
-function restoreEnv(snap: Map<string, string | undefined>) {
-  for (const [k, v] of snap) {
-    if (v === undefined) delete Bun.env[k];
-    else Bun.env[k] = v;
-  }
-}
 
 describe('getWhoamiStatus', () => {
   let snap: Map<string, string | undefined>;
