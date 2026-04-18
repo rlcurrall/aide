@@ -9,6 +9,7 @@ import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { VERSION, CLI_NAME } from './help.js';
 import { cleanupOldBackup } from './update.js';
+import { UserCancelledError } from '@lib/prompts.js';
 
 // Import service command modules
 import { jiraCommands } from './commands/jira/index.js';
@@ -56,6 +57,9 @@ async function main(): Promise<number> {
 
     return 0;
   } catch (error) {
+    if (error instanceof UserCancelledError) {
+      return error.exitCode; // 130, silent
+    }
     console.error(`Error: ${error instanceof Error ? error.message : error}`);
     return 1;
   }

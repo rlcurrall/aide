@@ -25,4 +25,14 @@ describe('logout', () => {
     const result = await logout('jira');
     expect(result).toBe('not-found');
   });
+
+  test('logout propagates KeyringUnavailableError when deleteSecret fails', async () => {
+    restore();
+    const localRestore = installMockSecrets(store, 'delete');
+    try {
+      await expect(logout('jira')).rejects.toMatchObject({ name: 'KeyringUnavailableError' });
+    } finally {
+      localRestore();
+    }
+  });
 });
