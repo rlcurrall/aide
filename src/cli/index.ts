@@ -18,6 +18,7 @@ import primeCommand from './commands/prime.js';
 import upgradeCommand from './commands/upgrade.js';
 import loginCommand from './commands/login.js';
 import logoutCommand from './commands/logout.js';
+import whoamiCommand from './commands/whoami.js';
 
 async function main(): Promise<number> {
   // Clean up any old backup files from previous upgrades
@@ -37,9 +38,10 @@ async function main(): Promise<number> {
       .command(upgradeCommand)
       .command(loginCommand)
       .command(logoutCommand)
+      .command(whoamiCommand)
       .demandCommand(
         1,
-        'Please specify a command (jira, pr, plugin, prime, upgrade, login, logout)'
+        'Please specify a command (jira, pr, plugin, prime, upgrade, login, logout, whoami)'
       )
       .strict()
       .wrap(Math.min(100, process.stdout.columns || 80))
