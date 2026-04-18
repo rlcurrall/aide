@@ -76,6 +76,22 @@ describe('loginJira', () => {
     await loginJira({}, { prompter: p });
     expect(store.has('aide:jira')).toBe(true);
   });
+
+  test('loginJira propagates KeyringUnavailableError when setSecret fails', async () => {
+    restore(); // tear down the default mock
+    const localRestore = installMockSecrets(store, 'set');
+    try {
+      const p = new ScriptedPrompter([]);
+      await expect(
+        loginJira(
+          { url: 'https://x.atlassian.net', email: 'a@b.c', token: 't' },
+          { prompter: p }
+        )
+      ).rejects.toMatchObject({ name: 'KeyringUnavailableError' });
+    } finally {
+      localRestore();
+    }
+  });
 });
 
 describe('loginAdo', () => {

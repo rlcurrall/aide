@@ -9,9 +9,11 @@
 
 import { spawnSync } from 'bun';
 
-export function isGhCliAvailable(): boolean {
+type SpawnSyncFn = typeof spawnSync;
+
+export function isGhCliAvailable(spawn: SpawnSyncFn = spawnSync): boolean {
   try {
-    const result = spawnSync(['gh', 'auth', 'status'], {
+    const result = spawn(['gh', 'auth', 'status'], {
       stdout: 'ignore',
       stderr: 'ignore',
     });

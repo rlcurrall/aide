@@ -15,6 +15,7 @@ import {
   password,
   confirm,
   applyChar,
+  classifyControlChar,
   type Prompter,
   type ReadLineOptions,
 } from './prompts.js';
@@ -139,6 +140,40 @@ describe('confirm', () => {
     const p = new ScriptedPrompter(['']);
     await confirm({ label: 'Save?', default: false, prompter: p });
     expect(p.readCalls[0]?.label).toContain('[y/N]');
+  });
+});
+
+describe('classifyControlChar (CRLF and control-code classification)', () => {
+  test('treats CR as discard (prevents CRLF double-submit)', () => {
+    expect(classifyControlChar('\r')).toBe('discard');
+  });
+
+  test('treats LF as submit', () => {
+    expect(classifyControlChar('\n')).toBe('submit');
+  });
+
+  test('treats Ctrl+C as cancel', () => {
+    expect(classifyControlChar(String.fromCharCode(0x03))).toBe('cancel');
+  });
+
+  test('treats backspace (0x08) as backspace', () => {
+    expect(classifyControlChar(String.fromCharCode(0x08))).toBe('backspace');
+  });
+
+  test('treats DEL (0x7f) as backspace', () => {
+    expect(classifyControlChar(String.fromCharCode(0x7f))).toBe('backspace');
+  });
+
+  test('returns none for printable ASCII', () => {
+    expect(classifyControlChar('a')).toBe('none');
+  });
+
+  test('returns none for accented characters', () => {
+    expect(classifyControlChar('é')).toBe('none');
+  });
+
+  test('returns none for emoji', () => {
+    expect(classifyControlChar('😀')).toBe('none');
   });
 });
 
