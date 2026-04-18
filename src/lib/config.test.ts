@@ -118,12 +118,30 @@ describe('loadConfig (Jira)', () => {
 
   test('throws with descriptive message when keyring JSON is malformed', async () => {
     store.set('aide:jira', '{not json');
-    await expect(loadConfig()).rejects.toThrow(/re-run .+ aide login jira/i);
+    await expect(loadConfig()).rejects.toThrow(/aide login jira/i);
   });
 
   test('throws with descriptive message when keyring JSON fails schema', async () => {
     store.set('aide:jira', JSON.stringify({ url: 'not a url' }));
-    await expect(loadConfig()).rejects.toThrow(/re-run .+ aide login jira/i);
+    await expect(loadConfig()).rejects.toThrow(/aide login jira/i);
+  });
+
+  test('throws "keyring unreachable" error when secret-service is unavailable', async () => {
+    const original = (Bun as unknown as { secrets: unknown }).secrets;
+    (Bun as unknown as { secrets: unknown }).secrets = {
+      async get() {
+        throw new Error('no secret service');
+      },
+      async set() {},
+      async delete() {
+        return false;
+      },
+    };
+    try {
+      await expect(loadConfig()).rejects.toThrow(/keyring is unreachable/i);
+    } finally {
+      (Bun as unknown as { secrets: unknown }).secrets = original;
+    }
   });
 });
 

@@ -29,10 +29,6 @@ import {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-function isStdinPiped(): boolean {
-  return !process.stdin.isTTY;
-}
-
 async function readStdin(): Promise<string> {
   let buf = '';
   for await (const chunk of process.stdin as AsyncIterable<Buffer>) {
@@ -68,6 +64,11 @@ export async function loginJira(
   flags: JiraLoginFlags,
   opts: { prompter?: Prompter } = {}
 ): Promise<void> {
+  let pipedToken: string | null = null;
+  if (!flags.token && !opts.prompter && !process.stdin.isTTY) {
+    pipedToken = (await readStdin()).trim();
+  }
+
   const url =
     flags.url ??
     (await text({
@@ -85,10 +86,7 @@ export async function loginJira(
     }));
 
   const token =
-    flags.token ??
-    (isStdinPiped() && !opts.prompter
-      ? (await readStdin()).trim()
-      : await password({ label: 'API token', prompter: opts.prompter }));
+    flags.token ?? pipedToken ?? (await password({ label: 'API token', prompter: opts.prompter }));
 
   const validated = v.parse(StoredJiraSchema, {
     url,
@@ -113,6 +111,11 @@ export async function loginAdo(
   flags: AdoLoginFlags,
   opts: { prompter?: Prompter } = {}
 ): Promise<void> {
+  let pipedToken: string | null = null;
+  if (!flags.pat && !opts.prompter && !process.stdin.isTTY) {
+    pipedToken = (await readStdin()).trim();
+  }
+
   const orgUrl =
     flags.orgUrl ??
     (await text({
@@ -122,10 +125,7 @@ export async function loginAdo(
     }));
 
   const pat =
-    flags.pat ??
-    (isStdinPiped() && !opts.prompter
-      ? (await readStdin()).trim()
-      : await password({ label: 'PAT', prompter: opts.prompter }));
+    flags.pat ?? pipedToken ?? (await password({ label: 'PAT', prompter: opts.prompter }));
 
   const authMethod: AuthMethod = flags.authMethod ?? 'pat';
 
@@ -159,11 +159,13 @@ export async function loginGithub(
     return 'gh-cli';
   }
 
+  let pipedToken: string | null = null;
+  if (!flags.token && !opts.prompter && !process.stdin.isTTY) {
+    pipedToken = (await readStdin()).trim();
+  }
+
   const token =
-    flags.token ??
-    (isStdinPiped() && !opts.prompter
-      ? (await readStdin()).trim()
-      : await password({ label: 'GitHub token', prompter: opts.prompter }));
+    flags.token ?? pipedToken ?? (await password({ label: 'GitHub token', prompter: opts.prompter }));
 
   const validated = v.parse(StoredGithubSchema, { token });
   await setSecret('github', JSON.stringify(validated));
