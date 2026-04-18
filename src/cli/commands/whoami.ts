@@ -26,6 +26,20 @@ export interface WhoamiStatus {
   identity: string | null;
 }
 
+function redactUrlUserInfo(raw: string): string {
+  try {
+    const url = new URL(raw);
+    if (url.username || url.password) {
+      url.username = '';
+      url.password = '';
+      return url.toString().replace(/\/$/, '');
+    }
+    return raw;
+  } catch {
+    return raw;
+  }
+}
+
 export async function getWhoamiStatus(
   opts: { ghAvailable?: () => boolean } = {}
 ): Promise<WhoamiStatus[]> {
@@ -49,7 +63,7 @@ async function statusJira(): Promise<WhoamiStatus> {
     return {
       service: 'jira',
       source: 'env',
-      identity: `${envEmail} at ${envUrl}`,
+      identity: `${envEmail} at ${redactUrlUserInfo(envUrl)}`,
     };
   }
 
@@ -58,7 +72,7 @@ async function statusJira(): Promise<WhoamiStatus> {
     return {
       service: 'jira',
       source: 'keyring',
-      identity: `${stored.email} at ${stored.url}`,
+      identity: `${stored.email} at ${redactUrlUserInfo(stored.url)}`,
     };
   }
 
@@ -73,7 +87,7 @@ async function statusAdo(): Promise<WhoamiStatus> {
     return {
       service: 'ado',
       source: 'env',
-      identity: `${envOrg} (${envAuth})`,
+      identity: `${redactUrlUserInfo(envOrg)} (${envAuth})`,
     };
   }
 
@@ -82,7 +96,7 @@ async function statusAdo(): Promise<WhoamiStatus> {
     return {
       service: 'ado',
       source: 'keyring',
-      identity: `${stored.orgUrl} (${stored.authMethod})`,
+      identity: `${redactUrlUserInfo(stored.orgUrl)} (${stored.authMethod})`,
     };
   }
 

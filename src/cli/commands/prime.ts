@@ -14,27 +14,42 @@
 import { spawnSync } from 'bun';
 import type { CommandModule } from 'yargs';
 
-/**
- * Check if Jira environment variables are configured
- */
-function isJiraConfigured(): boolean {
-  const hasUrl = !!process.env.JIRA_URL;
-  const hasEmail = !!(process.env.JIRA_EMAIL || process.env.JIRA_USERNAME);
-  const hasToken = !!(process.env.JIRA_API_TOKEN || process.env.JIRA_TOKEN);
-  return hasUrl && hasEmail && hasToken;
+import { getSecret, KeyringUnavailableError } from '@lib/secrets.js';
+
+async function hasStoredSecret(name: 'jira' | 'ado' | 'github'): Promise<boolean> {
+  try {
+    const raw = await getSecret(name);
+    return raw !== null;
+  } catch (err) {
+    if (err instanceof KeyringUnavailableError) return false;
+    throw err;
+  }
 }
 
 /**
- * Check if any PR platform is configured (Azure DevOps or GitHub via gh CLI/token)
+ * Check if Jira environment variables or keyring are configured
  */
-function isPRPlatformConfigured(): boolean {
+async function isJiraConfigured(): Promise<boolean> {
+  const hasUrl = !!process.env.JIRA_URL;
+  const hasEmail = !!(process.env.JIRA_EMAIL || process.env.JIRA_USERNAME);
+  const hasToken = !!(process.env.JIRA_API_TOKEN || process.env.JIRA_TOKEN);
+  if (hasUrl && hasEmail && hasToken) return true;
+  return await hasStoredSecret('jira');
+}
+
+/**
+ * Check if any PR platform is configured (Azure DevOps or GitHub via gh CLI/token/keyring)
+ */
+async function isPRPlatformConfigured(): Promise<boolean> {
   // Azure DevOps
   const hasAdoOrgUrl = !!process.env.AZURE_DEVOPS_ORG_URL;
   const hasAdoPat = !!process.env.AZURE_DEVOPS_PAT;
   if (hasAdoOrgUrl && hasAdoPat) return true;
+  if (await hasStoredSecret('ado')) return true;
 
   // GitHub via token
   if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) return true;
+  if (await hasStoredSecret('github')) return true;
 
   // GitHub via gh CLI
   try {
@@ -53,9 +68,9 @@ function isPRPlatformConfigured(): boolean {
 /**
  * Build configuration status section if any service is not configured
  */
-function buildConfigStatusSection(): string {
-  const jiraConfigured = isJiraConfigured();
-  const prConfigured = isPRPlatformConfigured();
+async function buildConfigStatusSection(): Promise<string> {
+  const jiraConfigured = await isJiraConfigured();
+  const prConfigured = await isPRPlatformConfigured();
 
   // If everything is configured, return empty string (no status section needed)
   if (jiraConfigured && prConfigured) {
@@ -168,8 +183,8 @@ aide pr comment "Needs work"  # auto-detect from branch
 aide pr reply 456 "Fixed the issue" --pr 123
 \`\`\``;
 
-function buildPrimeOutput(): string {
-  const configStatus = buildConfigStatusSection();
+async function buildPrimeOutput(): Promise<string> {
+  const configStatus = await buildConfigStatusSection();
 
   const parts = ['# aide - Jira & Git Hosting Integration', ''];
 
@@ -191,7 +206,7 @@ function buildPrimeOutput(): string {
 export default {
   command: 'prime',
   describe: 'Output aide context for session start hook',
-  handler() {
-    console.log(buildPrimeOutput());
+  async handler() {
+    console.log(await buildPrimeOutput());
   },
 } satisfies CommandModule;

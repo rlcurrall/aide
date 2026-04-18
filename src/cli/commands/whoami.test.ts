@@ -117,6 +117,22 @@ describe('getWhoamiStatus', () => {
     expect(gh.source).toBe('keyring');
   });
 
+  test('redacts userinfo from stored ADO org URL', async () => {
+    store.set(
+      'aide:ado',
+      JSON.stringify({
+        orgUrl: 'https://user:pass@dev.azure.com/org',
+        pat: 't',
+        authMethod: 'pat',
+      })
+    );
+    const statuses = await getWhoamiStatus({ ghAvailable: () => false });
+    const ado = statuses.find((s) => s.service === 'ado') as WhoamiStatus;
+    expect(ado.identity).toBeTruthy();
+    expect(ado.identity).not.toContain('user:pass');
+    expect(ado.identity).toContain('dev.azure.com/org');
+  });
+
   test('never returns a token or pat in identity', async () => {
     Bun.env.JIRA_URL = 'https://x.atlassian.net';
     Bun.env.JIRA_EMAIL = 'a@b.c';
