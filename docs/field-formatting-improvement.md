@@ -1,3 +1,8 @@
+> **Status**: Historical design doc. Partial implementation exists in
+> `src/lib/value-formatter.ts` (simplified auto-detection, array/option
+> formatting); the `@value:/@name:/@id:` explicit prefix syntax and
+> `parseExplicitFormat()` described below were not shipped as written.
+
 # Field Formatting Improvement Specification
 
 This document provides a comprehensive implementation specification for improving how the aide CLI formats Jira field values.
