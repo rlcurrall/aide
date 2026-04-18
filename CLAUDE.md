@@ -18,6 +18,9 @@ The CLI follows a hierarchical command structure: `aide <service> <action> [opti
 
 - `prime` - Output aide context for session start hook
 - `upgrade` - Upgrade aide to the latest version
+- `login` - Save credentials to OS keyring (`aide login <jira|ado|github>`)
+- `logout` - Remove stored credentials (`aide logout <service>`)
+- `whoami` - Show configured credentials and their source
 
 ## Development Commands
 
@@ -112,6 +115,7 @@ src/
     cli-utils.ts          # CLI formatting helpers
     comment-utils.ts      # Comment filtering utilities
     prompts.ts            # Interactive prompt helpers (text, password, confirm)
+    secrets.ts            # Bun.secrets wrapper for credential storage
     types.ts              # TypeScript interfaces
 
 skills/                   # Claude Code skills (auto-discovered by Claude)
