@@ -104,13 +104,16 @@ aide <service> <action> [options]
 
 ### Services
 
-| Service   | Description                |
-| --------- | -------------------------- |
-| `jira`    | Jira ticket management     |
-| `pr`      | Pull request management    |
-| `plugin`  | Claude Code plugin manager |
-| `prime`   | Output aide context        |
-| `upgrade` | Upgrade aide to latest     |
+| Service   | Description                  |
+| --------- | ---------------------------- |
+| `jira`    | Jira ticket management       |
+| `pr`      | Pull request management      |
+| `plugin`  | Claude Code plugin manager   |
+| `prime`   | Output aide context          |
+| `upgrade` | Upgrade aide to latest       |
+| `login`   | Save credentials to keyring  |
+| `logout`  | Remove stored credentials    |
+| `whoami`  | Show credential sources      |
 
 ### Jira Commands
 
@@ -213,6 +216,20 @@ aide pr comments --pr 24094 --format markdown
 ```
 
 ## Configuration
+
+### Credential Storage (Keyring)
+
+aide prefers the OS credential store (macOS Keychain, Windows Credential Manager, Linux libsecret) via `Bun.secrets`. Set up with:
+
+```bash
+aide login jira     # prompts for URL, email, API token
+aide login ado      # prompts for org URL and PAT
+aide login github   # no-op if gh CLI is authenticated
+```
+
+Run `aide whoami` to see what's configured and where it's coming from, and `aide logout <service>` to remove a stored entry.
+
+Environment variables (below) remain supported and take precedence over the keyring. This is the recommended path for CI and other headless contexts.
 
 ### Environment Variables
 
