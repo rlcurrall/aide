@@ -97,3 +97,46 @@ export const GitHubConfigSchema = v.object({
 });
 
 export type GitHubConfig = v.InferOutput<typeof GitHubConfigSchema>;
+
+// ============================================================================
+// Stored Credential Schemas
+// ============================================================================
+//
+// These describe the JSON blobs written to Bun.secrets by `aide login`. They
+// are intentionally narrower than the runtime config schemas above: stored
+// blobs contain only credentials, not user preferences like defaultProject.
+// Preferences stay env-var-only for now.
+
+export const StoredJiraSchema = v.object({
+  url: UrlWithTrailingSlashRemoval,
+  email: v.pipe(
+    v.string('Email must be a string'),
+    v.minLength(1, 'Email cannot be empty')
+  ),
+  apiToken: v.pipe(
+    v.string('API token must be a string'),
+    v.minLength(1, 'API token cannot be empty')
+  ),
+});
+
+export type StoredJira = v.InferOutput<typeof StoredJiraSchema>;
+
+export const StoredAdoSchema = v.object({
+  orgUrl: UrlWithTrailingSlashRemoval,
+  pat: v.pipe(
+    v.string('PAT must be a string'),
+    v.minLength(1, 'PAT cannot be empty')
+  ),
+  authMethod: AuthMethodSchema,
+});
+
+export type StoredAdo = v.InferOutput<typeof StoredAdoSchema>;
+
+export const StoredGithubSchema = v.object({
+  token: v.pipe(
+    v.string('Token must be a string'),
+    v.minLength(1, 'Token cannot be empty')
+  ),
+});
+
+export type StoredGithub = v.InferOutput<typeof StoredGithubSchema>;
