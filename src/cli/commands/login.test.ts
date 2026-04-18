@@ -9,7 +9,7 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 
 import { loginJira, loginAdo, loginGithub } from './login.js';
-import type { Prompter, ReadLineOptions } from '../../lib/prompts.js';
+import type { Prompter, ReadLineOptions } from '@lib/prompts.js';
 
 class ScriptedPrompter implements Prompter {
   private inputs: string[];

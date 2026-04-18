@@ -7,15 +7,15 @@
  */
 
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import { spawnSync } from 'bun';
 import * as v from 'valibot';
 
-import { getSecret, KeyringUnavailableError } from '../../lib/secrets.js';
+import { getSecret, KeyringUnavailableError } from '@lib/secrets.js';
 import {
   StoredJiraSchema,
   StoredAdoSchema,
   StoredGithubSchema,
-} from '../../schemas/config.js';
+} from '@schemas/config.js';
+import { isGhCliAvailable } from '@lib/gh-utils.js';
 
 export type ServiceName = 'jira' | 'ado' | 'github';
 export type WhoamiSource = 'env' | 'keyring' | 'gh-cli' | 'not-configured';
@@ -43,7 +43,7 @@ function redactUrlUserInfo(raw: string): string {
 export async function getWhoamiStatus(
   opts: { ghAvailable?: () => boolean } = {}
 ): Promise<WhoamiStatus[]> {
-  const ghCheck = opts.ghAvailable ?? defaultGhCheck;
+  const ghCheck = opts.ghAvailable ?? isGhCliAvailable;
   return [
     await statusJira(),
     await statusAdo(),
@@ -136,18 +136,6 @@ async function tryReadStored<T>(
     return v.parse(schema, json);
   } catch {
     return null;
-  }
-}
-
-function defaultGhCheck(): boolean {
-  try {
-    const result = spawnSync(['gh', 'auth', 'status'], {
-      stdout: 'ignore',
-      stderr: 'ignore',
-    });
-    return result.exitCode === 0;
-  } catch {
-    return false;
   }
 }
 

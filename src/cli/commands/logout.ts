@@ -10,7 +10,7 @@ import {
   deleteSecret,
   KeyringUnavailableError,
   type SecretName,
-} from '../../lib/secrets.js';
+} from '@lib/secrets.js';
 
 export type LogoutResult = 'removed' | 'not-found';
 

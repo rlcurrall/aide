@@ -95,9 +95,9 @@ export async function resolvePlatformContext(
   if (remoteUrl) {
     const ghInfo = parseGitHubRemote(remoteUrl);
     if (ghInfo) {
-      // GitHubClient constructor throws GitHubAuthError if no auth available.
+      // GitHubClient.create() throws GitHubAuthError if no auth available.
       // Let it propagate - callers handle it like MissingRepoContextError.
-      const client = new GitHubClient();
+      const client = await GitHubClient.create();
       return {
         platform: 'github',
         owner: ghInfo.owner,
@@ -216,7 +216,7 @@ export async function resolvePRId(
           platform: 'github',
           owner: parsed.owner,
           repo: parsed.ghRepo,
-          client: new GitHubClient(),
+          client: await GitHubClient.create(),
           autoDiscovered: false,
         };
       } else if (

@@ -9,21 +9,21 @@
  */
 
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import { spawnSync } from 'bun';
 import * as v from 'valibot';
 
 import {
   text,
   password,
   type Prompter,
-} from '../../lib/prompts.js';
-import { setSecret, KeyringUnavailableError } from '../../lib/secrets.js';
+} from '@lib/prompts.js';
+import { setSecret, KeyringUnavailableError } from '@lib/secrets.js';
 import {
   StoredJiraSchema,
   StoredAdoSchema,
   StoredGithubSchema,
   type AuthMethod,
-} from '../../schemas/config.js';
+} from '@schemas/config.js';
+import { isGhCliAvailable } from '@lib/gh-utils.js';
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -153,7 +153,7 @@ export async function loginGithub(
     ghAvailable?: () => boolean;
   } = {}
 ): Promise<'gh-cli' | 'stored'> {
-  const ghCheck = opts.ghAvailable ?? defaultGhCheck;
+  const ghCheck = opts.ghAvailable ?? isGhCliAvailable;
   if (ghCheck()) {
     console.log('Using gh CLI auth. Nothing to do.');
     return 'gh-cli';
@@ -171,18 +171,6 @@ export async function loginGithub(
   await setSecret('github', JSON.stringify(validated));
   console.log('Saved credentials for github.');
   return 'stored';
-}
-
-function defaultGhCheck(): boolean {
-  try {
-    const result = spawnSync(['gh', 'auth', 'status'], {
-      stdout: 'ignore',
-      stderr: 'ignore',
-    });
-    return result.exitCode === 0;
-  } catch {
-    return false;
-  }
 }
 
 // ---------------------------------------------------------------------------
