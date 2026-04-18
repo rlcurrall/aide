@@ -172,7 +172,11 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
         logProgress('', format);
       }
     } catch (error) {
-      // May still succeed if PR URL is provided
+      // May still succeed if PR URL is provided.
+      // Note: plain Error thrown by tryReadStoredToken (malformed credentials)
+      // is NOT MissingRepoContextError or GitHubAuthError, so it always falls
+      // through to the rethrow below — retrying GitHubClient.create() a second
+      // time would hit the same corrupted blob and fail identically.
       if (
         !(
           error instanceof MissingRepoContextError ||

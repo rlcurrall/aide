@@ -34,7 +34,7 @@ describe('loginJira', () => {
 
   beforeEach(() => {
     store = new Map();
-    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
     restore = installMockSecrets(store);
   });
 
@@ -100,7 +100,7 @@ describe('loginAdo', () => {
 
   beforeEach(() => {
     store = new Map();
-    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
     restore = installMockSecrets(store);
   });
 
@@ -137,7 +137,7 @@ describe('loginGithub', () => {
 
   beforeEach(() => {
     store = new Map();
-    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
     restore = installMockSecrets(store);
   });
 

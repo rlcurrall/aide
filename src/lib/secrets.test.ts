@@ -104,7 +104,7 @@ describe('secrets wrapper (keyring unavailable)', () => {
 
   beforeEach(() => {
     store = new Map();
-    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
   });
 
   afterEach(() => {

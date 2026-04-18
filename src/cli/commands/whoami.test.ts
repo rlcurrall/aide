@@ -40,7 +40,7 @@ describe('getWhoamiStatus', () => {
   beforeEach(() => {
     snap = saveEnv([...JIRA_VARS, ...ADO_VARS, ...GITHUB_VARS]);
     store = new Map();
-    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
     restoreSecrets = installMockSecrets(store);
   });
 

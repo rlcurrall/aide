@@ -44,7 +44,7 @@ describe('buildPrimeOutput', () => {
 
   beforeEach(() => {
     snap = saveEnv([...JIRA_VARS, ...ADO_VARS, ...GH_VARS]);
-    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
     store = new Map();
     restore = installMockSecrets(store);
   });
