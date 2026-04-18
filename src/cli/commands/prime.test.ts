@@ -112,4 +112,58 @@ describe('buildPrimeOutput', () => {
     const output = await buildPrimeOutput({ ghAvailable: () => false });
     expect(output).not.toContain('Configuration Status');
   });
+
+  test('reports services as not configured when keyring is unreachable', async () => {
+    // Replace the mock with one that throws on get
+    restore();
+    restore = installMockSecrets(store, 'get');
+    const output = await buildPrimeOutput({ ghAvailable: () => false });
+    expect(output).toMatch(/Jira: Not configured/i);
+    expect(output).toMatch(/Pull Requests: Not configured/i);
+  });
+
+  test('reports Jira configured when JIRA_USERNAME is set instead of JIRA_EMAIL', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_USERNAME = 'user';
+    Bun.env.JIRA_API_TOKEN = 't';
+    const output = await buildPrimeOutput({ ghAvailable: () => false });
+    expect(output).toMatch(/Jira: Configured/i);
+  });
+
+  test('reports Jira configured when JIRA_TOKEN is set instead of JIRA_API_TOKEN', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_EMAIL = 'a@b.c';
+    Bun.env.JIRA_TOKEN = 't';
+    const output = await buildPrimeOutput({ ghAvailable: () => false });
+    expect(output).toMatch(/Jira: Configured/i);
+  });
+
+  test('emits partial status section when Jira is configured but PR is not', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_EMAIL = 'a@b.c';
+    Bun.env.JIRA_API_TOKEN = 't';
+    const output = await buildPrimeOutput({ ghAvailable: () => false });
+    expect(output).toContain('Configuration Status');
+    expect(output).toMatch(/Jira: Configured/i);
+    expect(output).toMatch(/Pull Requests: Not configured/i);
+  });
+
+  test('emits partial status section when PR via gh is configured but Jira is not', async () => {
+    const output = await buildPrimeOutput({ ghAvailable: () => true });
+    expect(output).toContain('Configuration Status');
+    expect(output).toMatch(/Jira: Not configured/i);
+    expect(output).toMatch(/Pull Requests: Configured/i);
+  });
+
+  test('reports PR configured when GITHUB_TOKEN is set', async () => {
+    Bun.env.GITHUB_TOKEN = 'ghp_xxx';
+    const output = await buildPrimeOutput({ ghAvailable: () => false });
+    expect(output).toMatch(/Pull Requests: Configured/i);
+  });
+
+  test('reports PR configured when GH_TOKEN is set', async () => {
+    Bun.env.GH_TOKEN = 'ghp_xxx';
+    const output = await buildPrimeOutput({ ghAvailable: () => false });
+    expect(output).toMatch(/Pull Requests: Configured/i);
+  });
 });
