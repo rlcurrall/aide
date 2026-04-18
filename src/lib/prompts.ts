@@ -125,6 +125,29 @@ export async function confirm(opts: ConfirmOptions): Promise<boolean> {
 // \r is discarded; \n submits the line (handles both LF and CRLF terminals).
 
 /**
+ * Classify a single decoded code point for the raw-mode input loop.
+ *
+ * Returns one of:
+ *  - 'discard'   - silently ignore (e.g. CR so CRLF doesn't double-submit)
+ *  - 'submit'    - end of input (LF)
+ *  - 'cancel'    - Ctrl+C
+ *  - 'backspace' - delete last character (BS or DEL)
+ *  - 'none'      - printable character, pass to applyChar
+ *
+ * Exported for unit testing.
+ */
+export function classifyControlChar(
+  ch: string
+): 'discard' | 'submit' | 'cancel' | 'backspace' | 'none' {
+  const code = ch.charCodeAt(0);
+  if (code === 0x03) return 'cancel';
+  if (code === 0x0a) return 'submit';
+  if (code === 0x0d) return 'discard';
+  if (code === 0x08 || code === 0x7f) return 'backspace';
+  return 'none';
+}
+
+/**
  * Apply a single decoded code point to the buffer. Exported for unit testing.
  *
  * Returns the new buffer string and any bytes to write back to the TTY.
@@ -169,11 +192,11 @@ async function readRaw(masked: boolean): Promise<string> {
     for await (const chunk of stdin as AsyncIterable<Buffer>) {
       const decoded = decoder.write(chunk);
       for (const ch of decoded) {
-        const code = ch.charCodeAt(0);
+        const kind = classifyControlChar(ch);
 
         // Ctrl+C: restore terminal state before exiting so raw mode isn't
         // left enabled on compiled Windows binaries.
-        if (code === 0x03) {
+        if (kind === 'cancel') {
           process.stdout.write('\n');
           stdin.setRawMode(wasRaw);
           stdin.pause();
@@ -181,11 +204,11 @@ async function readRaw(masked: boolean): Promise<string> {
         }
 
         // Submit on LF; discard CR (handles both LF-only and CRLF terminals).
-        if (code === 0x0a) {
+        if (kind === 'submit') {
           process.stdout.write('\n');
           return buf;
         }
-        if (code === 0x0d) continue; // discard CR
+        if (kind === 'discard') continue; // discard CR
 
         const result = applyChar(buf, ch, masked);
         buf = result.buf;

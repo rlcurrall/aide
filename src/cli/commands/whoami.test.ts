@@ -126,4 +126,31 @@ describe('getWhoamiStatus', () => {
       expect(s.identity ?? '').not.toContain('super-secret-token');
     }
   });
+
+  test('redacts userinfo from env-var Jira URL', async () => {
+    Bun.env.JIRA_URL = 'https://user:pass@example.atlassian.net';
+    Bun.env.JIRA_EMAIL = 'a@b.c';
+    Bun.env.JIRA_API_TOKEN = 'tkn';
+    const statuses = await getWhoamiStatus({ ghAvailable: () => false });
+    const jira = statuses.find((s) => s.service === 'jira') as WhoamiStatus;
+    expect(jira.identity).toBeTruthy();
+    expect(jira.identity).not.toContain('user:pass');
+    expect(jira.identity).toContain('example.atlassian.net');
+  });
+
+  test('redacts userinfo from stored Jira URL', async () => {
+    store.set(
+      'aide:jira',
+      JSON.stringify({
+        url: 'https://user:pass@example.atlassian.net',
+        email: 'a@b.c',
+        apiToken: 'tkn',
+      })
+    );
+    const statuses = await getWhoamiStatus({ ghAvailable: () => false });
+    const jira = statuses.find((s) => s.service === 'jira') as WhoamiStatus;
+    expect(jira.identity).toBeTruthy();
+    expect(jira.identity).not.toContain('user:pass');
+    expect(jira.identity).toContain('example.atlassian.net');
+  });
 });

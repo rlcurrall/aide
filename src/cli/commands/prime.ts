@@ -40,7 +40,7 @@ async function isJiraConfigured(): Promise<boolean> {
 /**
  * Check if any PR platform is configured (Azure DevOps or GitHub via gh CLI/token/keyring)
  */
-async function isPRPlatformConfigured(): Promise<boolean> {
+async function isPRPlatformConfigured(ghAvailable: () => boolean): Promise<boolean> {
   // Azure DevOps
   const hasAdoOrgUrl = !!process.env.AZURE_DEVOPS_ORG_URL;
   const hasAdoPat = !!process.env.AZURE_DEVOPS_PAT;
@@ -52,7 +52,7 @@ async function isPRPlatformConfigured(): Promise<boolean> {
   if (await hasStoredSecret('github')) return true;
 
   // GitHub via gh CLI
-  if (isGhCliAvailable()) return true;
+  if (ghAvailable()) return true;
 
   return false;
 }
@@ -60,9 +60,9 @@ async function isPRPlatformConfigured(): Promise<boolean> {
 /**
  * Build configuration status section if any service is not configured
  */
-async function buildConfigStatusSection(): Promise<string> {
+async function buildConfigStatusSection(ghAvailable: () => boolean): Promise<string> {
   const jiraConfigured = await isJiraConfigured();
-  const prConfigured = await isPRPlatformConfigured();
+  const prConfigured = await isPRPlatformConfigured(ghAvailable);
 
   // If everything is configured, return empty string (no status section needed)
   if (jiraConfigured && prConfigured) {
@@ -175,8 +175,11 @@ aide pr comment "Needs work"  # auto-detect from branch
 aide pr reply 456 "Fixed the issue" --pr 123
 \`\`\``;
 
-async function buildPrimeOutput(): Promise<string> {
-  const configStatus = await buildConfigStatusSection();
+export async function buildPrimeOutput(
+  opts: { ghAvailable?: () => boolean } = {}
+): Promise<string> {
+  const ghAvailable = opts.ghAvailable ?? isGhCliAvailable;
+  const configStatus = await buildConfigStatusSection(ghAvailable);
 
   const parts = ['# aide - Jira & Git Hosting Integration', ''];
 

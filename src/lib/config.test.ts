@@ -164,4 +164,24 @@ describe('loadAzureDevOpsConfig', () => {
   test('throws when neither is configured', async () => {
     await expect(loadAzureDevOpsConfig()).rejects.toThrow(/not configured/i);
   });
+
+  test('throws with descriptive message when ADO keyring JSON is malformed', async () => {
+    store.set('aide:ado', '{not json');
+    await expect(loadAzureDevOpsConfig()).rejects.toThrow(/aide login ado/i);
+  });
+
+  test('throws with descriptive message when ADO keyring JSON fails schema', async () => {
+    store.set('aide:ado', JSON.stringify({ orgUrl: 'not a url' }));
+    await expect(loadAzureDevOpsConfig()).rejects.toThrow(/aide login ado/i);
+  });
+
+  test('throws "keyring unreachable" when ADO env is missing and keyring backend fails', async () => {
+    restoreSecrets(); // tear down the default mock that was installed in beforeEach
+    const localRestore = installMockSecrets(store, 'get');
+    try {
+      await expect(loadAzureDevOpsConfig()).rejects.toThrow(/keyring is unreachable/i);
+    } finally {
+      localRestore();
+    }
+  });
 });
