@@ -24,7 +24,7 @@ import {
   readJiraEnvForMigration,
   readAdoEnvForMigration,
   readGithubEnvForMigration,
-  type ReadEnvResult,
+  type MigrationError,
 } from '@lib/config.js';
 
 // ---------------------------------------------------------------------------
@@ -52,14 +52,21 @@ function validateNonEmpty(s: string): string | null {
   return s.length === 0 ? 'required' : null;
 }
 
-function formatMigrationError(
-  service: string,
-  result: Extract<ReadEnvResult<unknown>, { kind: 'missing' | 'invalid' }>
-): string {
-  if (result.kind === 'missing') {
-    return `Cannot migrate ${service} from env: missing ${result.missingVars.join(', ')}.`;
+function formatMigrationError(service: string, err: MigrationError): string {
+  if (err.kind === 'missing') {
+    return `Cannot migrate ${service} from env: missing ${err.missingVars.join(', ')}.`;
   }
-  return `Cannot migrate ${service} from env: ${result.reason}.`;
+  return `Cannot migrate ${service} from env: ${err.reason}.`;
+}
+
+function formatUnsetHint(varsUsed: string[]): string {
+  if (varsUsed.length === 0) return '';
+  if (varsUsed.length === 1) {
+    return `Note: ${varsUsed[0]} is still set and takes precedence over the keyring. Unset it to use the keyring.`;
+  }
+  const list =
+    varsUsed.slice(0, -1).join(', ') + ', and ' + varsUsed[varsUsed.length - 1];
+  return `Note: ${list} are still set and take precedence over the keyring. Unset them to use the keyring.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +90,7 @@ export async function loginJira(
       throw new Error(formatMigrationError('Jira', result));
     await setSecret('jira', JSON.stringify(result.value));
     console.log('Migrated Jira credentials from env to keyring.');
+    console.log(formatUnsetHint(result.varsUsed));
     return;
   }
 
@@ -142,6 +150,7 @@ export async function loginAdo(
       throw new Error(formatMigrationError('Azure DevOps', result));
     await setSecret('ado', JSON.stringify(result.value));
     console.log('Migrated Azure DevOps credentials from env to keyring.');
+    console.log(formatUnsetHint(result.varsUsed));
     return;
   }
 
@@ -198,6 +207,7 @@ export async function loginGithub(
       throw new Error(formatMigrationError('GitHub', result));
     await setSecret('github', JSON.stringify(result.value));
     console.log('Migrated GitHub credentials from env to keyring.');
+    console.log(formatUnsetHint(result.varsUsed));
     return 'stored';
   }
 

@@ -181,15 +181,32 @@ describe('login --from-env', () => {
   let envSnap: Map<string, string | undefined>;
   let store: Store;
   let restore: () => void;
+  let logSpy: { messages: string[]; restore: () => void };
+
+  function installLogSpy() {
+    const messages: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      messages.push(args.join(' '));
+    };
+    return {
+      messages,
+      restore: () => {
+        console.log = original;
+      },
+    };
+  }
 
   beforeEach(() => {
     envSnap = saveEnv([...JIRA_VARS, ...ADO_VARS, ...GITHUB_VARS]);
     store = new Map();
     Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
     restore = installMockSecrets(store);
+    logSpy = installLogSpy();
   });
 
   afterEach(() => {
+    logSpy.restore();
     restoreEnv(envSnap);
     restore();
   });
@@ -203,6 +220,44 @@ describe('login --from-env', () => {
     expect(stored.url).toBe('https://x.atlassian.net');
     expect(stored.email).toBe('a@b.c');
     expect(stored.apiToken).toBe('tkn');
+  });
+
+  test('loginJira --from-env success message lists env vars to unset', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_EMAIL = 'a@b.c';
+    Bun.env.JIRA_API_TOKEN = 'tkn';
+    await loginJira({ fromEnv: true });
+    const output = logSpy.messages.join('\n');
+    expect(output).toMatch(/JIRA_URL.*JIRA_EMAIL.*JIRA_API_TOKEN/);
+    expect(output).toMatch(/Unset them/i);
+  });
+
+  test('loginJira --from-env hint uses whichever alias is set', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_USERNAME = 'user@b.c';
+    Bun.env.JIRA_TOKEN = 'tkn';
+    await loginJira({ fromEnv: true });
+    const output = logSpy.messages.join('\n');
+    expect(output).toContain('JIRA_USERNAME');
+    expect(output).toContain('JIRA_TOKEN');
+    expect(output).not.toContain('JIRA_EMAIL,');
+    expect(output).not.toContain('JIRA_API_TOKEN,');
+  });
+
+  test('loginGithub --from-env hint names GITHUB_TOKEN when that alias is set', async () => {
+    Bun.env.GITHUB_TOKEN = 'ghp_xxx';
+    await loginGithub({ fromEnv: true }, { ghAvailable: () => false });
+    const output = logSpy.messages.join('\n');
+    expect(output).toContain('GITHUB_TOKEN');
+    expect(output).toMatch(/Unset it/i);
+  });
+
+  test('loginGithub --from-env hint names GH_TOKEN when that alias is set', async () => {
+    Bun.env.GH_TOKEN = 'ghp_yyy';
+    await loginGithub({ fromEnv: true }, { ghAvailable: () => false });
+    const output = logSpy.messages.join('\n');
+    expect(output).toContain('GH_TOKEN');
+    expect(output).not.toContain('GITHUB_TOKEN');
   });
 
   test('loginJira --from-env accepts JIRA_USERNAME / JIRA_TOKEN aliases', async () => {
