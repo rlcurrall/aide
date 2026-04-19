@@ -109,34 +109,34 @@ aide <service> <action> [options]
 
 ### Services
 
-| Service   | Description                  |
-| --------- | ---------------------------- |
-| `jira`    | Jira ticket management       |
-| `pr`      | Pull request management      |
-| `plugin`  | Claude Code plugin manager   |
-| `prime`   | Output aide context          |
-| `upgrade` | Upgrade aide to latest       |
-| `login`   | Save credentials to keyring  |
-| `logout`  | Remove stored credentials    |
-| `whoami`  | Show credential sources      |
+| Service   | Description                 |
+| --------- | --------------------------- |
+| `jira`    | Jira ticket management      |
+| `pr`      | Pull request management     |
+| `plugin`  | Claude Code plugin manager  |
+| `prime`   | Output aide context         |
+| `upgrade` | Upgrade aide to latest      |
+| `login`   | Save credentials to keyring |
+| `logout`  | Remove stored credentials   |
+| `whoami`  | Show credential sources     |
 
 ### Jira Commands
 
-| Command                                       | Description                        |
-| --------------------------------------------- | ---------------------------------- |
-| `aide jira search <jql>`                      | Search tickets using JQL           |
-| `aide jira view <key>`                        | Get ticket details                 |
-| `aide jira create -p PROJ -t Task -s "..."`   | Create a ticket                    |
-| `aide jira update <key>`                      | Update ticket fields               |
-| `aide jira transition <key> <status>`         | Change workflow status             |
-| `aide jira comment <key> <text>`              | Add comment to ticket              |
-| `aide jira comments <key>`                    | Get ticket comments                |
-| `aide jira delete-comment <key> <id>`         | Delete a comment                   |
-| `aide jira edit-comment <key> <id> <text>`    | Edit a comment                     |
-| `aide jira attach <key>`                      | Manage attachments                 |
-| `aide jira fields <project>`                  | Discover available fields          |
-| `aide jira boards <project>`                  | List boards for a project          |
-| `aide jira sprint <board-id>`                 | Get sprint info for a board        |
+| Command                                     | Description                 |
+| ------------------------------------------- | --------------------------- |
+| `aide jira search <jql>`                    | Search tickets using JQL    |
+| `aide jira view <key>`                      | Get ticket details          |
+| `aide jira create -p PROJ -t Task -s "..."` | Create a ticket             |
+| `aide jira update <key>`                    | Update ticket fields        |
+| `aide jira transition <key> <status>`       | Change workflow status      |
+| `aide jira comment <key> <text>`            | Add comment to ticket       |
+| `aide jira comments <key>`                  | Get ticket comments         |
+| `aide jira delete-comment <key> <id>`       | Delete a comment            |
+| `aide jira edit-comment <key> <id> <text>`  | Edit a comment              |
+| `aide jira attach <key>`                    | Manage attachments          |
+| `aide jira fields <project>`                | Discover available fields   |
+| `aide jira boards <project>`                | List boards for a project   |
+| `aide jira sprint <board-id>`               | Get sprint info for a board |
 
 ### Pull Request Commands
 
@@ -241,6 +241,14 @@ aide login github   # no-op if gh CLI is authenticated
 ```
 
 Run `aide whoami` to see what's configured and where it's coming from, and `aide logout <service>` to remove a stored entry.
+
+If you already have credentials in environment variables and want to promote them into the keyring without retyping, use `--from-env`:
+
+```bash
+aide login jira --from-env     # reads JIRA_URL / JIRA_EMAIL / JIRA_API_TOKEN
+aide login ado --from-env      # reads AZURE_DEVOPS_ORG_URL / AZURE_DEVOPS_PAT
+aide login github --from-env   # reads GITHUB_TOKEN (or GH_TOKEN)
+```
 
 Environment variables (below) remain supported and take precedence over the keyring. This is the recommended path for CI and other headless contexts.
 
