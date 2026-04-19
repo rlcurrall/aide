@@ -1,5 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { getWhoamiStatus, type WhoamiStatus } from './whoami.js';
+import {
+  getWhoamiStatus,
+  buildWhoamiOutput,
+  type WhoamiStatus,
+} from './whoami.js';
 import {
   installMockSecrets,
   saveEnv,
@@ -163,5 +167,70 @@ describe('getWhoamiStatus', () => {
     const statuses = await getWhoamiStatus({ ghAvailable: () => false });
     const gh = statuses.find((s) => s.service === 'github') as WhoamiStatus;
     expect(gh.source).toBe('corrupted');
+  });
+});
+
+describe('buildWhoamiOutput', () => {
+  let snap: Map<string, string | undefined>;
+  let store: Store;
+  let restoreSecrets: () => void;
+
+  beforeEach(() => {
+    snap = saveEnv([...JIRA_VARS, ...ADO_VARS, ...GITHUB_VARS]);
+    store = new Map();
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
+    restoreSecrets = installMockSecrets(store);
+  });
+
+  afterEach(() => {
+    restoreEnv(snap);
+    restoreSecrets();
+  });
+
+  test('appends migration tip for services sourced from env', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_EMAIL = 'a@b.c';
+    Bun.env.JIRA_API_TOKEN = 'tkn';
+    const out = await buildWhoamiOutput({ ghAvailable: () => false });
+    expect(out).toMatch(/aide login jira --from-env/);
+  });
+
+  test('omits tip when no service is sourced from env', async () => {
+    store.set(
+      'aide:jira',
+      JSON.stringify({
+        url: 'https://x.atlassian.net',
+        email: 'a@b.c',
+        apiToken: 'tkn',
+      })
+    );
+    const out = await buildWhoamiOutput({ ghAvailable: () => false });
+    expect(out).not.toMatch(/--from-env/);
+  });
+
+  test('omits tip when github is authenticated via gh CLI', async () => {
+    const out = await buildWhoamiOutput({ ghAvailable: () => true });
+    // gh-cli is NOT env source, so no tip
+    expect(out).not.toMatch(/--from-env/);
+  });
+
+  test('emits tip for github when GITHUB_TOKEN is the source', async () => {
+    Bun.env.GITHUB_TOKEN = 'ghp_xxx';
+    const out = await buildWhoamiOutput({ ghAvailable: () => false });
+    expect(out).toMatch(/aide login github --from-env/);
+  });
+
+  test('filters tip to selected service only', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_EMAIL = 'a@b.c';
+    Bun.env.JIRA_API_TOKEN = 'tkn';
+    Bun.env.AZURE_DEVOPS_ORG_URL = 'https://dev.azure.com/org';
+    Bun.env.AZURE_DEVOPS_PAT = 'pat';
+    const out = await buildWhoamiOutput({
+      ghAvailable: () => false,
+      service: 'jira',
+    });
+    expect(out).toMatch(/aide login jira --from-env/);
+    expect(out).not.toMatch(/aide login ado --from-env/);
   });
 });

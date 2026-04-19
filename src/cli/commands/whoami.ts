@@ -155,6 +155,30 @@ function formatStatus(s: WhoamiStatus): string {
   }
 }
 
+/**
+ * Compose the full whoami output, including a migration hint when any
+ * service is sourced from env vars. Exported for tests.
+ */
+export async function buildWhoamiOutput(
+  opts: { ghAvailable?: () => boolean; service?: ServiceName } = {}
+): Promise<string> {
+  const statuses = await getWhoamiStatus({ ghAvailable: opts.ghAvailable });
+  const filtered = opts.service
+    ? statuses.filter((s) => s.service === opts.service)
+    : statuses;
+  const lines = filtered.map(formatStatus);
+  const migratable = filtered.filter((s) => s.source === 'env');
+  if (migratable.length > 0) {
+    lines.push('');
+    for (const s of migratable) {
+      lines.push(
+        `tip: run 'aide login ${s.service} --from-env' to store in the keyring`
+      );
+    }
+  }
+  return lines.join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // yargs wiring
 // ---------------------------------------------------------------------------
@@ -174,13 +198,8 @@ const command: CommandModule<object, Args> = {
     },
   },
   handler: async (argv: ArgumentsCamelCase<Args>) => {
-    const statuses = await getWhoamiStatus();
-    const filtered = argv.service
-      ? statuses.filter((s) => s.service === argv.service)
-      : statuses;
-    for (const s of filtered) {
-      console.log(formatStatus(s));
-    }
+    const output = await buildWhoamiOutput({ service: argv.service });
+    console.log(output);
   },
 };
 
