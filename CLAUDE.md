@@ -267,7 +267,13 @@ Use `aide login <service>` to store credentials in the OS keyring (macOS Keychai
     aide login ado      # prompts for org URL, PAT
     aide login github   # stores token if gh CLI is unavailable
 
-Check what's configured with `aide whoami`. Remove with `aide logout <service>`.
+To migrate existing env var credentials into the keyring without retyping, pass `--from-env`:
+
+    aide login jira --from-env
+    aide login ado --from-env
+    aide login github --from-env
+
+Check what's configured with `aide whoami` (prints a hint when any service is sourced from env). Remove with `aide logout <service>`.
 
 ### Environment Variables (Fallback)
 
