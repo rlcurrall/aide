@@ -12,6 +12,10 @@ import {
   probeJiraConfig,
   probeAdoConfig,
   probeGithubConfig,
+  isKeyringCredentialValid,
+  activeJiraEnvVars,
+  activeAdoEnvVars,
+  activeGithubEnvVars,
 } from '@lib/config.js';
 
 export type ServiceName = 'jira' | 'ado' | 'github';
@@ -26,6 +30,13 @@ export interface WhoamiStatus {
   service: ServiceName;
   source: WhoamiSource;
   identity: string | null;
+  // Populated only when source === 'env': the list of env vars currently
+  // set for this service (used by the migration tip in buildWhoamiOutput).
+  envVarsSet?: string[];
+  // Populated only when source === 'env': true if the keyring also holds a
+  // valid credential blob for this service (i.e. env is shadowing the
+  // keyring). Drives which flavor of tip whoami prints.
+  keyringAlsoConfigured?: boolean;
 }
 
 function redactUrlUserInfo(raw: string): string {
@@ -56,10 +67,13 @@ async function statusJira(): Promise<WhoamiStatus> {
   const status = await probeJiraConfig();
 
   if (status.kind === 'env') {
+    const keyringAlsoConfigured = await isKeyringCredentialValid('jira');
     return {
       service: 'jira',
       source: 'env',
       identity: `${status.value.email} at ${redactUrlUserInfo(status.value.url)}`,
+      envVarsSet: activeJiraEnvVars(),
+      keyringAlsoConfigured,
     };
   }
   if (status.kind === 'keyring') {
@@ -84,10 +98,13 @@ async function statusAdo(): Promise<WhoamiStatus> {
   const status = await probeAdoConfig();
 
   if (status.kind === 'env') {
+    const keyringAlsoConfigured = await isKeyringCredentialValid('ado');
     return {
       service: 'ado',
       source: 'env',
       identity: `${redactUrlUserInfo(status.value.orgUrl)} (${status.value.authMethod})`,
+      envVarsSet: activeAdoEnvVars(),
+      keyringAlsoConfigured,
     };
   }
   if (status.kind === 'keyring') {
@@ -119,7 +136,14 @@ async function statusGithub(opts: {
       return { service: 'github', source: 'gh-cli', identity: null };
     }
     // source === 'env' (GITHUB_TOKEN / GH_TOKEN)
-    return { service: 'github', source: 'env', identity: null };
+    const keyringAlsoConfigured = await isKeyringCredentialValid('github');
+    return {
+      service: 'github',
+      source: 'env',
+      identity: null,
+      envVarsSet: activeGithubEnvVars(),
+      keyringAlsoConfigured,
+    };
   }
   if (status.kind === 'keyring') {
     return { service: 'github', source: 'keyring', identity: null };
@@ -158,6 +182,11 @@ function formatStatus(s: WhoamiStatus): string {
 /**
  * Compose the full whoami output, including a migration hint when any
  * service is sourced from env vars. Exported for tests.
+ *
+ * Two tip flavors:
+ *  - env-only (keyring empty): suggest running `aide login <svc> --from-env`
+ *  - env+keyring (migration already done): list the env vars overriding the
+ *    keyring and suggest unsetting them
  */
 export async function buildWhoamiOutput(
   opts: { ghAvailable?: () => boolean; service?: ServiceName } = {}
@@ -167,13 +196,19 @@ export async function buildWhoamiOutput(
     ? statuses.filter((s) => s.service === opts.service)
     : statuses;
   const lines = filtered.map(formatStatus);
-  const migratable = filtered.filter((s) => s.source === 'env');
-  if (migratable.length > 0) {
+  const envSourced = filtered.filter((s) => s.source === 'env');
+  if (envSourced.length > 0) {
     lines.push('');
-    for (const s of migratable) {
-      lines.push(
-        `tip: run 'aide login ${s.service} --from-env' to store in the keyring`
-      );
+    for (const s of envSourced) {
+      if (s.keyringAlsoConfigured && s.envVarsSet && s.envVarsSet.length > 0) {
+        lines.push(
+          `tip: ${s.envVarsSet.join(', ')} override your stored keyring entry. Unset to use the keyring.`
+        );
+      } else {
+        lines.push(
+          `tip: run 'aide login ${s.service} --from-env' to store in the keyring`
+        );
+      }
     }
   }
   return lines.join('\n');

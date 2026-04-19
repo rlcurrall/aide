@@ -233,4 +233,59 @@ describe('buildWhoamiOutput', () => {
     expect(out).toMatch(/aide login jira --from-env/);
     expect(out).not.toMatch(/aide login ado --from-env/);
   });
+
+  test('switches tip wording when env and keyring both have valid creds', async () => {
+    // Simulate post-migration state: env still set, keyring populated.
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_EMAIL = 'a@b.c';
+    Bun.env.JIRA_API_TOKEN = 'tkn';
+    store.set(
+      'aide:jira',
+      JSON.stringify({
+        url: 'https://x.atlassian.net',
+        email: 'a@b.c',
+        apiToken: 'tkn',
+      })
+    );
+    const out = await buildWhoamiOutput({ ghAvailable: () => false });
+    expect(out).toMatch(/override your stored keyring entry/);
+    expect(out).toMatch(/JIRA_URL.*JIRA_EMAIL.*JIRA_API_TOKEN/);
+    expect(out).not.toMatch(/aide login jira --from-env/);
+  });
+
+  test('post-migration tip names only the aliases actually set', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_USERNAME = 'user@b.c';
+    Bun.env.JIRA_TOKEN = 'tkn';
+    store.set(
+      'aide:jira',
+      JSON.stringify({
+        url: 'https://x.atlassian.net',
+        email: 'user@b.c',
+        apiToken: 'tkn',
+      })
+    );
+    const out = await buildWhoamiOutput({ ghAvailable: () => false });
+    expect(out).toContain('JIRA_USERNAME');
+    expect(out).toContain('JIRA_TOKEN');
+    expect(out).not.toContain('JIRA_EMAIL,');
+  });
+
+  test('falls back to migration tip when keyring blob is corrupted', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_EMAIL = 'a@b.c';
+    Bun.env.JIRA_API_TOKEN = 'tkn';
+    store.set('aide:jira', '{not json');
+    const out = await buildWhoamiOutput({ ghAvailable: () => false });
+    // Corrupted keyring is treated as absent - keep the original tip
+    expect(out).toMatch(/aide login jira --from-env/);
+    expect(out).not.toMatch(/override your stored keyring entry/);
+  });
+
+  test('env+keyring tip triggers for github when both are valid', async () => {
+    Bun.env.GITHUB_TOKEN = 'ghp_env';
+    store.set('aide:github', JSON.stringify({ token: 'ghp_keyring' }));
+    const out = await buildWhoamiOutput({ ghAvailable: () => false });
+    expect(out).toMatch(/GITHUB_TOKEN.*override your stored keyring entry/);
+  });
 });
