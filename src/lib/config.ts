@@ -294,6 +294,67 @@ export async function probeGithubConfig(
 }
 
 // ---------------------------------------------------------------------------
+// Env-to-stored helpers (used by `aide login <service> --from-env`)
+// ---------------------------------------------------------------------------
+//
+// These report explicitly which env vars are missing so the login command
+// can produce actionable errors, and narrow the env values to the Stored*
+// schema (no user preferences like defaultProject).
+
+export type ReadEnvResult<T> =
+  | { kind: 'ok'; value: T }
+  | { kind: 'missing'; missingVars: string[] }
+  | { kind: 'invalid'; reason: string };
+
+export function readJiraEnvForMigration(): ReadEnvResult<
+  v.InferOutput<typeof StoredJiraSchema>
+> {
+  const url = Bun.env.JIRA_URL;
+  const email = Bun.env.JIRA_EMAIL || Bun.env.JIRA_USERNAME;
+  const apiToken = Bun.env.JIRA_API_TOKEN || Bun.env.JIRA_TOKEN;
+  const missing: string[] = [];
+  if (!url) missing.push('JIRA_URL');
+  if (!email) missing.push('JIRA_EMAIL (or JIRA_USERNAME)');
+  if (!apiToken) missing.push('JIRA_API_TOKEN (or JIRA_TOKEN)');
+  if (missing.length > 0) return { kind: 'missing', missingVars: missing };
+  const parsed = v.safeParse(StoredJiraSchema, { url, email, apiToken });
+  if (!parsed.success)
+    return { kind: 'invalid', reason: formatIssues(parsed.issues) };
+  return { kind: 'ok', value: parsed.output };
+}
+
+export function readAdoEnvForMigration(): ReadEnvResult<
+  v.InferOutput<typeof StoredAdoSchema>
+> {
+  const orgUrl = Bun.env.AZURE_DEVOPS_ORG_URL;
+  const pat = Bun.env.AZURE_DEVOPS_PAT;
+  const missing: string[] = [];
+  if (!orgUrl) missing.push('AZURE_DEVOPS_ORG_URL');
+  if (!pat) missing.push('AZURE_DEVOPS_PAT');
+  if (missing.length > 0) return { kind: 'missing', missingVars: missing };
+  const parsed = v.safeParse(StoredAdoSchema, {
+    orgUrl,
+    pat,
+    authMethod: Bun.env.AZURE_DEVOPS_AUTH_METHOD || 'pat',
+  });
+  if (!parsed.success)
+    return { kind: 'invalid', reason: formatIssues(parsed.issues) };
+  return { kind: 'ok', value: parsed.output };
+}
+
+export function readGithubEnvForMigration(): ReadEnvResult<
+  v.InferOutput<typeof StoredGithubSchema>
+> {
+  const token = Bun.env.GITHUB_TOKEN || Bun.env.GH_TOKEN;
+  if (!token)
+    return { kind: 'missing', missingVars: ['GITHUB_TOKEN (or GH_TOKEN)'] };
+  const parsed = v.safeParse(StoredGithubSchema, { token });
+  if (!parsed.success)
+    return { kind: 'invalid', reason: formatIssues(parsed.issues) };
+  return { kind: 'ok', value: parsed.output };
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

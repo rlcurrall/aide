@@ -10,7 +10,26 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 
 import { loginJira, loginAdo, loginGithub } from './login.js';
 import type { Prompter, ReadLineOptions } from '@lib/prompts.js';
-import { installMockSecrets, type Store } from '@lib/test-helpers.js';
+import {
+  installMockSecrets,
+  saveEnv,
+  restoreEnv,
+  type Store,
+} from '@lib/test-helpers.js';
+
+const JIRA_VARS = [
+  'JIRA_URL',
+  'JIRA_EMAIL',
+  'JIRA_USERNAME',
+  'JIRA_API_TOKEN',
+  'JIRA_TOKEN',
+];
+const ADO_VARS = [
+  'AZURE_DEVOPS_ORG_URL',
+  'AZURE_DEVOPS_PAT',
+  'AZURE_DEVOPS_AUTH_METHOD',
+];
+const GITHUB_VARS = ['GITHUB_TOKEN', 'GH_TOKEN'];
 
 class ScriptedPrompter implements Prompter {
   private inputs: string[];
@@ -58,21 +77,14 @@ describe('loginJira', () => {
 
   test('prompts for missing fields only', async () => {
     const p = new ScriptedPrompter(['a@b.c', 'tkn']);
-    await loginJira(
-      { url: 'https://x.atlassian.net' },
-      { prompter: p }
-    );
+    await loginJira({ url: 'https://x.atlassian.net' }, { prompter: p });
     const stored = JSON.parse(store.get('aide:jira') ?? '{}');
     expect(stored.email).toBe('a@b.c');
     expect(stored.apiToken).toBe('tkn');
   });
 
   test('prompts for all fields when no flags supplied', async () => {
-    const p = new ScriptedPrompter([
-      'https://x.atlassian.net',
-      'a@b.c',
-      'tkn',
-    ]);
+    const p = new ScriptedPrompter(['https://x.atlassian.net', 'a@b.c', 'tkn']);
     await loginJira({}, { prompter: p });
     expect(store.has('aide:jira')).toBe(true);
   });
@@ -162,5 +174,108 @@ describe('loginGithub', () => {
     expect(result).toBe('stored');
     const stored = JSON.parse(store.get('aide:github') ?? '{}');
     expect(stored.token).toBe('ghp_xxx');
+  });
+});
+
+describe('login --from-env', () => {
+  let envSnap: Map<string, string | undefined>;
+  let store: Store;
+  let restore: () => void;
+
+  beforeEach(() => {
+    envSnap = saveEnv([...JIRA_VARS, ...ADO_VARS, ...GITHUB_VARS]);
+    store = new Map();
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
+    restore = installMockSecrets(store);
+  });
+
+  afterEach(() => {
+    restoreEnv(envSnap);
+    restore();
+  });
+
+  test('loginJira --from-env writes env vars to keyring', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_EMAIL = 'a@b.c';
+    Bun.env.JIRA_API_TOKEN = 'tkn';
+    await loginJira({ fromEnv: true });
+    const stored = JSON.parse(store.get('aide:jira') ?? '{}');
+    expect(stored.url).toBe('https://x.atlassian.net');
+    expect(stored.email).toBe('a@b.c');
+    expect(stored.apiToken).toBe('tkn');
+  });
+
+  test('loginJira --from-env accepts JIRA_USERNAME / JIRA_TOKEN aliases', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    Bun.env.JIRA_USERNAME = 'user@b.c';
+    Bun.env.JIRA_TOKEN = 'tkn';
+    await loginJira({ fromEnv: true });
+    const stored = JSON.parse(store.get('aide:jira') ?? '{}');
+    expect(stored.email).toBe('user@b.c');
+    expect(stored.apiToken).toBe('tkn');
+  });
+
+  test('loginJira --from-env lists missing vars when env is incomplete', async () => {
+    Bun.env.JIRA_URL = 'https://x.atlassian.net';
+    await expect(loginJira({ fromEnv: true })).rejects.toThrow(
+      /JIRA_EMAIL.*JIRA_API_TOKEN/
+    );
+    expect(store.has('aide:jira')).toBe(false);
+  });
+
+  test('loginJira --from-env reports invalid env values', async () => {
+    Bun.env.JIRA_URL = 'not-a-url';
+    Bun.env.JIRA_EMAIL = 'a@b.c';
+    Bun.env.JIRA_API_TOKEN = 'tkn';
+    await expect(loginJira({ fromEnv: true })).rejects.toThrow(/URL/);
+  });
+
+  test('loginAdo --from-env writes env vars to keyring', async () => {
+    Bun.env.AZURE_DEVOPS_ORG_URL = 'https://dev.azure.com/org';
+    Bun.env.AZURE_DEVOPS_PAT = 'pat';
+    await loginAdo({ fromEnv: true });
+    const stored = JSON.parse(store.get('aide:ado') ?? '{}');
+    expect(stored.orgUrl).toBe('https://dev.azure.com/org');
+    expect(stored.pat).toBe('pat');
+    expect(stored.authMethod).toBe('pat');
+  });
+
+  test('loginAdo --from-env respects AZURE_DEVOPS_AUTH_METHOD', async () => {
+    Bun.env.AZURE_DEVOPS_ORG_URL = 'https://dev.azure.com/org';
+    Bun.env.AZURE_DEVOPS_PAT = 'pat';
+    Bun.env.AZURE_DEVOPS_AUTH_METHOD = 'bearer';
+    await loginAdo({ fromEnv: true });
+    const stored = JSON.parse(store.get('aide:ado') ?? '{}');
+    expect(stored.authMethod).toBe('bearer');
+  });
+
+  test('loginAdo --from-env lists missing vars', async () => {
+    await expect(loginAdo({ fromEnv: true })).rejects.toThrow(
+      /AZURE_DEVOPS_ORG_URL.*AZURE_DEVOPS_PAT/
+    );
+  });
+
+  test('loginGithub --from-env writes GITHUB_TOKEN to keyring even when gh-cli is available', async () => {
+    Bun.env.GITHUB_TOKEN = 'ghp_xxx';
+    const result = await loginGithub(
+      { fromEnv: true },
+      { ghAvailable: () => true }
+    );
+    expect(result).toBe('stored');
+    const stored = JSON.parse(store.get('aide:github') ?? '{}');
+    expect(stored.token).toBe('ghp_xxx');
+  });
+
+  test('loginGithub --from-env accepts GH_TOKEN alias', async () => {
+    Bun.env.GH_TOKEN = 'ghp_yyy';
+    await loginGithub({ fromEnv: true }, { ghAvailable: () => false });
+    const stored = JSON.parse(store.get('aide:github') ?? '{}');
+    expect(stored.token).toBe('ghp_yyy');
+  });
+
+  test('loginGithub --from-env errors when no token is in env', async () => {
+    await expect(
+      loginGithub({ fromEnv: true }, { ghAvailable: () => false })
+    ).rejects.toThrow(/GITHUB_TOKEN/);
   });
 });
