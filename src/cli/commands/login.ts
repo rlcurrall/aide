@@ -11,11 +11,7 @@
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 import * as v from 'valibot';
 
-import {
-  text,
-  password,
-  type Prompter,
-} from '@lib/prompts.js';
+import { text, password, type Prompter } from '@lib/prompts.js';
 import { setSecret } from '@lib/secrets.js';
 import {
   StoredJiraSchema,
@@ -24,6 +20,12 @@ import {
   type AuthMethod,
 } from '@schemas/config.js';
 import { isGhCliAvailable } from '@lib/gh-utils.js';
+import {
+  readJiraEnvForMigration,
+  readAdoEnvForMigration,
+  readGithubEnvForMigration,
+  type ReadEnvResult,
+} from '@lib/config.js';
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -50,6 +52,16 @@ function validateNonEmpty(s: string): string | null {
   return s.length === 0 ? 'required' : null;
 }
 
+function formatMigrationError(
+  service: string,
+  result: Extract<ReadEnvResult<unknown>, { kind: 'missing' | 'invalid' }>
+): string {
+  if (result.kind === 'missing') {
+    return `Cannot migrate ${service} from env: missing ${result.missingVars.join(', ')}.`;
+  }
+  return `Cannot migrate ${service} from env: ${result.reason}.`;
+}
+
 // ---------------------------------------------------------------------------
 // Jira
 // ---------------------------------------------------------------------------
@@ -58,12 +70,22 @@ export interface JiraLoginFlags {
   url?: string;
   email?: string;
   token?: string;
+  fromEnv?: boolean;
 }
 
 export async function loginJira(
   flags: JiraLoginFlags,
   opts: { prompter?: Prompter } = {}
 ): Promise<void> {
+  if (flags.fromEnv) {
+    const result = readJiraEnvForMigration();
+    if (result.kind !== 'ok')
+      throw new Error(formatMigrationError('Jira', result));
+    await setSecret('jira', JSON.stringify(result.value));
+    console.log('Migrated Jira credentials from env to keyring.');
+    return;
+  }
+
   let pipedToken: string | null = null;
   if (!flags.token && !opts.prompter && !process.stdin.isTTY) {
     pipedToken = (await readStdin()).trim();
@@ -86,7 +108,9 @@ export async function loginJira(
     }));
 
   const token =
-    flags.token ?? pipedToken ?? (await password({ label: 'API token', prompter: opts.prompter }));
+    flags.token ??
+    pipedToken ??
+    (await password({ label: 'API token', prompter: opts.prompter }));
 
   const validated = v.parse(StoredJiraSchema, {
     url,
@@ -105,12 +129,22 @@ export interface AdoLoginFlags {
   orgUrl?: string;
   pat?: string;
   authMethod?: AuthMethod;
+  fromEnv?: boolean;
 }
 
 export async function loginAdo(
   flags: AdoLoginFlags,
   opts: { prompter?: Prompter } = {}
 ): Promise<void> {
+  if (flags.fromEnv) {
+    const result = readAdoEnvForMigration();
+    if (result.kind !== 'ok')
+      throw new Error(formatMigrationError('Azure DevOps', result));
+    await setSecret('ado', JSON.stringify(result.value));
+    console.log('Migrated Azure DevOps credentials from env to keyring.');
+    return;
+  }
+
   let pipedToken: string | null = null;
   if (!flags.pat && !opts.prompter && !process.stdin.isTTY) {
     pipedToken = (await readStdin()).trim();
@@ -125,7 +159,9 @@ export async function loginAdo(
     }));
 
   const pat =
-    flags.pat ?? pipedToken ?? (await password({ label: 'PAT', prompter: opts.prompter }));
+    flags.pat ??
+    pipedToken ??
+    (await password({ label: 'PAT', prompter: opts.prompter }));
 
   const authMethod: AuthMethod = flags.authMethod ?? 'pat';
 
@@ -144,6 +180,7 @@ export async function loginAdo(
 
 export interface GithubLoginFlags {
   token?: string;
+  fromEnv?: boolean;
 }
 
 export async function loginGithub(
@@ -153,6 +190,17 @@ export async function loginGithub(
     ghAvailable?: () => boolean;
   } = {}
 ): Promise<'gh-cli' | 'stored'> {
+  // --from-env migrates an explicit token from env regardless of gh-cli state,
+  // since the user's intent is to promote that token into the keyring.
+  if (flags.fromEnv) {
+    const result = readGithubEnvForMigration();
+    if (result.kind !== 'ok')
+      throw new Error(formatMigrationError('GitHub', result));
+    await setSecret('github', JSON.stringify(result.value));
+    console.log('Migrated GitHub credentials from env to keyring.');
+    return 'stored';
+  }
+
   const ghCheck = opts.ghAvailable ?? isGhCliAvailable;
   if (ghCheck()) {
     console.log('Using gh CLI auth. Nothing to do.');
@@ -165,7 +213,9 @@ export async function loginGithub(
   }
 
   const token =
-    flags.token ?? pipedToken ?? (await password({ label: 'GitHub token', prompter: opts.prompter }));
+    flags.token ??
+    pipedToken ??
+    (await password({ label: 'GitHub token', prompter: opts.prompter }));
 
   const validated = v.parse(StoredGithubSchema, { token });
   await setSecret('github', JSON.stringify(validated));
@@ -181,14 +231,17 @@ interface JiraArgs {
   url?: string;
   email?: string;
   token?: string;
+  'from-env'?: boolean;
 }
 interface AdoArgs {
   'org-url'?: string;
   pat?: string;
   'auth-method'?: AuthMethod;
+  'from-env'?: boolean;
 }
 interface GithubArgs {
   token?: string;
+  'from-env'?: boolean;
 }
 
 const command: CommandModule = {
@@ -199,45 +252,67 @@ const command: CommandModule = {
       .command({
         command: 'jira',
         describe: 'Save Jira credentials',
-        builder: {
-          url: { type: 'string', describe: 'Jira URL' },
-          email: { type: 'string', describe: 'Jira email' },
-          token: { type: 'string', describe: 'Jira API token' },
-        },
+        builder: (y) =>
+          y
+            .option('url', { type: 'string', describe: 'Jira URL' })
+            .option('email', { type: 'string', describe: 'Jira email' })
+            .option('token', { type: 'string', describe: 'Jira API token' })
+            .option('from-env', {
+              type: 'boolean',
+              describe:
+                'Migrate JIRA_URL / JIRA_EMAIL / JIRA_API_TOKEN into the keyring',
+              default: false,
+            })
+            .conflicts('from-env', ['url', 'email', 'token']),
         handler: async (argv: ArgumentsCamelCase<JiraArgs>) =>
           await loginJira({
             url: argv.url,
             email: argv.email,
             token: argv.token,
+            fromEnv: argv['from-env'],
           }),
       })
       .command({
         command: 'ado',
         describe: 'Save Azure DevOps credentials',
-        builder: {
-          'org-url': { type: 'string', describe: 'ADO org URL' },
-          pat: { type: 'string', describe: 'ADO PAT' },
-          'auth-method': {
-            type: 'string',
-            choices: ['pat', 'bearer'] as const,
-            describe: 'Auth method (default: pat)',
-          },
-        },
+        builder: (y) =>
+          y
+            .option('org-url', { type: 'string', describe: 'ADO org URL' })
+            .option('pat', { type: 'string', describe: 'ADO PAT' })
+            .option('auth-method', {
+              type: 'string',
+              choices: ['pat', 'bearer'] as const,
+              describe: 'Auth method (default: pat)',
+            })
+            .option('from-env', {
+              type: 'boolean',
+              describe:
+                'Migrate AZURE_DEVOPS_ORG_URL / AZURE_DEVOPS_PAT into the keyring',
+              default: false,
+            })
+            .conflicts('from-env', ['org-url', 'pat', 'auth-method']),
         handler: async (argv: ArgumentsCamelCase<AdoArgs>) =>
           await loginAdo({
             orgUrl: argv['org-url'],
             pat: argv.pat,
             authMethod: argv['auth-method'],
+            fromEnv: argv['from-env'],
           }),
       })
       .command({
         command: 'github',
         describe: 'Save GitHub token (only if gh CLI is unavailable)',
-        builder: {
-          token: { type: 'string', describe: 'GitHub token' },
-        },
+        builder: (y) =>
+          y
+            .option('token', { type: 'string', describe: 'GitHub token' })
+            .option('from-env', {
+              type: 'boolean',
+              describe: 'Migrate GITHUB_TOKEN / GH_TOKEN into the keyring',
+              default: false,
+            })
+            .conflicts('from-env', ['token']),
         handler: async (argv: ArgumentsCamelCase<GithubArgs>) => {
-          await loginGithub({ token: argv.token });
+          await loginGithub({ token: argv.token, fromEnv: argv['from-env'] });
         },
       })
       .demandCommand(1, 'Specify a service: jira, ado, or github'),
