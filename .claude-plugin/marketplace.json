@@ -9,7 +9,7 @@
       "name": "aide",
       "source": "./",
       "description": "AI agent integration with Jira, Azure DevOps, and GitHub",
-      "version": "0.0.17"
+      "version": "0.0.18"
     }
   ]
 }
