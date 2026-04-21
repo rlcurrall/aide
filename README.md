@@ -137,6 +137,7 @@ aide <service> <action> [options]
 | `aide jira fields <project>`                | Discover available fields   |
 | `aide jira boards <project>`                | List boards for a project   |
 | `aide jira sprint <board-id>`               | Get sprint info for a board |
+| `aide jira api <endpoint>`                  | Call Jira REST API directly |
 
 ### Pull Request Commands
 
@@ -172,7 +173,30 @@ aide jira comments PROJ-123 --latest 5
 
 # Update description
 aide jira update PROJ-123 --description "New description text"
+
+# Call Jira REST API directly (for endpoints not covered by typed commands)
+aide jira api /rest/api/3/statuses                              # GET request
+aide jira api /rest/api/3/issues -X POST --input issue.json      # POST from file
+aide jira api /rest/api/3/users/search -X POST < users.json      # POST from stdin
+aide jira api /rest/api/3/projects/PROJ -f param=value          # String field parameter
+aide jira api /rest/api/3/version -H "X-Custom-Header: value"    # Custom header
 ```
+
+#### Raw API Passthrough
+
+The `aide jira api <endpoint>` command mirrors the `gh api` workflow, letting you call any Jira REST API endpoint not covered by the typed `search`, `view`, `comment` commands and others.
+
+Use this for endpoints that the typed commands don't support, custom queries, or direct field manipulation.
+
+**Flags:**
+
+- `-X, --method` - HTTP method (default: GET). Use `POST`, `PUT`, `DELETE`, etc.
+- `-f` - String field parameter: `-f key=value` (can be repeated)
+- `-F` - Typed field parameter: `-F key=@file` or `-F key=expression`
+- `-H` - Custom header: `-H "Name: value"` (can be repeated)
+- `--input` - Read request body from file or `-` for stdin
+
+**Security:** Only HTTPS URLs on your configured Jira host are accepted. Absolute URLs are rejected; use relative paths like `/rest/api/3/...`.
 
 ### Pull Requests
 

@@ -10,7 +10,7 @@ The CLI follows a hierarchical command structure: `aide <service> <action> [opti
 
 **Services:**
 
-- `jira` - Jira ticket management (search, view, create, update, transition, comment, comments, delete-comment, edit-comment, attach, fields, boards, sprint)
+- `jira` - Jira ticket management (search, view, create, update, transition, comment, comments, delete-comment, edit-comment, attach, fields, boards, sprint, api)
 - `pr` - Pull request management (list, view, diff, create, update, comments, comment, reply)
 - `plugin` - Claude Code plugin management (install, status, uninstall)
 
@@ -307,8 +307,8 @@ The platform is auto-detected from the git remote URL. GitHub remotes (SSH or HT
 
 Credentials can be stored in `~/.vars` and sourced, or in a `.env` file in the project directory.
 
-
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
+
 ## Beads Issue Tracker
 
 This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
@@ -349,6 +349,7 @@ bd close <id>         # Complete work
 7. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
+
 - Work is NOT complete until `git push` succeeds
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
