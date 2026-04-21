@@ -1,6 +1,21 @@
 import type { JiraConfig } from '../schemas/config.js';
 
 /**
+ * Regex to match JSON-standard numeric literals.
+ * Accepts:
+ *  - Integers: 0, -5, 42
+ *  - Decimals: 0.5, -1.25
+ *  - Scientific notation: 1e3, 1.5E-2
+ *
+ * Rejects:
+ *  - Infinity/-Infinity (not JSON-serializable)
+ *  - Whitespace-only strings (Number('   ') === 0)
+ *  - Hex literals (0xff)
+ *  - Leading plus (Number('+5') === 5 but not valid JSON)
+ */
+const JSON_NUMBER_RE = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+
+/**
  * Resolve an endpoint argument to a full URL, enforcing security guards.
  *
  * - Relative path (with or without leading slash): prepend configured scheme+host.
@@ -75,6 +90,6 @@ function coerceTypedValue(value: string): unknown {
   if (value === 'true') return true;
   if (value === 'false') return false;
   if (value === 'null') return null;
-  if (value !== '' && !Number.isNaN(Number(value))) return Number(value);
+  if (JSON_NUMBER_RE.test(value)) return Number(value);
   return value;
 }

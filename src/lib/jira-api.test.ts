@@ -119,4 +119,37 @@ describe('parseFields', () => {
       parseFields({ stringFields: ['=value'], typedFields: [] })
     ).toThrow();
   });
+
+  test('-F does not coerce Infinity (JSON-incompatible)', () => {
+    const out = parseFields({ stringFields: [], typedFields: ['n=Infinity'] });
+    expect(out).toEqual({ n: 'Infinity' });
+  });
+
+  test('-F does not coerce -Infinity', () => {
+    const out = parseFields({ stringFields: [], typedFields: ['n=-Infinity'] });
+    expect(out).toEqual({ n: '-Infinity' });
+  });
+
+  test('-F does not coerce whitespace-only values to 0', () => {
+    const out = parseFields({ stringFields: [], typedFields: ['count=   '] });
+    expect(out).toEqual({ count: '   ' });
+  });
+
+  test('-F does not coerce hex literals', () => {
+    const out = parseFields({ stringFields: [], typedFields: ['x=0xff'] });
+    expect(out).toEqual({ x: '0xff' });
+  });
+
+  test('-F does not coerce leading-plus numbers', () => {
+    const out = parseFields({ stringFields: [], typedFields: ['n=+5'] });
+    expect(out).toEqual({ n: '+5' });
+  });
+
+  test('-F still coerces standard integers, floats, negatives, and exponents', () => {
+    const out = parseFields({
+      stringFields: [],
+      typedFields: ['a=0', 'b=42', 'c=-3', 'd=0.5', 'e=-1.25', 'f=1e3', 'g=1.5E-2'],
+    });
+    expect(out).toEqual({ a: 0, b: 42, c: -3, d: 0.5, e: -1.25, f: 1000, g: 0.015 });
+  });
 });
