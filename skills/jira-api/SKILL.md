@@ -56,14 +56,30 @@ aide jira api -X POST rest/api/3/issue --input issue.json
 # Post a comment via stdin
 echo '{"body":"hi"}' | aide jira api -X POST rest/api/3/issue/PROJ-1/comment --input -
 
-# Typed fields (numbers, booleans, null)
-aide jira api -X POST rest/api/3/issue -F "fields.priority.id=3" -F "fields.labels=null"
+# Typed fields coerce numbers, booleans, and null into a flat JSON body
+aide jira api -X POST rest/api/3/mail/user -F "notify=false" -F "maxResults=50"
 
 # List statuses (no typed command covers this)
 aide jira api rest/api/3/statuses
 
 # Add a custom header
 aide jira api rest/api/3/myself -H "X-Atlassian-Token: no-check"
+```
+
+### Nested JSON bodies
+
+`-f` and `-F` build a **flat** JSON object. Dotted keys are not expanded —
+`-F "fields.priority.id=3"` produces `{"fields.priority.id": 3}`, which Jira rejects.
+
+For nested bodies (Jira's `fields`, `update`, `historyMetadata`, etc.), write the
+JSON yourself and pass it via `--input`:
+
+```bash
+echo '{"fields":{"priority":{"id":"3"}}}' \
+  | aide jira api -X PUT rest/api/3/issue/PROJ-1 --input -
+
+# Or from a file
+aide jira api -X PUT rest/api/3/issue/PROJ-1 --input payload.json
 ```
 
 ## Output
