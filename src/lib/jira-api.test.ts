@@ -45,6 +45,15 @@ describe('resolveEndpoint', () => {
     ).toBe('https://example.atlassian.net/rest/api/3/issue/PROJ-1');
   });
 
+  test('strips userinfo from absolute URL on configured host', () => {
+    expect(
+      resolveEndpoint(
+        CONFIG,
+        'https://someuser:somepass@example.atlassian.net/rest/api/3/myself'
+      )
+    ).toBe('https://example.atlassian.net/rest/api/3/myself');
+  });
+
   test('rejects absolute URL on a different host', () => {
     expect(() =>
       resolveEndpoint(CONFIG, 'https://evil.example.com/steal')

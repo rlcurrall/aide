@@ -28,6 +28,8 @@ export function resolveEndpoint(
           `configured host is '${base.host}'. Pass a relative path or a URL on the configured host.`
       );
     }
+    target.username = '';
+    target.password = '';
     return target.toString();
   }
 
