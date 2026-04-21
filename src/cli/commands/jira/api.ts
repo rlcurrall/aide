@@ -72,6 +72,8 @@ export default {
       .example(
         'echo \'{"body":"hi"}\' | $0 jira api -X POST rest/api/3/issue/PROJ-1/comment --input -',
         'POST a JSON body from stdin'
-      ) as unknown as Argv<ApiArgs>,
+      ) as unknown as Argv<ApiArgs>, // Double cast required: yargs infers 'raw-field' (kebab) from the
+      // CLI option literal, but ApiArgs uses 'rawField' (camel). Not an established
+      // pattern—single cast works elsewhere where flag names already match.
   handler,
 } satisfies CommandModule<object, ApiArgs>;
