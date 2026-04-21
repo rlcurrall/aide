@@ -176,10 +176,10 @@ aide jira update PROJ-123 --description "New description text"
 
 # Call Jira REST API directly (for endpoints not covered by typed commands)
 aide jira api /rest/api/3/statuses                              # GET request
-aide jira api /rest/api/3/issues -X POST --input issue.json      # POST from file
-aide jira api /rest/api/3/users/search -X POST < users.json      # POST from stdin
-aide jira api /rest/api/3/projects/PROJ -f param=value          # String field parameter
-aide jira api /rest/api/3/version -H "X-Custom-Header: value"    # Custom header
+aide jira api /rest/api/3/issue -X POST --input issue.json       # POST from file
+echo '{"body":"hi"}' | aide jira api /rest/api/3/issue/PROJ-1/comment -X POST --input -  # POST from stdin
+aide jira api /rest/api/3/search/jql -f jql="project = PROJ"    # fields become querystring on GET
+aide jira api /rest/api/3/version -H "X-Custom-Header: value"   # Custom header
 ```
 
 #### Raw API Passthrough
@@ -192,11 +192,11 @@ Use this for endpoints that the typed commands don't support, custom queries, or
 
 - `-X, --method` - HTTP method (default: GET). Use `POST`, `PUT`, `DELETE`, etc.
 - `-f` - String field parameter: `-f key=value` (can be repeated)
-- `-F` - Typed field parameter: `-F key=@file` or `-F key=expression`
+- `-F` - Typed field: `-F key=value` coerces `true`/`false`/`null` and numeric literals; other values pass through as strings. Repeatable.
 - `-H` - Custom header: `-H "Name: value"` (can be repeated)
 - `--input` - Read request body from file or `-` for stdin
 
-**Security:** Only HTTPS URLs on your configured Jira host are accepted. Absolute URLs are rejected; use relative paths like `/rest/api/3/...`.
+**Security:** The command attaches your stored Jira basic-auth credentials. Relative paths resolve against your configured Jira host. Absolute URLs are accepted only when HTTPS and on the configured host; cross-host or `http://` URLs are refused to prevent credential leakage.
 
 ### Pull Requests
 
