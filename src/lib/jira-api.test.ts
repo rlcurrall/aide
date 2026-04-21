@@ -7,7 +7,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { resolveEndpoint } from './jira-api.js';
+import { resolveEndpoint, parseFields } from './jira-api.js';
 import type { JiraConfig } from '../schemas/config.js';
 
 const CONFIG: JiraConfig = {
@@ -68,5 +68,55 @@ describe('resolveEndpoint', () => {
 
   test('rejects malformed URL', () => {
     expect(() => resolveEndpoint(CONFIG, 'https://')).toThrow();
+  });
+});
+
+describe('parseFields', () => {
+  test('parses -f as string values', () => {
+    const out = parseFields({ stringFields: ['name=alice', 'role=admin'], typedFields: [] });
+    expect(out).toEqual({ name: 'alice', role: 'admin' });
+  });
+
+  test('string value may contain = signs after the first', () => {
+    const out = parseFields({ stringFields: ['jql=project = PROJ AND key = PROJ-1'], typedFields: [] });
+    expect(out).toEqual({ jql: 'project = PROJ AND key = PROJ-1' });
+  });
+
+  test('parses -F integers and floats as numbers', () => {
+    const out = parseFields({ stringFields: [], typedFields: ['count=3', 'ratio=0.5'] });
+    expect(out).toEqual({ count: 3, ratio: 0.5 });
+  });
+
+  test('parses -F booleans and null', () => {
+    const out = parseFields({
+      stringFields: [],
+      typedFields: ['ok=true', 'done=false', 'note=null'],
+    });
+    expect(out).toEqual({ ok: true, done: false, note: null });
+  });
+
+  test('-F non-typed value falls through as string', () => {
+    const out = parseFields({ stringFields: [], typedFields: ['name=alice'] });
+    expect(out).toEqual({ name: 'alice' });
+  });
+
+  test('later fields overwrite earlier ones', () => {
+    const out = parseFields({
+      stringFields: ['a=first', 'a=second'],
+      typedFields: [],
+    });
+    expect(out).toEqual({ a: 'second' });
+  });
+
+  test('rejects fields without an = sign', () => {
+    expect(() =>
+      parseFields({ stringFields: ['bad'], typedFields: [] })
+    ).toThrow(/=.*required|expected.*key=value/i);
+  });
+
+  test('rejects empty key', () => {
+    expect(() =>
+      parseFields({ stringFields: ['=value'], typedFields: [] })
+    ).toThrow();
   });
 });

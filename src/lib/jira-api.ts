@@ -37,3 +37,44 @@ export function resolveEndpoint(
   const baseOrigin = `${base.protocol}//${base.host}`;
   return `${baseOrigin}${path}`;
 }
+
+export interface ParseFieldsInput {
+  stringFields: string[]; // from -f
+  typedFields: string[]; // from -F
+}
+
+export function parseFields(input: ParseFieldsInput): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+
+  for (const raw of input.stringFields) {
+    const [key, value] = splitKeyValue(raw);
+    result[key] = value;
+  }
+
+  for (const raw of input.typedFields) {
+    const [key, value] = splitKeyValue(raw);
+    result[key] = coerceTypedValue(value);
+  }
+
+  return result;
+}
+
+function splitKeyValue(raw: string): [string, string] {
+  const eq = raw.indexOf('=');
+  if (eq === -1) {
+    throw new Error(`Expected key=value in field '${raw}' (= is required)`);
+  }
+  const key = raw.slice(0, eq);
+  if (key.length === 0) {
+    throw new Error(`Field key cannot be empty in '${raw}'`);
+  }
+  return [key, raw.slice(eq + 1)];
+}
+
+function coerceTypedValue(value: string): unknown {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  if (value === 'null') return null;
+  if (value !== '' && !Number.isNaN(Number(value))) return Number(value);
+  return value;
+}
