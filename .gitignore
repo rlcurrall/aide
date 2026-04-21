@@ -1,6 +1,7 @@
 node_modules
 .env
 dist/
+.worktrees/
 
 .claude/settings.local.json
 
