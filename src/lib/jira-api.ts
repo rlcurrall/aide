@@ -93,3 +93,76 @@ function coerceTypedValue(value: string): unknown {
   if (JSON_NUMBER_RE.test(value)) return Number(value);
   return value;
 }
+
+export interface BuildRequestInput {
+  endpoint: string;
+  method: string;
+  stringFields: string[];
+  typedFields: string[];
+  headers: string[];
+  body: string | undefined; // from --input, already-resolved string
+}
+
+export interface BuiltRequest {
+  url: string;
+  init: RequestInit;
+}
+
+const QUERY_METHODS = new Set(['GET', 'HEAD', 'DELETE']);
+
+export function buildRequest(
+  config: JiraConfig,
+  input: BuildRequestInput
+): BuiltRequest {
+  const method = input.method.toUpperCase();
+  const fields = parseFields({
+    stringFields: input.stringFields,
+    typedFields: input.typedFields,
+  });
+
+  let urlStr = resolveEndpoint(config, input.endpoint);
+  let body: string | undefined = input.body;
+
+  if (QUERY_METHODS.has(method)) {
+    // Fields go on the querystring
+    const fieldEntries = Object.entries(fields);
+    if (fieldEntries.length > 0) {
+      const url = new URL(urlStr);
+      for (const [k, v] of fieldEntries) {
+        url.searchParams.set(k, String(v));
+      }
+      urlStr = url.toString();
+    }
+  } else if (body === undefined && Object.keys(fields).length > 0) {
+    // Fields become a JSON body (only if --input didn't supply one)
+    body = JSON.stringify(fields);
+  }
+
+  const headers: Record<string, string> = {
+    Authorization: `Basic ${btoa(`${config.email}:${config.apiToken}`)}`,
+    Accept: 'application/json',
+  };
+
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  for (const raw of input.headers) {
+    const colon = raw.indexOf(':');
+    if (colon === -1) {
+      throw new Error(
+        `Invalid header '${raw}' — expected 'Name: Value' format`
+      );
+    }
+    const name = raw.slice(0, colon).trim();
+    const value = raw.slice(colon + 1).trim();
+    headers[name] = value;
+  }
+
+  const init: RequestInit = { method, headers };
+  if (body !== undefined) {
+    init.body = body;
+  }
+
+  return { url: urlStr, init };
+}

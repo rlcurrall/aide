@@ -7,7 +7,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { resolveEndpoint, parseFields } from './jira-api.js';
+import { resolveEndpoint, parseFields, buildRequest } from './jira-api.js';
 import type { JiraConfig } from '../schemas/config.js';
 
 const CONFIG: JiraConfig = {
@@ -151,5 +151,131 @@ describe('parseFields', () => {
       typedFields: ['a=0', 'b=42', 'c=-3', 'd=0.5', 'e=-1.25', 'f=1e3', 'g=1.5E-2'],
     });
     expect(out).toEqual({ a: 0, b: 42, c: -3, d: 0.5, e: -1.25, f: 1000, g: 0.015 });
+  });
+});
+
+describe('buildRequest', () => {
+  test('GET with -f fields builds querystring, no body', () => {
+    const { url, init } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/search',
+      method: 'GET',
+      stringFields: ['jql=project = PROJ', 'maxResults=50'],
+      typedFields: [],
+      headers: [],
+      body: undefined,
+    });
+    expect(url).toBe(
+      'https://example.atlassian.net/rest/api/3/search?jql=project+%3D+PROJ&maxResults=50'
+    );
+    expect(init.method).toBe('GET');
+    expect(init.body).toBeUndefined();
+  });
+
+  test('POST with -f/-F fields builds JSON body, no querystring', () => {
+    const { url, init } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/issue',
+      method: 'POST',
+      stringFields: ['summary=Test'],
+      typedFields: ['priority=3'],
+      headers: [],
+      body: undefined,
+    });
+    expect(url).toBe('https://example.atlassian.net/rest/api/3/issue');
+    expect(init.method).toBe('POST');
+    expect(init.body).toBe(JSON.stringify({ summary: 'Test', priority: 3 }));
+  });
+
+  test('sets Authorization header from config', () => {
+    const { init } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/myself',
+      method: 'GET',
+      stringFields: [],
+      typedFields: [],
+      headers: [],
+      body: undefined,
+    });
+    const headers = init.headers as Record<string, string>;
+    const expected = `Basic ${btoa('user@example.com:token')}`;
+    expect(headers['Authorization']).toBe(expected);
+    expect(headers['Accept']).toBe('application/json');
+  });
+
+  test('defaults Content-Type to application/json on body requests', () => {
+    const { init } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/issue',
+      method: 'POST',
+      stringFields: ['summary=Test'],
+      typedFields: [],
+      headers: [],
+      body: undefined,
+    });
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Content-Type']).toBe('application/json');
+  });
+
+  test('omits Content-Type on GET with no body', () => {
+    const { init } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/myself',
+      method: 'GET',
+      stringFields: [],
+      typedFields: [],
+      headers: [],
+      body: undefined,
+    });
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Content-Type']).toBeUndefined();
+  });
+
+  test('-H override replaces default Content-Type', () => {
+    const { init } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/issue',
+      method: 'POST',
+      stringFields: [],
+      typedFields: [],
+      headers: ['Content-Type: text/plain'],
+      body: 'hello',
+    });
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Content-Type']).toBe('text/plain');
+    expect(init.body).toBe('hello');
+  });
+
+  test('-H merges extra headers', () => {
+    const { init } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/myself',
+      method: 'GET',
+      stringFields: [],
+      typedFields: [],
+      headers: ['X-Atlassian-Token: no-check', 'X-Trace-Id: abc'],
+      body: undefined,
+    });
+    const headers = init.headers as Record<string, string>;
+    expect(headers['X-Atlassian-Token']).toBe('no-check');
+    expect(headers['X-Trace-Id']).toBe('abc');
+  });
+
+  test('--input body overrides -f/-F body on POST', () => {
+    const { init } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/issue',
+      method: 'POST',
+      stringFields: ['summary=Ignored'],
+      typedFields: [],
+      headers: [],
+      body: '{"fields":{"summary":"Real"}}',
+    });
+    expect(init.body).toBe('{"fields":{"summary":"Real"}}');
+  });
+
+  test('rejects malformed -H without colon', () => {
+    expect(() =>
+      buildRequest(CONFIG, {
+        endpoint: 'rest/api/3/myself',
+        method: 'GET',
+        stringFields: [],
+        typedFields: [],
+        headers: ['BadHeader'],
+        body: undefined,
+      })
+    ).toThrow(/header/i);
   });
 });
