@@ -139,12 +139,12 @@ export function buildRequest(
   }
 
   const headers: Record<string, string> = {
-    Authorization: `Basic ${btoa(`${config.email}:${config.apiToken}`)}`,
-    Accept: 'application/json',
+    authorization: `Basic ${btoa(`${config.email}:${config.apiToken}`)}`,
+    accept: 'application/json',
   };
 
   if (body !== undefined) {
-    headers['Content-Type'] = 'application/json';
+    headers['content-type'] = 'application/json';
   }
 
   for (const raw of input.headers) {
@@ -154,7 +154,7 @@ export function buildRequest(
         `Invalid header '${raw}' — expected 'Name: Value' format`
       );
     }
-    const name = raw.slice(0, colon).trim();
+    const name = raw.slice(0, colon).trim().toLowerCase();
     const value = raw.slice(colon + 1).trim();
     headers[name] = value;
   }

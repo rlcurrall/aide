@@ -196,8 +196,8 @@ describe('buildRequest', () => {
     });
     const headers = init.headers as Record<string, string>;
     const expected = `Basic ${btoa('user@example.com:token')}`;
-    expect(headers['Authorization']).toBe(expected);
-    expect(headers['Accept']).toBe('application/json');
+    expect(headers['authorization']).toBe(expected);
+    expect(headers['accept']).toBe('application/json');
   });
 
   test('defaults Content-Type to application/json on body requests', () => {
@@ -210,7 +210,7 @@ describe('buildRequest', () => {
       body: undefined,
     });
     const headers = init.headers as Record<string, string>;
-    expect(headers['Content-Type']).toBe('application/json');
+    expect(headers['content-type']).toBe('application/json');
   });
 
   test('omits Content-Type on GET with no body', () => {
@@ -223,7 +223,7 @@ describe('buildRequest', () => {
       body: undefined,
     });
     const headers = init.headers as Record<string, string>;
-    expect(headers['Content-Type']).toBeUndefined();
+    expect(headers['content-type']).toBeUndefined();
   });
 
   test('-H override replaces default Content-Type', () => {
@@ -236,7 +236,7 @@ describe('buildRequest', () => {
       body: 'hello',
     });
     const headers = init.headers as Record<string, string>;
-    expect(headers['Content-Type']).toBe('text/plain');
+    expect(headers['content-type']).toBe('text/plain');
     expect(init.body).toBe('hello');
   });
 
@@ -250,8 +250,8 @@ describe('buildRequest', () => {
       body: undefined,
     });
     const headers = init.headers as Record<string, string>;
-    expect(headers['X-Atlassian-Token']).toBe('no-check');
-    expect(headers['X-Trace-Id']).toBe('abc');
+    expect(headers['x-atlassian-token']).toBe('no-check');
+    expect(headers['x-trace-id']).toBe('abc');
   });
 
   test('--input body overrides -f/-F body on POST', () => {
@@ -277,5 +277,48 @@ describe('buildRequest', () => {
         body: undefined,
       })
     ).toThrow(/header/i);
+  });
+
+  test('normalizes lowercase method to uppercase', () => {
+    const { init } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/myself',
+      method: 'get',
+      stringFields: [],
+      typedFields: [],
+      headers: [],
+      body: undefined,
+    });
+    expect(init.method).toBe('GET');
+    expect(init.body).toBeUndefined();
+  });
+
+  test('DELETE routes fields to querystring like GET', () => {
+    const { url, init } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/issue/PROJ-1',
+      method: 'DELETE',
+      stringFields: ['deleteSubtasks=true'],
+      typedFields: [],
+      headers: [],
+      body: undefined,
+    });
+    expect(url).toBe(
+      'https://example.atlassian.net/rest/api/3/issue/PROJ-1?deleteSubtasks=true'
+    );
+    expect(init.method).toBe('DELETE');
+    expect(init.body).toBeUndefined();
+  });
+
+  test('-H override works with mixed case (late override wins)', () => {
+    const { init } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/issue',
+      method: 'POST',
+      stringFields: [],
+      typedFields: [],
+      headers: ['Authorization: Bearer custom-token'],
+      body: 'x',
+    });
+    const h = init.headers as Record<string, string>;
+    expect(h['authorization']).toBe('Bearer custom-token');
+    expect(Object.keys(h).filter((k) => k.toLowerCase() === 'authorization')).toHaveLength(1);
   });
 });
