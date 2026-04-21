@@ -7,7 +7,12 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { resolveEndpoint, parseFields, buildRequest } from './jira-api.js';
+import {
+  resolveEndpoint,
+  parseFields,
+  buildRequest,
+  validateRequestShape,
+} from './jira-api.js';
 import type { JiraConfig } from '../schemas/config.js';
 
 const CONFIG: JiraConfig = {
@@ -33,6 +38,27 @@ describe('resolveEndpoint', () => {
     const cfg = { ...CONFIG, url: 'https://example.atlassian.net/' };
     expect(resolveEndpoint(cfg, 'rest/api/3/myself')).toBe(
       'https://example.atlassian.net/rest/api/3/myself'
+    );
+  });
+
+  test('preserves configured subpath (self-hosted Jira at /jira)', () => {
+    const cfg = { ...CONFIG, url: 'https://example.com/jira' };
+    expect(resolveEndpoint(cfg, 'rest/api/3/myself')).toBe(
+      'https://example.com/jira/rest/api/3/myself'
+    );
+  });
+
+  test('preserves configured subpath with trailing slash', () => {
+    const cfg = { ...CONFIG, url: 'https://example.com/jira/' };
+    expect(resolveEndpoint(cfg, 'rest/api/3/myself')).toBe(
+      'https://example.com/jira/rest/api/3/myself'
+    );
+  });
+
+  test('preserves configured subpath with leading-slash endpoint', () => {
+    const cfg = { ...CONFIG, url: 'https://example.com/jira' };
+    expect(resolveEndpoint(cfg, '/rest/api/3/myself')).toBe(
+      'https://example.com/jira/rest/api/3/myself'
     );
   });
 
@@ -462,5 +488,70 @@ describe('buildRequest', () => {
     const params = new URL(url).searchParams;
     expect(params.get('expand')).toBe('names');
     expect(params.get('maxResults')).toBe('50');
+  });
+
+  test('honors configured subpath when building request URL', () => {
+    const cfg = { ...CONFIG, url: 'https://example.com/jira' };
+    const { url } = buildRequest(cfg, {
+      endpoint: 'rest/api/3/myself',
+      method: 'GET',
+      stringFields: [],
+      typedFields: [],
+      headers: [],
+      body: undefined,
+    });
+    expect(url).toBe('https://example.com/jira/rest/api/3/myself');
+  });
+});
+
+describe('validateRequestShape', () => {
+  test('accepts GET with no input and no fields', () => {
+    expect(() =>
+      validateRequestShape({
+        method: 'GET',
+        hasInput: false,
+        hasFields: false,
+      })
+    ).not.toThrow();
+  });
+
+  test('accepts POST with input and no fields', () => {
+    expect(() =>
+      validateRequestShape({ method: 'POST', hasInput: true, hasFields: false })
+    ).not.toThrow();
+  });
+
+  test('accepts POST with fields and no input', () => {
+    expect(() =>
+      validateRequestShape({ method: 'POST', hasInput: false, hasFields: true })
+    ).not.toThrow();
+  });
+
+  test('rejects GET with input', () => {
+    expect(() =>
+      validateRequestShape({ method: 'GET', hasInput: true, hasFields: false })
+    ).toThrow(/--input.*GET/);
+  });
+
+  test('rejects HEAD with input', () => {
+    expect(() =>
+      validateRequestShape({ method: 'HEAD', hasInput: true, hasFields: false })
+    ).toThrow(/--input.*HEAD/);
+  });
+
+  test('rejects DELETE with input', () => {
+    expect(() =>
+      validateRequestShape({
+        method: 'DELETE',
+        hasInput: true,
+        hasFields: false,
+      })
+    ).toThrow(/--input.*DELETE/);
+  });
+
+  test('rejects POST with both input and fields', () => {
+    expect(() =>
+      validateRequestShape({ method: 'POST', hasInput: true, hasFields: true })
+    ).toThrow(/ambiguous body|--input.*-f\/-F/i);
   });
 });

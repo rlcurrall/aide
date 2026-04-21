@@ -65,7 +65,18 @@ export const jiraCommands: CommandModule = {
         '$0 jira search "assignee = currentUser()" --sprint-board 123',
         'Search in active sprint'
       )
-      .example('$0 jira api rest/api/3/myself', 'Raw API passthrough (current user)'),
+      .example(
+        '$0 jira api rest/api/3/myself',
+        'Raw API passthrough (current user)'
+      )
+      .example(
+        '$0 jira api -X POST rest/api/3/issue --input body.json',
+        'Raw API POST with body from a file'
+      )
+      .example(
+        'echo \'{"body":"hi"}\' | $0 jira api -X POST rest/api/3/issue/PROJ-1/comment --input -',
+        'Raw API POST with body from stdin'
+      ),
   handler: () => {
     // This won't be called due to demandCommand
   },

@@ -57,9 +57,12 @@ export function resolveEndpoint(config: JiraConfig, endpoint: string): string {
     return target.toString();
   }
 
+  // Preserve any path component in config.url — e.g. self-hosted Jira
+  // mounted at /jira. The rest of this repo joins with `${config.url}/rest/...`
+  // (see jira-client.ts); use the same shape here so behavior stays consistent.
+  const normalizedBase = config.url.replace(/\/+$/, '');
   const path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
-  const baseOrigin = `${base.protocol}//${base.host}`;
-  return `${baseOrigin}${path}`;
+  return `${normalizedBase}${path}`;
 }
 
 export interface ParseFieldsInput {
@@ -150,6 +153,32 @@ export interface BuiltRequest {
 
 const QUERY_METHODS = new Set(['GET', 'HEAD', 'DELETE']);
 
+export interface RequestShape {
+  method: string;
+  hasInput: boolean;
+  hasFields: boolean;
+}
+
+/**
+ * Validate method/input/field compatibility.
+ *
+ * Exposed so the CLI handler can fail fast *before* reading stdin or a file:
+ * `aide jira api rest/api/3/myself --input -` should error on the method
+ * mismatch, not hang waiting on stdin.
+ */
+export function validateRequestShape(shape: RequestShape): void {
+  if (QUERY_METHODS.has(shape.method) && shape.hasInput) {
+    throw new Error(
+      `--input is not supported with ${shape.method}: fields go on the querystring for this method`
+    );
+  }
+  if (!QUERY_METHODS.has(shape.method) && shape.hasInput && shape.hasFields) {
+    throw new Error(
+      '--input cannot be combined with -f/-F on body methods (ambiguous body source — pick one)'
+    );
+  }
+}
+
 export function buildRequest(
   config: JiraConfig,
   input: BuildRequestInput
@@ -165,16 +194,7 @@ export function buildRequest(
   const hasFields = fieldEntries.length > 0;
   const hasBody = input.body !== undefined;
 
-  if (QUERY_METHODS.has(method) && hasBody) {
-    throw new Error(
-      `--input is not supported with ${method}: fields go on the querystring for this method`
-    );
-  }
-  if (!QUERY_METHODS.has(method) && hasBody && hasFields) {
-    throw new Error(
-      '--input cannot be combined with -f/-F on body methods (ambiguous body source — pick one)'
-    );
-  }
+  validateRequestShape({ method, hasInput: hasBody, hasFields });
 
   let urlStr = resolveEndpoint(config, input.endpoint);
   let body: string | undefined = input.body;

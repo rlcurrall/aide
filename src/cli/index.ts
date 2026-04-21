@@ -66,7 +66,14 @@ async function main(): Promise<number> {
 }
 
 if (import.meta.main) {
-  main().then(process.exit);
+  main().then((code) => {
+    // Respect process.exitCode set by handlers (e.g. `jira api` on non-2xx
+    // wants exit 1 without an error message). Only let it override on a
+    // clean 0 — if main() itself failed, the thrown error already logged.
+    const preset = process.exitCode;
+    const finalCode = code === 0 && preset != null ? Number(preset) : code;
+    process.exit(finalCode);
+  });
 }
 
 export { main };
