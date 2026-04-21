@@ -45,6 +45,9 @@ async function handler(argv: ArgumentsCamelCase<ApiArgs>): Promise<void> {
       body,
     });
 
+    // redirect: 'manual' keeps the basic-auth header from being replayed to
+    // a different origin on a 3xx. resolveEndpoint already vets the initial
+    // host; don't undo that by following redirects implicitly.
     const response = await fetch(url, { ...init, redirect: 'manual' });
     const text = await response.text();
     if (text.length > 0) {
