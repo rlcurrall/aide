@@ -92,7 +92,7 @@ export default {
         array: true,
         default: [] as string[],
         describe:
-          'Typed field (key=value) — numbers, booleans, null, or @file. Repeatable.',
+          'Typed field (key=value) — numbers, booleans, null. Repeatable.',
       })
       .option('header', {
         alias: 'H',
