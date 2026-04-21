@@ -1,5 +1,9 @@
 import type { JiraConfig } from '../schemas/config.js';
 
+// `RequestInit` isn't in the node/eslint globals set; reach the type via
+// `typeof fetch` instead so eslint `no-undef` stays clean without a config change.
+type FetchInit = NonNullable<Parameters<typeof fetch>[1]>;
+
 /**
  * Regex to match JSON-standard numeric literals.
  * Accepts:
@@ -24,10 +28,7 @@ const JSON_NUMBER_RE = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
  * The host check prevents credential exfiltration: the caller's Jira basic-auth
  * header is about to be attached, and we refuse to send it to any other origin.
  */
-export function resolveEndpoint(
-  config: JiraConfig,
-  endpoint: string
-): string {
+export function resolveEndpoint(config: JiraConfig, endpoint: string): string {
   const base = new URL(config.url); // throws on malformed configured URL
 
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(endpoint)) {
@@ -105,7 +106,7 @@ export interface BuildRequestInput {
 
 export interface BuiltRequest {
   url: string;
-  init: RequestInit;
+  init: FetchInit;
 }
 
 const QUERY_METHODS = new Set(['GET', 'HEAD', 'DELETE']);
@@ -159,7 +160,7 @@ export function buildRequest(
     headers[name] = value;
   }
 
-  const init: RequestInit = { method, headers };
+  const init: FetchInit = { method, headers };
   if (body !== undefined) {
     init.body = body;
   }
