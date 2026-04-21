@@ -19,6 +19,7 @@ import attachCommand from './attach.js';
 import fieldsCommand from './fields.js';
 import boardsCommand from './boards.js';
 import sprintCommand from './sprint.js';
+import apiCommand from './api.js';
 
 export const jiraCommands: CommandModule = {
   command: 'jira <command>',
@@ -39,6 +40,7 @@ export const jiraCommands: CommandModule = {
       .command(fieldsCommand)
       .command(boardsCommand)
       .command(sprintCommand)
+      .command(apiCommand)
       .demandCommand(1, 'Please specify a jira command')
       .example('$0 jira search "assignee = currentUser()"', 'Search tickets')
       .example('$0 jira view PROJ-123', 'Get ticket details')
@@ -62,7 +64,8 @@ export const jiraCommands: CommandModule = {
       .example(
         '$0 jira search "assignee = currentUser()" --sprint-board 123',
         'Search in active sprint'
-      ),
+      )
+      .example('$0 jira api rest/api/3/myself', 'Raw API passthrough (current user)'),
   handler: () => {
     // This won't be called due to demandCommand
   },
