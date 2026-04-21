@@ -66,6 +66,13 @@ describe('resolveEndpoint', () => {
     ).toThrow(/https/i);
   });
 
+  test('rejects relative path when configured URL is non-HTTPS', () => {
+    const cfg = { ...CONFIG, url: 'http://example.atlassian.net' };
+    expect(() => resolveEndpoint(cfg, 'rest/api/3/myself')).toThrow(
+      /non-HTTPS configured URL/i
+    );
+  });
+
   test('rejects malformed URL', () => {
     expect(() => resolveEndpoint(CONFIG, 'https://')).toThrow();
   });
@@ -73,17 +80,26 @@ describe('resolveEndpoint', () => {
 
 describe('parseFields', () => {
   test('parses -f as string values', () => {
-    const out = parseFields({ stringFields: ['name=alice', 'role=admin'], typedFields: [] });
+    const out = parseFields({
+      stringFields: ['name=alice', 'role=admin'],
+      typedFields: [],
+    });
     expect(out).toEqual({ name: 'alice', role: 'admin' });
   });
 
   test('string value may contain = signs after the first', () => {
-    const out = parseFields({ stringFields: ['jql=project = PROJ AND key = PROJ-1'], typedFields: [] });
+    const out = parseFields({
+      stringFields: ['jql=project = PROJ AND key = PROJ-1'],
+      typedFields: [],
+    });
     expect(out).toEqual({ jql: 'project = PROJ AND key = PROJ-1' });
   });
 
   test('parses -F integers and floats as numbers', () => {
-    const out = parseFields({ stringFields: [], typedFields: ['count=3', 'ratio=0.5'] });
+    const out = parseFields({
+      stringFields: [],
+      typedFields: ['count=3', 'ratio=0.5'],
+    });
     expect(out).toEqual({ count: 3, ratio: 0.5 });
   });
 
@@ -100,12 +116,29 @@ describe('parseFields', () => {
     expect(out).toEqual({ name: 'alice' });
   });
 
-  test('later fields overwrite earlier ones', () => {
+  test('duplicate -f keys promote to an array (gh/curl semantics)', () => {
     const out = parseFields({
-      stringFields: ['a=first', 'a=second'],
+      stringFields: ['expand=names', 'expand=schema'],
       typedFields: [],
     });
-    expect(out).toEqual({ a: 'second' });
+    expect(out).toEqual({ expand: ['names', 'schema'] });
+  });
+
+  test('duplicate -F keys promote to an array', () => {
+    const out = parseFields({
+      stringFields: [],
+      typedFields: ['id=1', 'id=2', 'id=3'],
+    });
+    expect(out).toEqual({ id: [1, 2, 3] });
+  });
+
+  test('mixed -f/-F duplicates promote to an array in declaration order', () => {
+    const out = parseFields({
+      stringFields: ['id=first'],
+      typedFields: ['id=2'],
+    });
+    // -f values are applied first, then -F values — arrays reflect that order.
+    expect(out).toEqual({ id: ['first', 2] });
   });
 
   test('rejects fields without an = sign', () => {
@@ -148,9 +181,25 @@ describe('parseFields', () => {
   test('-F still coerces standard integers, floats, negatives, and exponents', () => {
     const out = parseFields({
       stringFields: [],
-      typedFields: ['a=0', 'b=42', 'c=-3', 'd=0.5', 'e=-1.25', 'f=1e3', 'g=1.5E-2'],
+      typedFields: [
+        'a=0',
+        'b=42',
+        'c=-3',
+        'd=0.5',
+        'e=-1.25',
+        'f=1e3',
+        'g=1.5E-2',
+      ],
     });
-    expect(out).toEqual({ a: 0, b: 42, c: -3, d: 0.5, e: -1.25, f: 1000, g: 0.015 });
+    expect(out).toEqual({
+      a: 0,
+      b: 42,
+      c: -3,
+      d: 0.5,
+      e: -1.25,
+      f: 1000,
+      g: 0.015,
+    });
   });
 });
 
@@ -195,7 +244,7 @@ describe('buildRequest', () => {
       body: undefined,
     });
     const headers = init.headers as Record<string, string>;
-    const expected = `Basic ${btoa('user@example.com:token')}`;
+    const expected = `Basic ${Buffer.from('user@example.com:token').toString('base64')}`;
     expect(headers['authorization']).toBe(expected);
     expect(headers['accept']).toBe('application/json');
   });
@@ -254,18 +303,6 @@ describe('buildRequest', () => {
     expect(headers['x-trace-id']).toBe('abc');
   });
 
-  test('--input body overrides -f/-F body on POST', () => {
-    const { init } = buildRequest(CONFIG, {
-      endpoint: 'rest/api/3/issue',
-      method: 'POST',
-      stringFields: ['summary=Ignored'],
-      typedFields: [],
-      headers: [],
-      body: '{"fields":{"summary":"Real"}}',
-    });
-    expect(init.body).toBe('{"fields":{"summary":"Real"}}');
-  });
-
   test('rejects malformed -H without colon', () => {
     expect(() =>
       buildRequest(CONFIG, {
@@ -277,19 +314,6 @@ describe('buildRequest', () => {
         body: undefined,
       })
     ).toThrow(/header/i);
-  });
-
-  test('normalizes lowercase method to uppercase', () => {
-    const { init } = buildRequest(CONFIG, {
-      endpoint: 'rest/api/3/myself',
-      method: 'get',
-      stringFields: [],
-      typedFields: [],
-      headers: [],
-      body: undefined,
-    });
-    expect(init.method).toBe('GET');
-    expect(init.body).toBeUndefined();
   });
 
   test('DELETE routes fields to querystring like GET', () => {
@@ -319,6 +343,124 @@ describe('buildRequest', () => {
     });
     const h = init.headers as Record<string, string>;
     expect(h['authorization']).toBe('Bearer custom-token');
-    expect(Object.keys(h).filter((k) => k.toLowerCase() === 'authorization')).toHaveLength(1);
+    expect(
+      Object.keys(h).filter((k) => k.toLowerCase() === 'authorization')
+    ).toHaveLength(1);
+  });
+
+  test('rejects --input on GET', () => {
+    expect(() =>
+      buildRequest(CONFIG, {
+        endpoint: 'rest/api/3/myself',
+        method: 'GET',
+        stringFields: [],
+        typedFields: [],
+        headers: [],
+        body: '{"x":1}',
+      })
+    ).toThrow(/--input.*GET/);
+  });
+
+  test('rejects --input on HEAD', () => {
+    expect(() =>
+      buildRequest(CONFIG, {
+        endpoint: 'rest/api/3/myself',
+        method: 'HEAD',
+        stringFields: [],
+        typedFields: [],
+        headers: [],
+        body: 'anything',
+      })
+    ).toThrow(/--input.*HEAD/);
+  });
+
+  test('rejects --input on DELETE', () => {
+    expect(() =>
+      buildRequest(CONFIG, {
+        endpoint: 'rest/api/3/issue/PROJ-1',
+        method: 'DELETE',
+        stringFields: [],
+        typedFields: [],
+        headers: [],
+        body: '{}',
+      })
+    ).toThrow(/--input.*DELETE/);
+  });
+
+  test('rejects --input combined with -f on POST (ambiguous body source)', () => {
+    expect(() =>
+      buildRequest(CONFIG, {
+        endpoint: 'rest/api/3/issue',
+        method: 'POST',
+        stringFields: ['summary=Test'],
+        typedFields: [],
+        headers: [],
+        body: '{"fields":{"summary":"Other"}}',
+      })
+    ).toThrow(/--input.*-f\/-F|ambiguous body/i);
+  });
+
+  test('rejects --input combined with -F on PATCH', () => {
+    expect(() =>
+      buildRequest(CONFIG, {
+        endpoint: 'rest/api/3/issue/PROJ-1',
+        method: 'PATCH',
+        stringFields: [],
+        typedFields: ['priority=2'],
+        headers: [],
+        body: '{"fields":{}}',
+      })
+    ).toThrow(/--input.*-f\/-F|ambiguous body/i);
+  });
+
+  test('accepts --input on POST with no -f/-F', () => {
+    const { init } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/issue',
+      method: 'POST',
+      stringFields: [],
+      typedFields: [],
+      headers: [],
+      body: '{"fields":{"summary":"Real"}}',
+    });
+    expect(init.body).toBe('{"fields":{"summary":"Real"}}');
+  });
+
+  test('duplicate -f on GET writes repeated querystring entries', () => {
+    const { url } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/search',
+      method: 'GET',
+      stringFields: ['expand=names', 'expand=schema'],
+      typedFields: [],
+      headers: [],
+      body: undefined,
+    });
+    const q = new URL(url).searchParams.getAll('expand');
+    expect(q).toEqual(['names', 'schema']);
+  });
+
+  test('duplicate -f on POST writes a JSON array', () => {
+    const { init } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/issue',
+      method: 'POST',
+      stringFields: ['label=urgent', 'label=backend'],
+      typedFields: [],
+      headers: [],
+      body: undefined,
+    });
+    expect(init.body).toBe(JSON.stringify({ label: ['urgent', 'backend'] }));
+  });
+
+  test('endpoint with existing querystring is preserved when -f fields are added', () => {
+    const { url } = buildRequest(CONFIG, {
+      endpoint: 'rest/api/3/search?expand=names',
+      method: 'GET',
+      stringFields: ['maxResults=50'],
+      typedFields: [],
+      headers: [],
+      body: undefined,
+    });
+    const params = new URL(url).searchParams;
+    expect(params.get('expand')).toBe('names');
+    expect(params.get('maxResults')).toBe('50');
   });
 });

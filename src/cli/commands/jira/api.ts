@@ -12,21 +12,7 @@ import { handleCommandError } from '@lib/errors.js';
 
 async function readBody(spec: string | undefined): Promise<string | undefined> {
   if (spec === undefined) return undefined;
-  if (spec === '-') {
-    // Read full stdin
-    const chunks: Uint8Array[] = [];
-    for await (const chunk of Bun.stdin.stream()) {
-      chunks.push(chunk);
-    }
-    const total = chunks.reduce((n, c) => n + c.length, 0);
-    const merged = new Uint8Array(total);
-    let offset = 0;
-    for (const c of chunks) {
-      merged.set(c, offset);
-      offset += c.length;
-    }
-    return new TextDecoder().decode(merged);
-  }
+  if (spec === '-') return await Bun.stdin.text();
   return await Bun.file(spec).text();
 }
 
@@ -49,10 +35,19 @@ async function handler(argv: ArgumentsCamelCase<ApiArgs>): Promise<void> {
     // a different origin on a 3xx. resolveEndpoint already vets the initial
     // host; don't undo that by following redirects implicitly.
     const response = await fetch(url, { ...init, redirect: 'manual' });
-    const text = await response.text();
-    if (text.length > 0) {
-      process.stdout.write(text);
-      if (!text.endsWith('\n')) process.stdout.write('\n');
+
+    if (response.status >= 300 && response.status < 400) {
+      process.stderr.write(
+        `Warning: Jira returned ${response.status}; redirect not followed (credentials are not replayed across origins).\n`
+      );
+    }
+
+    // Stream the raw response to stdout as bytes — no text decode, no newline
+    // mutation. Keeps binary endpoints (attachments, thumbnails) intact and
+    // matches `gh api` passthrough semantics.
+    const buf = new Uint8Array(await response.arrayBuffer());
+    if (buf.length > 0) {
+      process.stdout.write(buf);
     }
 
     if (!response.ok) {
@@ -87,7 +82,7 @@ export default {
         array: true,
         default: [] as string[],
         describe:
-          'String field (key=value). Querystring on GET/HEAD/DELETE, JSON body otherwise. Repeatable.',
+          'String field (key=value). Querystring on GET/HEAD/DELETE, JSON body otherwise. Repeatable; duplicate keys produce an array.',
       })
       .option('raw-field', {
         alias: 'F',
@@ -95,7 +90,7 @@ export default {
         array: true,
         default: [] as string[],
         describe:
-          'Typed field (key=value) — numbers, booleans, null. Repeatable.',
+          'Typed field (key=value) — numbers, booleans, null. Repeatable; duplicate keys produce an array.',
       })
       .option('header', {
         alias: 'H',
@@ -107,7 +102,7 @@ export default {
       .option('input', {
         type: 'string',
         describe:
-          'Raw request body from file path, or "-" for stdin. Overrides -f/-F body fields.',
+          'Raw request body from file path, or "-" for stdin. Incompatible with GET/HEAD/DELETE and with -f/-F on body methods.',
       })
       .example('$0 jira api rest/api/3/myself', 'Get the current user')
       .example(
@@ -117,8 +112,12 @@ export default {
       .example(
         'echo \'{"body":"hi"}\' | $0 jira api -X POST rest/api/3/issue/PROJ-1/comment --input -',
         'POST a JSON body from stdin'
-      ) as unknown as Argv<ApiArgs>, // Double cast required: yargs infers 'raw-field' (kebab) from the
-  // CLI option literal, but ApiArgs uses 'rawField' (camel). Not an established
-  // pattern—single cast works elsewhere where flag names already match.
+      ) as unknown as Argv<ApiArgs>,
+  // Yargs infers the `raw-field` literal as a kebab-case key, but the schema
+  // uses `rawField` (camel) to match yargs' camel-case-expansion of argv.
+  // Runtime is fine — argv gets both keys — but the inferred Argv shape
+  // doesn't line up with ApiArgs, so we coerce here. Switching the builder
+  // key to `rawField` would drop this cast but would surface `--rawField`
+  // in help instead of `--raw-field`, off-style for the rest of aide.
   handler,
 } satisfies CommandModule<object, ApiArgs>;

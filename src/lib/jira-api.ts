@@ -22,6 +22,8 @@ const JSON_NUMBER_RE = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
 /**
  * Resolve an endpoint argument to a full URL, enforcing security guards.
  *
+ * - Configured Jira URL must be HTTPS; otherwise we refuse to attach
+ *   basic-auth credentials to any request (cleartext leak guard).
  * - Relative path (with or without leading slash): prepend configured scheme+host.
  * - Absolute URL: must be HTTPS and must match the configured Jira host, else throw.
  *
@@ -30,6 +32,12 @@ const JSON_NUMBER_RE = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
  */
 export function resolveEndpoint(config: JiraConfig, endpoint: string): string {
   const base = new URL(config.url); // throws on malformed configured URL
+
+  if (base.protocol !== 'https:') {
+    throw new Error(
+      `Refusing to send Jira credentials over non-HTTPS configured URL: ${config.url}`
+    );
+  }
 
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(endpoint)) {
     const target = new URL(endpoint);
@@ -59,20 +67,51 @@ export interface ParseFieldsInput {
   typedFields: string[]; // from -F
 }
 
-export function parseFields(input: ParseFieldsInput): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
+type Scalar = string | number | boolean | null;
+type FieldValue = Scalar | Scalar[];
+
+/**
+ * Parse -f/-F `key=value` args into an object.
+ *
+ * Duplicate keys promote to arrays, matching `gh api` / `curl` semantics:
+ *   -f expand=names -f expand=schema  →  { expand: ['names', 'schema'] }
+ *
+ * Consumers serialize arrays naturally: `JSON.stringify` handles JSON bodies;
+ * `URLSearchParams.append` writes repeated querystring entries.
+ */
+export function parseFields(
+  input: ParseFieldsInput
+): Record<string, FieldValue> {
+  const result: Record<string, FieldValue> = {};
 
   for (const raw of input.stringFields) {
     const [key, value] = splitKeyValue(raw);
-    result[key] = value;
+    appendField(result, key, value);
   }
 
   for (const raw of input.typedFields) {
     const [key, value] = splitKeyValue(raw);
-    result[key] = coerceTypedValue(value);
+    appendField(result, key, coerceTypedValue(value));
   }
 
   return result;
+}
+
+function appendField(
+  result: Record<string, FieldValue>,
+  key: string,
+  value: Scalar
+): void {
+  const existing = result[key];
+  if (existing === undefined) {
+    result[key] = value;
+    return;
+  }
+  if (Array.isArray(existing)) {
+    existing.push(value);
+  } else {
+    result[key] = [existing, value];
+  }
 }
 
 function splitKeyValue(raw: string): [string, string] {
@@ -87,7 +126,7 @@ function splitKeyValue(raw: string): [string, string] {
   return [key, raw.slice(eq + 1)];
 }
 
-function coerceTypedValue(value: string): unknown {
+function coerceTypedValue(value: string): Scalar {
   if (value === 'true') return true;
   if (value === 'false') return false;
   if (value === 'null') return null;
@@ -115,32 +154,51 @@ export function buildRequest(
   config: JiraConfig,
   input: BuildRequestInput
 ): BuiltRequest {
-  const method = input.method.toUpperCase();
+  // Method is validated by the valibot schema (picklist of uppercase verbs),
+  // so we can trust it here without defensive .toUpperCase().
+  const method = input.method;
   const fields = parseFields({
     stringFields: input.stringFields,
     typedFields: input.typedFields,
   });
+  const fieldEntries = Object.entries(fields);
+  const hasFields = fieldEntries.length > 0;
+  const hasBody = input.body !== undefined;
+
+  if (QUERY_METHODS.has(method) && hasBody) {
+    throw new Error(
+      `--input is not supported with ${method}: fields go on the querystring for this method`
+    );
+  }
+  if (!QUERY_METHODS.has(method) && hasBody && hasFields) {
+    throw new Error(
+      '--input cannot be combined with -f/-F on body methods (ambiguous body source — pick one)'
+    );
+  }
 
   let urlStr = resolveEndpoint(config, input.endpoint);
   let body: string | undefined = input.body;
 
-  if (QUERY_METHODS.has(method)) {
-    // Fields go on the querystring
-    const fieldEntries = Object.entries(fields);
-    if (fieldEntries.length > 0) {
-      const url = new URL(urlStr);
-      for (const [k, v] of fieldEntries) {
-        url.searchParams.set(k, String(v));
+  if (QUERY_METHODS.has(method) && hasFields) {
+    const url = new URL(urlStr);
+    for (const [k, v] of fieldEntries) {
+      if (Array.isArray(v)) {
+        for (const item of v) url.searchParams.append(k, String(item));
+      } else {
+        url.searchParams.append(k, String(v));
       }
-      urlStr = url.toString();
     }
-  } else if (body === undefined && Object.keys(fields).length > 0) {
-    // Fields become a JSON body (only if --input didn't supply one)
+    urlStr = url.toString();
+  } else if (!QUERY_METHODS.has(method) && hasFields) {
+    // Fields become a JSON body; arrays serialize naturally.
     body = JSON.stringify(fields);
   }
 
+  const credentials = Buffer.from(
+    `${config.email}:${config.apiToken}`
+  ).toString('base64');
   const headers: Record<string, string> = {
-    authorization: `Basic ${btoa(`${config.email}:${config.apiToken}`)}`,
+    authorization: `Basic ${credentials}`,
     accept: 'application/json',
   };
 
