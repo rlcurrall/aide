@@ -135,6 +135,13 @@ aide jira delete-comment PROJ-123 <comment-id>
 # Manage attachments
 aide jira attach PROJ-123 --list
 aide jira attach PROJ-123 --upload ./file.pdf
+
+# Raw REST API passthrough (escape hatch for endpoints not covered by typed commands)
+aide jira api rest/api/3/myself                                 # GET current user
+aide jira api rest/api/3/statuses                               # list workflow statuses
+aide jira api rest/api/3/search/jql -f "jql=project = PROJ"     # -f becomes querystring on GET
+aide jira api -X POST rest/api/3/issue --input body.json        # POST body from file
+echo '{"body":"hi"}' | aide jira api -X POST rest/api/3/issue/PROJ-1/comment --input -  # stdin body
 \`\`\``;
 
 const PR_COMMANDS = `## Pull Request Commands

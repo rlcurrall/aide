@@ -157,6 +157,7 @@ skills/                   # Claude Code skills (auto-discovered by Claude)
   ticket-edit-comment/SKILL.md   # Edit a comment
   boards/SKILL.md         # List Jira boards
   sprint/SKILL.md         # Get sprint information
+  jira-api/SKILL.md       # Raw Jira REST API passthrough
 
 .claude-plugin/           # Claude Code plugin metadata
   plugin.json             # Plugin manifest

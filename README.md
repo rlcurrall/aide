@@ -191,12 +191,17 @@ Use this for endpoints that the typed commands don't support, custom queries, or
 **Flags:**
 
 - `-X, --method` - HTTP method (default: GET). Use `POST`, `PUT`, `DELETE`, etc.
-- `-f` - String field parameter: `-f key=value` (can be repeated)
-- `-F` - Typed field: `-F key=value` coerces `true`/`false`/`null` and numeric literals; other values pass through as strings. Repeatable.
-- `-H` - Custom header: `-H "Name: value"` (can be repeated)
-- `--input` - Read request body from file or `-` for stdin
+- `-f` - String field: `-f key=value`. Repeatable; duplicate keys produce an array (`gh`/`curl` semantics).
+- `-F` - Typed field: `-F key=value` coerces `true`/`false`/`null` and numeric literals; other values pass through as strings. Repeatable; duplicate keys produce an array.
+- `-H` - Custom header: `-H "Name: value"` (can be repeated).
+- `--input` - Raw request body from file path or `-` for stdin. Cannot be combined with `GET`/`HEAD`/`DELETE` (no body on query methods) or with `-f`/`-F` on body methods (ambiguous body source).
 
-**Security:** The command attaches your stored Jira basic-auth credentials. Relative paths resolve against your configured Jira host. Absolute URLs are accepted only when HTTPS and on the configured host; cross-host or `http://` URLs are refused to prevent credential leakage.
+**Field routing:**
+
+- `GET`/`HEAD`/`DELETE`: `-f`/`-F` fields go on the querystring.
+- `POST`/`PUT`/`PATCH`: `-f`/`-F` fields form a JSON body; `--input` supplies the body directly.
+
+**Security:** The command attaches your stored Jira basic-auth credentials. Relative paths resolve against your configured Jira host. Absolute URLs are accepted only when HTTPS and on the configured host; cross-host or `http://` URLs are refused to prevent credential leakage. Redirects (3xx) are not followed so credentials aren't replayed across origins — a warning is written to stderr when one is returned.
 
 ### Pull Requests
 
