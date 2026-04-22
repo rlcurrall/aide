@@ -3,6 +3,9 @@ node_modules
 dist/
 .worktrees/
 
+# Superpowers specs/plans stay local — not committed to repo history
+docs/superpowers/
+
 .claude/settings.local.json
 
 # Beads / Dolt files (added by bd init)
