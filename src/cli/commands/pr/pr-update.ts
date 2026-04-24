@@ -464,6 +464,7 @@ export default {
     description: {
       type: 'string',
       describe: 'New description for the PR',
+      alias: 'body',
     },
     target: {
       type: 'string',
