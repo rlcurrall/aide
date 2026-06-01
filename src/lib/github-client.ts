@@ -22,8 +22,16 @@ import { isGhCliAvailable } from './gh-utils.js';
 import { getSecret, KeyringUnavailableError } from './secrets.js';
 import { StoredGithubSchema } from '@schemas/config.js';
 import { ConfigError } from './config.js';
+import {
+  githubApiBase,
+  githubGraphqlUrl,
+  ghHostArgs,
+  DEFAULT_GITHUB_HOST,
+} from './github-host.js';
 
 type TransportMode = 'gh-cli' | 'token';
+type SpawnSyncFn = typeof spawnSync;
+type FetchFn = typeof fetch;
 
 /**
  * Error thrown when GitHub authentication is not available.
@@ -72,10 +80,24 @@ async function tryReadStoredToken(): Promise<string | null> {
 export class GitHubClient {
   private mode: TransportMode;
   private token?: string;
+  private host: string;
+  private spawn: SpawnSyncFn;
+  private fetchImpl: FetchFn;
 
-  private constructor(mode: TransportMode, token?: string) {
+  private constructor(
+    mode: TransportMode,
+    opts: {
+      token?: string;
+      host?: string;
+      spawn?: SpawnSyncFn;
+      fetchImpl?: FetchFn;
+    } = {}
+  ) {
     this.mode = mode;
-    this.token = token;
+    this.token = opts.token;
+    this.host = opts.host ?? DEFAULT_GITHUB_HOST;
+    this.spawn = opts.spawn ?? spawnSync;
+    this.fetchImpl = opts.fetchImpl ?? fetch;
   }
 
   /**
@@ -83,19 +105,30 @@ export class GitHubClient {
    * @throws {GitHubAuthError} if no auth source is available
    */
   static async create(
-    opts: { ghAvailable?: () => boolean } = {}
+    opts: {
+      ghAvailable?: () => boolean;
+      host?: string;
+      token?: string;
+      spawn?: SpawnSyncFn;
+      fetchImpl?: FetchFn;
+    } = {}
   ): Promise<GitHubClient> {
     const ghCheck = opts.ghAvailable ?? isGhCliAvailable;
+    const shared = {
+      host: opts.host,
+      spawn: opts.spawn,
+      fetchImpl: opts.fetchImpl,
+    };
     if (ghCheck()) {
-      return new GitHubClient('gh-cli');
+      return new GitHubClient('gh-cli', shared);
     }
-    const envToken = Bun.env.GITHUB_TOKEN || Bun.env.GH_TOKEN;
+    const envToken = opts.token ?? Bun.env.GITHUB_TOKEN ?? Bun.env.GH_TOKEN;
     if (envToken) {
-      return new GitHubClient('token', envToken);
+      return new GitHubClient('token', { ...shared, token: envToken });
     }
     const stored = await tryReadStoredToken();
     if (stored) {
-      return new GitHubClient('token', stored);
+      return new GitHubClient('token', { ...shared, token: stored });
     }
     throw new GitHubAuthError();
   }
@@ -119,6 +152,7 @@ export class GitHubClient {
     const args = [
       'gh',
       'api',
+      ...ghHostArgs(this.host),
       '-X',
       method,
       '-H',
@@ -130,12 +164,12 @@ export class GitHubClient {
 
     let result;
     if (body) {
-      result = spawnSync(args.concat(['--input', '-']), {
+      result = this.spawn(args.concat(['--input', '-']), {
         stdin: Buffer.from(JSON.stringify(body)),
         stderr: 'pipe',
       });
     } else {
-      result = spawnSync(args, {
+      result = this.spawn(args, {
         stderr: 'pipe',
       });
     }
@@ -160,6 +194,7 @@ export class GitHubClient {
     const args = [
       'gh',
       'api',
+      ...ghHostArgs(this.host),
       '-X',
       'GET',
       '-H',
@@ -170,7 +205,7 @@ export class GitHubClient {
       endpoint,
     ];
 
-    const result = spawnSync(args, { stderr: 'pipe' });
+    const result = this.spawn(args, { stderr: 'pipe' });
 
     if (result.exitCode !== 0) {
       const stderr = result.stderr.toString().trim();
@@ -201,7 +236,7 @@ export class GitHubClient {
     endpoint: string,
     body?: unknown
   ): Promise<T> {
-    const response = await fetch(`https://api.github.com${endpoint}`, {
+    const response = await this.fetchImpl(`${githubApiBase(this.host)}${endpoint}`, {
       method,
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -229,13 +264,13 @@ export class GitHubClient {
    */
   private async fetchApiCallPaginated<T>(endpoint: string): Promise<T[]> {
     const results: T[] = [];
-    let nextUrl: string | null = `https://api.github.com${endpoint}`;
+    let nextUrl: string | null = `${githubApiBase(this.host)}${endpoint}`;
 
     while (nextUrl) {
       const currentUrl = nextUrl;
       nextUrl = null;
 
-      const resp: Response = await fetch(currentUrl, {
+      const resp: Response = await this.fetchImpl(currentUrl, {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${this.token}`,
@@ -362,11 +397,11 @@ export class GitHubClient {
     errorPrefix: string
   ): Promise<void> {
     if (this.mode === 'gh-cli') {
-      const args = ['gh', 'api', 'graphql', '-f', `query=${query}`];
+      const args = ['gh', 'api', ...ghHostArgs(this.host), 'graphql', '-f', `query=${query}`];
       for (const [key, value] of Object.entries(variables)) {
         args.push('-f', `${key}=${value}`);
       }
-      const result = spawnSync(args, { stderr: 'pipe', stdout: 'pipe' });
+      const result = this.spawn(args, { stderr: 'pipe', stdout: 'pipe' });
       if (result.exitCode !== 0) {
         throw new Error(`${errorPrefix}: ${result.stderr.toString().trim()}`);
       }
@@ -383,7 +418,7 @@ export class GitHubClient {
         }
       }
     } else {
-      const response = await fetch('https://api.github.com/graphql', {
+      const response = await this.fetchImpl(githubGraphqlUrl(this.host), {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${this.token}`,

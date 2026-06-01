@@ -204,3 +204,60 @@ describeIfKeyring(
     });
   }
 );
+
+import { spawnSync } from 'bun';
+
+type Spawn = typeof spawnSync;
+
+describe('GitHubClient host routing', () => {
+  test('gh-cli transport adds --hostname for enterprise host', async () => {
+    let capturedArgs: string[] = [];
+    const fakeSpawn = ((args: string[]) => {
+      capturedArgs = args;
+      return { exitCode: 0, stdout: Buffer.from('{}'), stderr: Buffer.from('') };
+    }) as unknown as Spawn;
+
+    const client = await GitHubClient.create({
+      ghAvailable: () => true,
+      host: 'acme.ghe.com',
+      spawn: fakeSpawn,
+    });
+    await client.getPullRequest('o', 'r', 1);
+    expect(capturedArgs).toContain('--hostname');
+    expect(capturedArgs).toContain('acme.ghe.com');
+  });
+
+  test('gh-cli transport omits --hostname for github.com', async () => {
+    let capturedArgs: string[] = [];
+    const fakeSpawn = ((args: string[]) => {
+      capturedArgs = args;
+      return { exitCode: 0, stdout: Buffer.from('{}'), stderr: Buffer.from('') };
+    }) as unknown as Spawn;
+
+    const client = await GitHubClient.create({
+      ghAvailable: () => true,
+      spawn: fakeSpawn,
+    });
+    await client.getPullRequest('o', 'r', 1);
+    expect(capturedArgs).not.toContain('--hostname');
+  });
+
+  test('token transport targets api.<host> for enterprise host', async () => {
+    const envSnap = clearGhEnv();
+    let capturedUrl = '';
+    const fakeFetch = (async (url: string) => {
+      capturedUrl = url;
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const client = await GitHubClient.create({
+      ghAvailable: () => false,
+      host: 'acme.ghe.com',
+      token: 'tok',
+      fetchImpl: fakeFetch,
+    });
+    await client.getPullRequest('o', 'r', 1);
+    expect(capturedUrl).toBe('https://api.acme.ghe.com/repos/o/r/pulls/1');
+    restoreGhEnv(envSnap);
+  });
+});
