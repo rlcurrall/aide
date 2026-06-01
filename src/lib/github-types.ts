@@ -6,6 +6,7 @@
  * GitHub remote repository info extracted from git remote URL
  */
 export interface GitHubRemoteInfo {
+  host: string;
   owner: string;
   repo: string;
 }

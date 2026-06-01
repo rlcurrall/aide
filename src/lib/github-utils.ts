@@ -13,6 +13,7 @@ import type { FindPRResult } from './ado-utils.js';
 import { GitHubClient } from './github-client.js';
 import { regex } from 'arkregex';
 import { getCurrentBranch, getGitRemoteUrl } from './git-utils.js';
+import { getGhKnownHosts, isKnownGitHubHost } from './github-host.js';
 
 // ============================================================================
 // GitHub URL Helpers
@@ -30,31 +31,41 @@ export function buildGitHubPrUrl(
 }
 
 /**
- * Parse GitHub git remote URL to extract owner and repo.
- * Supports both SSH and HTTPS formats:
- * - SSH: git@github.com:{owner}/{repo}.git
- * - HTTPS: https://github.com/{owner}/{repo}.git
+ * Parse a GitHub git remote URL to extract host, owner, and repo.
+ * Accepts SSH (git@<host>:owner/repo.git) and HTTPS
+ * (https://<host>/owner/repo(.git)) forms. Returns null unless the host is a
+ * known GitHub host (github.com plus any gh-authenticated enterprise hosts).
+ *
+ * @param knownHosts Optional pre-resolved host set (defaults to gh's known
+ *   hosts). Pass it to avoid repeated `gh auth status` calls.
  */
-export function parseGitHubRemote(remoteUrl: string): GitHubRemoteInfo | null {
-  // SSH format: git@github.com:owner/repo.git
-  const sshMatch = regex('^git@github\\.com:(?<owner>[^/]+)/(?<repo>.+)$').exec(
-    remoteUrl
-  )?.groups;
-  if (sshMatch) {
+export function parseGitHubRemote(
+  remoteUrl: string,
+  knownHosts?: string[]
+): GitHubRemoteInfo | null {
+  const hosts = knownHosts ?? getGhKnownHosts();
+
+  // SSH: git@<host>:owner/repo(.git)
+  const ssh = regex(
+    '^git@(?<host>[^:]+):(?<owner>[^/]+)/(?<repo>.+)$'
+  ).exec(remoteUrl)?.groups;
+  if (ssh && isKnownGitHubHost(ssh.host, hosts)) {
     return {
-      owner: sshMatch.owner,
-      repo: sshMatch.repo.replace(/\.git$/, ''),
+      host: ssh.host.toLowerCase(),
+      owner: ssh.owner,
+      repo: ssh.repo.replace(/\.git$/, ''),
     };
   }
 
-  // HTTPS format: https://github.com/owner/repo.git
-  const httpsMatch = regex(
-    '^https://github\\.com/(?<owner>[^/]+)/(?<repo>[^/]+?)(?:\\.git)?$'
+  // HTTPS: https://<host>/owner/repo(.git)
+  const https = regex(
+    '^https://(?<host>[^/]+)/(?<owner>[^/]+)/(?<repo>[^/]+?)(?:\\.git)?$'
   ).exec(remoteUrl)?.groups;
-  if (httpsMatch) {
+  if (https && isKnownGitHubHost(https.host, hosts)) {
     return {
-      owner: httpsMatch.owner,
-      repo: httpsMatch.repo,
+      host: https.host.toLowerCase(),
+      owner: https.owner,
+      repo: https.repo,
     };
   }
 
@@ -63,7 +74,7 @@ export function parseGitHubRemote(remoteUrl: string): GitHubRemoteInfo | null {
 
 /**
  * Auto-discover GitHub repo info from git remote.
- * Returns null if not in a git repository or remote is not GitHub.
+ * Returns null if not in a git repository or remote is not a known GitHub host.
  */
 export function discoverGitHubRepoInfo(): GitHubRemoteInfo | null {
   const remoteUrl = getGitRemoteUrl();
