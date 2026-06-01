@@ -102,6 +102,12 @@ export class GitHubClient {
 
   /**
    * Create a GitHubClient, checking gh CLI, env vars, and keyring in order.
+   *
+   * Auth-source precedence is unchanged from the original: gh-cli first, then
+   * a token, then the keyring. `opts.token` is an explicit token used only
+   * when gh-cli is unavailable; in that case it takes precedence over the
+   * GITHUB_TOKEN/GH_TOKEN env vars and the keyring. When gh-cli is available
+   * it is always used (it carries its own auth), so `opts.token` is ignored.
    * @throws {GitHubAuthError} if no auth source is available
    */
   static async create(
@@ -122,7 +128,9 @@ export class GitHubClient {
     if (ghCheck()) {
       return new GitHubClient('gh-cli', shared);
     }
-    const envToken = opts.token ?? Bun.env.GITHUB_TOKEN ?? Bun.env.GH_TOKEN;
+    // Use `||` (not `??`) so an empty-string env var falls through rather than
+    // being treated as a usable token.
+    const envToken = opts.token || Bun.env.GITHUB_TOKEN || Bun.env.GH_TOKEN;
     if (envToken) {
       return new GitHubClient('token', { ...shared, token: envToken });
     }
