@@ -46,9 +46,11 @@ export function parseGitHubRemote(
 ): GitHubRemoteInfo | null {
   const hosts = knownHosts ?? getGhKnownHosts();
 
-  // SSH: git@<host>:owner/repo(.git)
+  // SSH (scp-like): [user@]<host>:owner/repo(.git). The user is usually `git`
+  // but enterprise setups use other users (e.g. `vantaca@`), so allow any.
+  // The isKnownGitHubHost gate below keeps non-GitHub hosts out.
   const ssh = regex(
-    '^git@(?<host>[^:]+):(?<owner>[^/]+)/(?<repo>.+)$'
+    '^(?:[^@]+@)?(?<host>[^:/]+):(?<owner>[^/]+)/(?<repo>.+)$'
   ).exec(remoteUrl)?.groups;
   if (ssh && isKnownGitHubHost(ssh.host, hosts)) {
     return {

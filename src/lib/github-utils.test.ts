@@ -22,6 +22,12 @@ describe('parseGitHubRemote', () => {
     ).toEqual({ host: 'acme.ghe.com', owner: 'owner', repo: 'repo' });
   });
 
+  test('parses enterprise SSH remote with a non-git@ user', () => {
+    expect(
+      parseGitHubRemote('vantaca@acme.ghe.com:owner/repo.git', known)
+    ).toEqual({ host: 'acme.ghe.com', owner: 'owner', repo: 'repo' });
+  });
+
   test('parses enterprise HTTPS remote without .git', () => {
     expect(
       parseGitHubRemote('https://acme.ghe.com/owner/repo', known)
