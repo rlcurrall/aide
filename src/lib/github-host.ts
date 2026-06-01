@@ -29,7 +29,9 @@ export function getGhKnownHosts(spawn: SpawnSyncFn = spawnSync): string[] {
     });
     if (result.exitCode !== 0) return [...hosts];
     const text = result.stdout.toString() + '\n' + result.stderr.toString();
-    const re = /Logged in to (\S+)/g;
+    // Require the captured token to look like a hostname (contains a dot) so
+    // a future gh format change can't capture a bare prose word as a "host".
+    const re = /Logged in to ([\w.-]+\.[\w-]+)/g;
     let match: RegExpExecArray | null;
     while ((match = re.exec(text)) !== null) {
       if (match[1]) hosts.add(match[1].toLowerCase());
