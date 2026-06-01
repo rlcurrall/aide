@@ -85,6 +85,7 @@ bun run dev <command>
 # Set up credentials (stores in OS keyring)
 aide login jira     # prompts for Jira URL, email, API token
 aide login ado      # prompts for Azure DevOps org URL and PAT
+gh auth login       # GitHub / GitHub Enterprise — aide reuses your gh login
 aide whoami         # show what's configured and where it came from
 
 # Get help
@@ -269,15 +270,28 @@ export AZURE_DEVOPS_ORG_URL="https://dev.azure.com/yourorg"
 export AZURE_DEVOPS_PAT="your-personal-access-token"
 ```
 
-**GitHub:**
+**GitHub (and GitHub Enterprise):**
 
-GitHub authentication is handled automatically via the `gh` CLI. If you have `gh` installed and authenticated (`gh auth login`), no additional configuration is needed.
+GitHub authentication is handled through the [`gh` CLI](https://cli.github.com/). Once `gh` is installed and authenticated, aide needs no extra GitHub configuration — it reuses your `gh` login. There is nothing to `aide login` for GitHub.
 
-For CI/headless environments without `gh`, set:
+- **GitHub.com:** `gh auth login`
+- **GitHub Enterprise** (a data-residency host such as `your-company.ghe.com`): `gh auth login --hostname your-company.ghe.com`
+
+aide detects which platform a repository belongs to from its git remote and routes API calls to the matching host. A remote is treated as GitHub only when its host is one you are logged into via `gh` (github.com is always recognized). So once you have run `gh auth login --hostname <host>`, enterprise repositories "just work" — `aide pr list`, `pr view`, `pr comments`, etc. all target the right host automatically.
+
+Verify what `gh` (and therefore aide) recognizes:
+
+```bash
+gh auth status   # lists every host you're logged in to
+```
+
+For CI/headless environments without `gh`, set a token for **github.com**:
 
 ```bash
 export GITHUB_TOKEN="your-github-token"
 ```
+
+> Token-only (headless) auth targets github.com. Auto-detecting an Enterprise host from a git remote currently requires the `gh` CLI, and GitHub Enterprise **Server** (the self-hosted `/api/v3` variant) is not yet supported — only GitHub Enterprise Cloud data-residency hosts.
 
 You can store these in:
 
@@ -293,10 +307,12 @@ When running from within a git repository, PR commands automatically detect the 
 - SSH: `git@ssh.dev.azure.com:v3/org/project/repo`
 - HTTPS: `https://dev.azure.com/org/project/_git/repo`
 
-**GitHub:**
+**GitHub / GitHub Enterprise:**
 
-- SSH: `git@github.com:owner/repo.git`
-- HTTPS: `https://github.com/owner/repo.git`
+- SSH: `[user@]<host>:owner/repo.git` — e.g. `git@github.com:owner/repo.git` or `org@your-company.ghe.com:owner/repo.git` (any SSH user is accepted)
+- HTTPS: `https://<host>/owner/repo.git`
+
+Enterprise hosts are recognized when you are authenticated to them via `gh auth login --hostname <host>` (github.com is always recognized). Run `gh auth status` to see which hosts qualify.
 
 ## Development
 
