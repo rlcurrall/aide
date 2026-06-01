@@ -1,5 +1,12 @@
 import { describe, test, expect } from 'bun:test';
-import { getGhKnownHosts, isKnownGitHubHost } from './github-host.js';
+import {
+  getGhKnownHosts,
+  isKnownGitHubHost,
+  githubApiBase,
+  githubGraphqlUrl,
+  githubWebBase,
+  ghHostArgs,
+} from './github-host.js';
 import type { spawnSync } from 'bun';
 
 type Spawn = typeof spawnSync;
@@ -69,5 +76,31 @@ describe('isKnownGitHubHost', () => {
   });
   test('rejects unknown hosts', () => {
     expect(isKnownGitHubHost('gitlab.com', ['github.com'])).toBe(false);
+  });
+});
+
+describe('URL builders', () => {
+  test('githubApiBase for github.com', () => {
+    expect(githubApiBase('github.com')).toBe('https://api.github.com');
+  });
+  test('githubApiBase for data-residency host', () => {
+    expect(githubApiBase('acme.ghe.com')).toBe('https://api.acme.ghe.com');
+  });
+  test('githubGraphqlUrl appends /graphql', () => {
+    expect(githubGraphqlUrl('acme.ghe.com')).toBe(
+      'https://api.acme.ghe.com/graphql'
+    );
+  });
+  test('githubWebBase', () => {
+    expect(githubWebBase('acme.ghe.com')).toBe('https://acme.ghe.com');
+  });
+});
+
+describe('ghHostArgs', () => {
+  test('returns empty array for github.com', () => {
+    expect(ghHostArgs('github.com')).toEqual([]);
+  });
+  test('returns --hostname for enterprise host', () => {
+    expect(ghHostArgs('acme.ghe.com')).toEqual(['--hostname', 'acme.ghe.com']);
   });
 });

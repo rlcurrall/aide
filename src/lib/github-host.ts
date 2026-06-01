@@ -52,3 +52,27 @@ export function isKnownGitHubHost(
   const lower = host.toLowerCase();
   return knownHosts.some((h) => h.toLowerCase() === lower);
 }
+
+/** REST API base for a host: github.com -> https://api.github.com. */
+export function githubApiBase(host: string): string {
+  return `https://api.${host}`;
+}
+
+/** GraphQL endpoint for a host. */
+export function githubGraphqlUrl(host: string): string {
+  return `${githubApiBase(host)}/graphql`;
+}
+
+/** Web (browser) base for a host: https://<host>. */
+export function githubWebBase(host: string): string {
+  return `https://${host}`;
+}
+
+/**
+ * Extra `gh api` args to target a host. Empty for github.com (the gh default),
+ * otherwise `--hostname <host>` since `gh api` does not infer the host from the
+ * git remote.
+ */
+export function ghHostArgs(host: string): string[] {
+  return host === DEFAULT_GITHUB_HOST ? [] : ['--hostname', host];
+}
