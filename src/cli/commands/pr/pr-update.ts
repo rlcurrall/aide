@@ -177,7 +177,7 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
       if (ctx.autoDiscovered) {
         if (ctx.platform === 'github') {
           logProgress(
-            `Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`,
+            `Auto-discovered: ${ctx.host}/${ctx.owner}/${ctx.repo}`,
             format
           );
         } else {
@@ -254,7 +254,7 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
       // =======================================================================
       // GitHub path
       // =======================================================================
-      const { owner, repo } = ctx;
+      const { owner, repo, host } = ctx;
 
       // Build REST API update payload
       const ghUpdates: Record<string, unknown> = {};
@@ -312,7 +312,7 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
 
       // Refetch to get current state after all updates
       const updatedPR = await ctx.client.getPullRequest(owner, repo, prId);
-      const prUrl = buildGitHubPrUrl(owner, repo, prId);
+      const prUrl = buildGitHubPrUrl(host, owner, repo, prId);
       const output = formatGitHubOutput(updatedPR, format, prUrl);
       console.log(output);
     } else {

@@ -305,6 +305,12 @@ export GITHUB_TOKEN="your-github-token"
 
 The platform is auto-detected from the git remote URL. GitHub remotes (SSH or HTTPS) are automatically recognized.
 
+**GitHub Enterprise (GHE Cloud data-residency hosts, e.g. `acme.ghe.com`)** is
+supported automatically: authenticate with `gh auth login --hostname
+acme.ghe.com`, and aide detects the host from your git remote and routes API
+calls there. Detection relies on the gh CLI's known hosts (github.com always
+works). Token-only/headless enterprise auto-detection is not yet supported.
+
 Credentials can be stored in `~/.vars` and sourced, or in a `.env` file in the project directory.
 
 
