@@ -13,21 +13,22 @@ import type { FindPRResult } from './ado-utils.js';
 import { GitHubClient } from './github-client.js';
 import { regex } from 'arkregex';
 import { getCurrentBranch, getGitRemoteUrl } from './git-utils.js';
-import { getGhKnownHosts, isKnownGitHubHost } from './github-host.js';
+import { getGhKnownHosts, isKnownGitHubHost, githubWebBase } from './github-host.js';
 
 // ============================================================================
 // GitHub URL Helpers
 // ============================================================================
 
 /**
- * Build the PR URL for GitHub
+ * Build the PR URL for a GitHub host.
  */
 export function buildGitHubPrUrl(
+  host: string,
   owner: string,
   repo: string,
   number: number
 ): string {
-  return `https://github.com/${owner}/${repo}/pull/${number}`;
+  return `${githubWebBase(host)}/${owner}/${repo}/pull/${number}`;
 }
 
 /**
@@ -85,14 +86,16 @@ export function discoverGitHubRepoInfo(): GitHubRemoteInfo | null {
 }
 
 /**
- * Parse GitHub PR URL to extract owner, repo, and PR number.
- * Format: https://github.com/{owner}/{repo}/pull/{number}
+ * Parse a GitHub PR URL to extract host, owner, repo, and PR number.
+ * Format: https://<host>/{owner}/{repo}/pull/{number}. Returns null unless the
+ * host is a known GitHub host.
  */
-export function parseGitHubPRUrl(url: string): {
-  owner: string;
-  repo: string;
-  number: number;
-} | null {
+export function parseGitHubPRUrl(
+  url: string,
+  knownHosts?: string[]
+): { host: string; owner: string; repo: string; number: number } | null {
+  const hosts = knownHosts ?? getGhKnownHosts();
+
   let normalized = url;
   try {
     const parsed = new URL(url);
@@ -102,14 +105,15 @@ export function parseGitHubPRUrl(url: string): {
   }
 
   const match = regex(
-    '^https://github\\.com/(?<owner>[^/]+)/(?<repo>[^/]+)/pull/(?<number>\\d+)$'
+    '^https://(?<host>[^/]+)/(?<owner>[^/]+)/(?<repo>[^/]+)/pull/(?<number>\\d+)$'
   ).exec(normalized)?.groups;
 
-  if (!match) {
+  if (!match || !isKnownGitHubHost(match.host, hosts)) {
     return null;
   }
 
   return {
+    host: match.host.toLowerCase(),
     owner: match.owner,
     repo: match.repo,
     number: parseInt(match.number, 10),
