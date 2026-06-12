@@ -16,7 +16,11 @@ import {
   GitHubAuthError,
   type PlatformContext,
 } from '@lib/platform.js';
-import { buildGitHubPrUrl, getGitHubPRStatus } from '@lib/github-utils.js';
+import {
+  buildGitHubPrUrl,
+  getGitHubPRStatus,
+  DEFAULT_GITHUB_HOST,
+} from '@lib/github-utils.js';
 import { validateArgs } from '@lib/validation.js';
 import {
   ViewArgsSchema,
@@ -160,7 +164,7 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
       if (ctx.autoDiscovered) {
         if (ctx.platform === 'github') {
           logProgress(
-            `Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`,
+            `Auto-discovered: ${ctx.host}/${ctx.owner}/${ctx.repo}`,
             format
           );
         } else {
@@ -203,11 +207,13 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
         // URL overrides context - rebuild for the right platform
         if (parsed.platform === 'github' && parsed.owner && parsed.ghRepo) {
           const { GitHubClient } = await import('@lib/github-client.js');
+          const host = parsed.ghHost ?? DEFAULT_GITHUB_HOST;
           ctx = {
             platform: 'github',
             owner: parsed.owner,
             repo: parsed.ghRepo,
-            client: await GitHubClient.create(),
+            host,
+            client: await GitHubClient.create({ host }),
             autoDiscovered: false,
           };
         } else if (
@@ -285,7 +291,7 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
 
     if (ctx.platform === 'github') {
       const pr = await ctx.client.getPullRequest(ctx.owner, ctx.repo, prId);
-      const url = buildGitHubPrUrl(ctx.owner, ctx.repo, prId);
+      const url = buildGitHubPrUrl(ctx.owner, ctx.repo, prId, ctx.host);
       const output = formatGitHubOutput(pr, format, url);
       console.log(output);
     } else {

@@ -19,43 +19,86 @@ import { getCurrentBranch, getGitRemoteUrl } from './git-utils.js';
 // ============================================================================
 
 /**
+ * Default GitHub host when none is detected.
+ */
+export const DEFAULT_GITHUB_HOST = 'github.com';
+
+/**
+ * Normalize a raw host from a git remote or PR URL to a canonical GitHub web
+ * host, or return null if it isn't a supported GitHub host.
+ *
+ * Supported hosts:
+ * - `github.com` (public GitHub, also via `ssh.github.com`)
+ * - `*.ghe.com` (GitHub Enterprise Cloud with data residency)
+ *
+ * Self-hosted GitHub Enterprise Server (`/api/v3` style hosts) is not handled
+ * here since its API URL scheme differs.
+ */
+export function normalizeGitHubHost(rawHost: string): string | null {
+  // `ssh.github.com` (port 443 SSH) and `ssh.{sub}.ghe.com` map to their
+  // web/API host without the ssh. prefix.
+  const host = rawHost.toLowerCase().replace(/^ssh\./, '');
+  if (host === 'github.com') return host;
+  if (regex('^[a-z0-9][a-z0-9-]*\\.ghe\\.com$').exec(host)) return host;
+  return null;
+}
+
+/**
+ * Derive the REST API base URL for a GitHub host.
+ * - github.com -> https://api.github.com
+ * - acme.ghe.com -> https://api.acme.ghe.com
+ */
+export function githubApiBase(host: string): string {
+  return `https://api.${host}`;
+}
+
+/**
  * Build the PR URL for GitHub
  */
 export function buildGitHubPrUrl(
   owner: string,
   repo: string,
-  number: number
+  number: number,
+  host: string = DEFAULT_GITHUB_HOST
 ): string {
-  return `https://github.com/${owner}/${repo}/pull/${number}`;
+  return `https://${host}/${owner}/${repo}/pull/${number}`;
 }
 
 /**
- * Parse GitHub git remote URL to extract owner and repo.
- * Supports both SSH and HTTPS formats:
- * - SSH: git@github.com:{owner}/{repo}.git
- * - HTTPS: https://github.com/{owner}/{repo}.git
+ * Parse GitHub git remote URL to extract owner, repo, and host.
+ * Supports both SSH and HTTPS formats on github.com and *.ghe.com hosts:
+ * - SSH: git@{host}:{owner}/{repo}.git
+ * - HTTPS: https://{host}/{owner}/{repo}.git
  */
 export function parseGitHubRemote(remoteUrl: string): GitHubRemoteInfo | null {
-  // SSH format: git@github.com:owner/repo.git
-  const sshMatch = regex('^git@github\\.com:(?<owner>[^/]+)/(?<repo>.+)$').exec(
-    remoteUrl
-  )?.groups;
+  // SSH format: git@{host}:owner/repo.git
+  const sshMatch = regex(
+    '^git@(?<host>[^:/]+):(?<owner>[^/@:]+)/(?<repo>.+)$'
+  ).exec(remoteUrl)?.groups;
   if (sshMatch) {
-    return {
-      owner: sshMatch.owner,
-      repo: sshMatch.repo.replace(/\.git$/, ''),
-    };
+    const host = normalizeGitHubHost(sshMatch.host);
+    if (host) {
+      return {
+        owner: sshMatch.owner,
+        repo: sshMatch.repo.replace(/\.git$/, ''),
+        host,
+      };
+    }
   }
 
-  // HTTPS format: https://github.com/owner/repo.git
+  // HTTPS format: https://{host}/owner/repo.git
   const httpsMatch = regex(
-    '^https://github\\.com/(?<owner>[^/]+)/(?<repo>[^/]+?)(?:\\.git)?$'
+    '^https://(?<host>[^/]+)/(?<owner>[^/]+)/(?<repo>[^/]+?)(?:\\.git)?$'
   ).exec(remoteUrl)?.groups;
   if (httpsMatch) {
-    return {
-      owner: httpsMatch.owner,
-      repo: httpsMatch.repo,
-    };
+    const host = normalizeGitHubHost(httpsMatch.host);
+    if (host) {
+      return {
+        owner: httpsMatch.owner,
+        repo: httpsMatch.repo,
+        host,
+      };
+    }
   }
 
   return null;
@@ -74,13 +117,15 @@ export function discoverGitHubRepoInfo(): GitHubRemoteInfo | null {
 }
 
 /**
- * Parse GitHub PR URL to extract owner, repo, and PR number.
- * Format: https://github.com/{owner}/{repo}/pull/{number}
+ * Parse GitHub PR URL to extract host, owner, repo, and PR number.
+ * Format: https://{host}/{owner}/{repo}/pull/{number}
+ * where {host} is github.com or a *.ghe.com host.
  */
 export function parseGitHubPRUrl(url: string): {
   owner: string;
   repo: string;
   number: number;
+  host: string;
 } | null {
   let normalized = url;
   try {
@@ -91,10 +136,15 @@ export function parseGitHubPRUrl(url: string): {
   }
 
   const match = regex(
-    '^https://github\\.com/(?<owner>[^/]+)/(?<repo>[^/]+)/pull/(?<number>\\d+)$'
+    '^https://(?<host>[^/]+)/(?<owner>[^/]+)/(?<repo>[^/]+)/pull/(?<number>\\d+)$'
   ).exec(normalized)?.groups;
 
   if (!match) {
+    return null;
+  }
+
+  const host = normalizeGitHubHost(match.host);
+  if (!host) {
     return null;
   }
 
@@ -102,6 +152,7 @@ export function parseGitHubPRUrl(url: string): {
     owner: match.owner,
     repo: match.repo,
     number: parseInt(match.number, 10),
+    host,
   };
 }
 

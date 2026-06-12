@@ -19,11 +19,53 @@ import type {
   GitHubCreateReviewCommentOptions,
 } from './github-types.js';
 import { isGhCliAvailable } from './gh-utils.js';
+import { DEFAULT_GITHUB_HOST, githubApiBase } from './github-utils.js';
 import { getSecret, KeyringUnavailableError } from './secrets.js';
 import { StoredGithubSchema } from '@schemas/config.js';
 import { ConfigError } from './config.js';
 
 type TransportMode = 'gh-cli' | 'token';
+
+/**
+ * Minimal subset of `bun`'s `spawnSync` result this client relies on.
+ */
+export interface SpawnResult {
+  exitCode: number | null;
+  stdout: { toString(): string };
+  stderr: { toString(): string };
+}
+
+/**
+ * Options passed to the injectable spawn function. A subset of bun's
+ * SpawnOptions covering only what the gh CLI transport uses.
+ */
+export interface SpawnOptions {
+  stdin?: Uint8Array;
+  stderr?: 'pipe';
+  stdout?: 'pipe';
+}
+
+/**
+ * Injectable synchronous spawn used by the gh CLI transport. Defaults to
+ * bun's `spawnSync`; tests pass a stub to assert the args (e.g. `--hostname`)
+ * without invoking the real `gh` binary.
+ */
+export type SpawnSyncFn = (cmd: string[], options?: SpawnOptions) => SpawnResult;
+
+/**
+ * Injectable fetch used by the token transport. Defaults to global `fetch`;
+ * tests pass a stub to assert the request URL without hitting the network.
+ */
+export type FetchFn = typeof globalThis.fetch;
+
+/**
+ * Transport dependencies. Injectable so the gh CLI and token paths can be
+ * unit-tested without spawning `gh` or making real HTTP requests.
+ */
+export interface GitHubClientDeps {
+  spawn?: SpawnSyncFn;
+  fetch?: FetchFn;
+}
 
 /**
  * Error thrown when GitHub authentication is not available.
@@ -72,30 +114,54 @@ async function tryReadStoredToken(): Promise<string | null> {
 export class GitHubClient {
   private mode: TransportMode;
   private token?: string;
+  private host: string;
+  private spawn: SpawnSyncFn;
+  private fetchImpl: FetchFn;
 
-  private constructor(mode: TransportMode, token?: string) {
+  private constructor(
+    mode: TransportMode,
+    host: string,
+    token?: string,
+    deps: GitHubClientDeps = {}
+  ) {
     this.mode = mode;
+    this.host = host;
     this.token = token;
+    this.spawn = deps.spawn ?? (spawnSync as unknown as SpawnSyncFn);
+    this.fetchImpl = deps.fetch ?? globalThis.fetch.bind(globalThis);
   }
 
   /**
    * Create a GitHubClient, checking gh CLI, env vars, and keyring in order.
+   *
+   * @param opts.host - GitHub web host (e.g. `github.com` or `acme.ghe.com`).
+   *   Defaults to `github.com`. Used to derive the REST/GraphQL API base and,
+   *   for the gh CLI transport, the `--hostname` passed to `gh api`.
+   * @param opts.spawn - Test seam overriding the gh CLI spawn function.
+   * @param opts.fetch - Test seam overriding the token transport's fetch.
    * @throws {GitHubAuthError} if no auth source is available
    */
   static async create(
-    opts: { ghAvailable?: () => boolean } = {}
+    opts: {
+      ghAvailable?: () => boolean;
+      host?: string;
+      spawn?: SpawnSyncFn;
+      fetch?: FetchFn;
+    } = {}
   ): Promise<GitHubClient> {
+    const host = opts.host ?? DEFAULT_GITHUB_HOST;
+    const deps: GitHubClientDeps = { spawn: opts.spawn, fetch: opts.fetch };
     const ghCheck = opts.ghAvailable ?? isGhCliAvailable;
     if (ghCheck()) {
-      return new GitHubClient('gh-cli');
+      return new GitHubClient('gh-cli', host, undefined, deps);
     }
     const envToken = Bun.env.GITHUB_TOKEN || Bun.env.GH_TOKEN;
     if (envToken) {
-      return new GitHubClient('token', envToken);
+      return new GitHubClient('token', host, envToken, deps);
     }
     const stored = await tryReadStoredToken();
     if (stored) {
-      return new GitHubClient('token', stored);
+      return new GitHubClient('token', host, stored, deps);
     }
     throw new GitHubAuthError();
   }
@@ -121,6 +187,8 @@ export class GitHubClient {
       'api',
       '-X',
       method,
+      '--hostname',
+      this.host,
       '-H',
       'Accept: application/vnd.github+json',
       '-H',
@@ -130,12 +198,12 @@ export class GitHubClient {
 
     let result;
     if (body) {
-      result = spawnSync(args.concat(['--input', '-']), {
+      result = this.spawn(args.concat(['--input', '-']), {
         stdin: Buffer.from(JSON.stringify(body)),
         stderr: 'pipe',
       });
     } else {
-      result = spawnSync(args, {
+      result = this.spawn(args, {
         stderr: 'pipe',
       });
     }
@@ -162,6 +230,8 @@ export class GitHubClient {
       'api',
       '-X',
       'GET',
+      '--hostname',
+      this.host,
       '-H',
       'Accept: application/vnd.github+json',
       '-H',
@@ -170,7 +240,7 @@ export class GitHubClient {
       endpoint,
     ];
 
-    const result = spawnSync(args, { stderr: 'pipe' });
+    const result = this.spawn(args, { stderr: 'pipe' });
 
     if (result.exitCode !== 0) {
       const stderr = result.stderr.toString().trim();
@@ -201,7 +271,7 @@ export class GitHubClient {
     endpoint: string,
     body?: unknown
   ): Promise<T> {
-    const response = await fetch(`https://api.github.com${endpoint}`, {
+    const response = await this.fetchImpl(`${githubApiBase(this.host)}${endpoint}`, {
       method,
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -229,13 +299,15 @@ export class GitHubClient {
    */
   private async fetchApiCallPaginated<T>(endpoint: string): Promise<T[]> {
     const results: T[] = [];
-    let nextUrl: string | null = `https://api.github.com${endpoint}`;
+    const apiBase = githubApiBase(this.host);
+    const apiHost = new URL(apiBase).host;
+    let nextUrl: string | null = `${apiBase}${endpoint}`;
 
     while (nextUrl) {
       const currentUrl = nextUrl;
       nextUrl = null;
 
-      const resp: Response = await fetch(currentUrl, {
+      const resp: Response = await this.fetchImpl(currentUrl, {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${this.token}`,
@@ -252,14 +324,25 @@ export class GitHubClient {
       const data = (await resp.json()) as T[];
       results.push(...data);
 
-      // Parse Link header for next page
+      // Parse Link header for next page. Only follow links that stay on the
+      // configured API host so a stray/cross-host `next` can never receive the
+      // bearer token. GitHub's own API always returns same-host links.
       const linkHeader: string | null = resp.headers.get('Link');
       if (linkHeader) {
         const nextMatch: RegExpMatchArray | null = linkHeader.match(
           /<([^>]+)>;\s*rel="next"/
         );
-        if (nextMatch?.[1]) {
-          nextUrl = nextMatch[1];
+        const candidate = nextMatch?.[1];
+        if (candidate) {
+          let candidateHost: string | null = null;
+          try {
+            candidateHost = new URL(candidate).host;
+          } catch {
+            candidateHost = null;
+          }
+          if (candidateHost === apiHost) {
+            nextUrl = candidate;
+          }
         }
       }
     }
@@ -362,11 +445,19 @@ export class GitHubClient {
     errorPrefix: string
   ): Promise<void> {
     if (this.mode === 'gh-cli') {
-      const args = ['gh', 'api', 'graphql', '-f', `query=${query}`];
+      const args = [
+        'gh',
+        'api',
+        'graphql',
+        '--hostname',
+        this.host,
+        '-f',
+        `query=${query}`,
+      ];
       for (const [key, value] of Object.entries(variables)) {
         args.push('-f', `${key}=${value}`);
       }
-      const result = spawnSync(args, { stderr: 'pipe', stdout: 'pipe' });
+      const result = this.spawn(args, { stderr: 'pipe', stdout: 'pipe' });
       if (result.exitCode !== 0) {
         throw new Error(`${errorPrefix}: ${result.stderr.toString().trim()}`);
       }
@@ -383,7 +474,7 @@ export class GitHubClient {
         }
       }
     } else {
-      const response = await fetch('https://api.github.com/graphql', {
+      const response = await this.fetchImpl(`${githubApiBase(this.host)}/graphql`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${this.token}`,
