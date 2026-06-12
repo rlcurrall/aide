@@ -298,6 +298,13 @@ When running from within a git repository, PR commands automatically detect the 
 - SSH: `git@github.com:owner/repo.git`
 - HTTPS: `https://github.com/owner/repo.git`
 
+**GitHub Enterprise Cloud (data residency, `*.ghe.com`):**
+
+- SSH: `git@subdomain.ghe.com:owner/repo.git`
+- HTTPS: `https://subdomain.ghe.com/owner/repo.git`
+
+The API base is derived as `https://api.subdomain.ghe.com`. When using the `gh` CLI, authenticate against the host first with `gh auth login --hostname subdomain.ghe.com`. Self-hosted GitHub Enterprise Server (`/api/v3`) is not supported.
+
 ## Development
 
 ### Prerequisites

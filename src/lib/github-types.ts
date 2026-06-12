@@ -8,6 +8,12 @@
 export interface GitHubRemoteInfo {
   owner: string;
   repo: string;
+  /**
+   * The web host of the remote (e.g. `github.com` or `acme.ghe.com`).
+   * Defaults to `github.com` for standard github.com remotes. The REST/GraphQL
+   * API base is derived as `https://api.{host}`.
+   */
+  host: string;
 }
 
 /**

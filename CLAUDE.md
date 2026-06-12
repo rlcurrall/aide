@@ -178,6 +178,10 @@ PR commands automatically discover organization, project, and repository from gi
 - Azure DevOps HTTPS: `https://dev.azure.com/{org}/{project}/_git/{repo}`
 - GitHub SSH: `git@github.com:{owner}/{repo}.git`
 - GitHub HTTPS: `https://github.com/{owner}/{repo}.git`
+- GitHub Enterprise Cloud (data residency) SSH: `git@{subdomain}.ghe.com:{owner}/{repo}.git`
+- GitHub Enterprise Cloud (data residency) HTTPS: `https://{subdomain}.ghe.com/{owner}/{repo}.git`
+
+For GHE Cloud hosts the REST/GraphQL API base is derived as `https://api.{subdomain}.ghe.com`, and the `gh` CLI transport passes `--hostname {subdomain}.ghe.com`. Self-hosted GitHub Enterprise Server (`/api/v3` hosts) is not supported.
 
 **Multiple Output Formats:**
 All commands support `--format` flag:

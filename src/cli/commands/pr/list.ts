@@ -250,7 +250,7 @@ async function handler(argv: ArgumentsCamelCase<ListArgs>): Promise<void> {
     if (ctx.autoDiscovered) {
       if (ctx.platform === 'github') {
         logProgress(
-          `Auto-discovered: github.com/${ctx.owner}/${ctx.repo}`,
+          `Auto-discovered: ${ctx.host}/${ctx.owner}/${ctx.repo}`,
           format
         );
       } else {

@@ -21,6 +21,7 @@ import {
   parseGitHubRemote,
   parseGitHubPRUrl,
   findGitHubPRByCurrentBranch,
+  DEFAULT_GITHUB_HOST,
 } from './github-utils.js';
 import { loadAzureDevOpsConfig } from './config.js';
 import { getGitRemoteUrl } from './git-utils.js';
@@ -47,6 +48,7 @@ export type PlatformContext =
       platform: 'github';
       owner: string;
       repo: string;
+      host: string;
       client: GitHubClient;
       autoDiscovered: boolean;
     };
@@ -61,6 +63,7 @@ export interface ParsedPRUrl {
   // GitHub-specific
   owner?: string;
   ghRepo?: string;
+  ghHost?: string;
 }
 
 // ============================================================================
@@ -97,11 +100,12 @@ export async function resolvePlatformContext(
     if (ghInfo) {
       // GitHubClient.create() throws GitHubAuthError if no auth available.
       // Let it propagate - callers handle it like MissingRepoContextError.
-      const client = await GitHubClient.create();
+      const client = await GitHubClient.create({ host: ghInfo.host });
       return {
         platform: 'github',
         owner: ghInfo.owner,
         repo: ghInfo.repo,
+        host: ghInfo.host,
         client,
         autoDiscovered: true,
       };
@@ -159,6 +163,7 @@ export function parsePRUrlAny(url: string): ParsedPRUrl | null {
       prId: ghResult.number,
       owner: ghResult.owner,
       ghRepo: ghResult.repo,
+      ghHost: ghResult.host,
     };
   }
 
@@ -212,11 +217,13 @@ export async function resolvePRId(
 
       // URL overrides context
       if (parsed.platform === 'github' && parsed.owner && parsed.ghRepo) {
+        const host = parsed.ghHost ?? DEFAULT_GITHUB_HOST;
         resolvedCtx = {
           platform: 'github',
           owner: parsed.owner,
           repo: parsed.ghRepo,
-          client: await GitHubClient.create(),
+          host,
+          client: await GitHubClient.create({ host }),
           autoDiscovered: false,
         };
       } else if (
