@@ -13,6 +13,7 @@ The CLI follows a hierarchical command structure: `aide <service> <action> [opti
 - `jira` - Jira ticket management (search, view, create, update, transition, comment, comments, delete-comment, edit-comment, attach, fields, boards, sprint)
 - `pr` - Pull request management (list, view, diff, create, update, comments, comment, reply)
 - `plugin` - Claude Code plugin management (install, status, uninstall)
+- `repo` - Local git repository/worktree inspection (list)
 
 **Top-level Commands:**
 

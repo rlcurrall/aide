@@ -10,11 +10,12 @@ Built with Bun + TypeScript. Entry point: `src/cli/index.ts`.
 
 ## Command Surface
 
-Services: `jira`, `pr`, `plugin`. Top-level: `login`, `logout`, `whoami`,
-`prime`, `upgrade`.
+Services: `jira`, `pr`, `plugin`, `repo`. Top-level: `login`, `logout`,
+`whoami`, `prime`, `upgrade`.
 
 - Jira: search, view, create, update, transition, comment, comments,
   delete-comment, edit-comment, attach, fields, boards, sprint
+- Repo: list (git repositories and worktrees under one or more roots)
 - PR: list, view, diff, create, update, comments, comment, reply
 - Plugin: install, status, uninstall
 

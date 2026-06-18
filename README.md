@@ -114,6 +114,7 @@ aide <service> <action> [options]
 | `jira`    | Jira ticket management      |
 | `pr`      | Pull request management     |
 | `plugin`  | Claude Code plugin manager  |
+| `repo`    | Git repo/worktree inspection |
 | `prime`   | Output aide context         |
 | `upgrade` | Upgrade aide to latest      |
 | `login`   | Save credentials to keyring |
@@ -152,6 +153,18 @@ aide <service> <action> [options]
 | `aide pr reply <thread> <text> [--pr ID]` | Reply to a comment thread      |
 
 Note: `--pr` flag is optional - aide auto-detects from current branch if omitted.
+
+### Repo Commands
+
+| Command                  | Description                                  |
+| ------------------------ | -------------------------------------------- |
+| `aide repo list [paths]` | List git repositories and their worktrees    |
+
+Scans each root as "itself + two levels down", reading git metadata directly
+(no `git` subprocess) so it is fast enough for a SessionStart hook. Roots
+default to `$CODE_ROOT`, then the current directory. Supports `--format`
+(`text`/`json`/`markdown`), `--sort` (`path`/`repo`), `--no-headers`, and
+`--print-hook` to emit a paste-ready hook snippet.
 
 ## Usage Examples
 

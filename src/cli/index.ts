@@ -15,6 +15,7 @@ import { UserCancelledError } from '@lib/prompts.js';
 import { jiraCommands } from './commands/jira/index.js';
 import { prCommands } from './commands/pr/index.js';
 import { pluginCommands } from './commands/plugin/index.js';
+import { repoCommands } from './commands/repo/index.js';
 import primeCommand from './commands/prime.js';
 import upgradeCommand from './commands/upgrade.js';
 import loginCommand from './commands/login.js';
@@ -35,6 +36,7 @@ async function main(): Promise<number> {
       .command(jiraCommands)
       .command(prCommands)
       .command(pluginCommands)
+      .command(repoCommands)
       .command(primeCommand)
       .command(upgradeCommand)
       .command(loginCommand)
@@ -42,7 +44,7 @@ async function main(): Promise<number> {
       .command(whoamiCommand)
       .demandCommand(
         1,
-        'Please specify a command (jira, pr, plugin, prime, upgrade, login, logout, whoami)'
+        'Please specify a command (jira, pr, plugin, repo, prime, upgrade, login, logout, whoami)'
       )
       .strict()
       .wrap(Math.min(100, process.stdout.columns || 80))
