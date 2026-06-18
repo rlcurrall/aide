@@ -1,0 +1,1 @@
+{"id":"int-6943b002","kind":"field_change","created_at":"2026-06-18T14:11:17.0332824Z","actor":"Robb Currall","issue_id":"ax-5f2","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Implemented aide repo list; parity-verified against bash repo-ls, ~2.2x faster on Windows"}}
