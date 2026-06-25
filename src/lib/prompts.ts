@@ -136,14 +136,18 @@ export async function confirm(opts: ConfirmOptions): Promise<boolean> {
 //
 // StringDecoder is used so that multi-byte UTF-8 sequences (accented chars,
 // CJK, emoji) are decoded correctly before we iterate code points.
-// \r is discarded; \n submits the line (handles both LF and CRLF terminals).
+//
+// Both CR and LF submit the line. In raw mode the terminal driver does not
+// translate CR->LF (ICRNL is cleared by setRawMode), so the Enter key delivers
+// a lone CR (0x0d) on macOS and Linux - it never arrives as LF. Treating CR as
+// a no-op would make Enter do nothing. A CRLF pair (\r\n) submits on the CR;
+// readRaw swallows the paired LF so it does not submit the next line as empty.
 
 /**
  * Classify a single decoded code point for the raw-mode input loop.
  *
  * Returns one of:
- *  - 'discard'   - silently ignore (e.g. CR so CRLF doesn't double-submit)
- *  - 'submit'    - end of input (LF)
+ *  - 'submit'    - end of input (CR or LF)
  *  - 'cancel'    - Ctrl+C
  *  - 'backspace' - delete last character (BS or DEL)
  *  - 'none'      - printable character, pass to applyChar
@@ -152,11 +156,10 @@ export async function confirm(opts: ConfirmOptions): Promise<boolean> {
  */
 export function classifyControlChar(
   ch: string
-): 'discard' | 'submit' | 'cancel' | 'backspace' | 'none' {
+): 'submit' | 'cancel' | 'backspace' | 'none' {
   const code = ch.charCodeAt(0);
   if (code === 0x03) return 'cancel';
-  if (code === 0x0a) return 'submit';
-  if (code === 0x0d) return 'discard';
+  if (code === 0x0a || code === 0x0d) return 'submit';
   if (code === 0x08 || code === 0x7f) return 'backspace';
   return 'none';
 }
@@ -170,8 +173,8 @@ export interface StepResult {
 /**
  * Apply a single decoded code point to the raw-input state. Pure function
  * combining classifyControlChar + applyChar with the loop's branching
- * behavior (discard CR, submit on LF, cancel on Ctrl+C). Exported for
- * unit testing so the CRLF contract is exercised end-to-end.
+ * behavior (submit on CR or LF, cancel on Ctrl+C). Exported for unit testing
+ * so the line-terminator contract is exercised end-to-end.
  */
 export function stepRawInput(
   buf: string,
@@ -181,7 +184,6 @@ export function stepRawInput(
   const kind = classifyControlChar(ch);
   if (kind === 'cancel') return { buf, writeToTty: '', action: 'cancel' };
   if (kind === 'submit') return { buf, writeToTty: '', action: 'submit' };
-  if (kind === 'discard') return { buf, writeToTty: '', action: 'continue' };
   const applied = applyChar(buf, ch, masked);
   return {
     buf: applied.buf,
@@ -218,6 +220,10 @@ export function applyChar(
   return { buf: newBuf, writeToTty: tty };
 }
 
+// Set when a line was submitted by a bare CR, so the next readRaw can swallow a
+// leading LF that is the trailing half of a CRLF pair split across reads.
+let pendingCrlfLf = false;
+
 async function readRaw(masked: boolean): Promise<string> {
   const stdin = process.stdin;
   const wasRaw = stdin.isRaw;
@@ -231,16 +237,28 @@ async function readRaw(masked: boolean): Promise<string> {
 
   const decoder = new StringDecoder('utf8');
   let buf = '';
+  // True only for the first code point of this read, when the previous line was
+  // submitted by a CR. A CRLF terminal sends \r\n; we submit on the \r, so a
+  // leading \n here is the other half of that pair and must be swallowed rather
+  // than submitting an empty line. (A \r\n arriving within one read is already
+  // handled: we return on the \r, abandoning the rest of the chunk.)
+  let skipLeadingLf = pendingCrlfLf;
+  pendingCrlfLf = false;
   try {
     for await (const chunk of stdin as AsyncIterable<Buffer>) {
       const decoded = decoder.write(chunk);
       for (const ch of decoded) {
+        if (skipLeadingLf) {
+          skipLeadingLf = false;
+          if (ch === '\n') continue;
+        }
         const step = stepRawInput(buf, ch, masked);
         if (step.action === 'cancel') {
           process.stdout.write('\n');
           throw new UserCancelledError();
         }
         if (step.action === 'submit') {
+          pendingCrlfLf = ch === '\r';
           process.stdout.write('\n');
           return step.buf;
         }

@@ -154,9 +154,9 @@ describe('UserCancelledError', () => {
   });
 });
 
-describe('classifyControlChar (CRLF and control-code classification)', () => {
-  test('treats CR as discard (prevents CRLF double-submit)', () => {
-    expect(classifyControlChar('\r')).toBe('discard');
+describe('classifyControlChar (line-terminator and control-code classification)', () => {
+  test('treats CR as submit (raw-mode Enter delivers a lone CR)', () => {
+    expect(classifyControlChar('\r')).toBe('submit');
   });
 
   test('treats LF as submit', () => {
@@ -188,27 +188,23 @@ describe('classifyControlChar (CRLF and control-code classification)', () => {
   });
 });
 
-describe('stepRawInput (CRLF loop state transitions)', () => {
-  test('CRLF sequence: \\r is discarded, \\n submits', () => {
-    // Simulate typing 'a', then Windows CRLF terminator
+describe('stepRawInput (line-terminator loop state transitions)', () => {
+  test('bare \\r submits the typed buffer (the real raw-mode Enter keystroke)', () => {
+    // In raw mode the terminal driver does not translate CR->LF (ICRNL is
+    // cleared), so pressing Enter delivers a lone \r. It must submit.
     let state = stepRawInput('', 'a', false);
     expect(state.action).toBe('continue');
     expect(state.buf).toBe('a');
     expect(state.writeToTty).toBe('a');
 
     state = stepRawInput(state.buf, '\r', false);
-    expect(state.action).toBe('continue');
-    expect(state.buf).toBe('a'); // CR must not append
-    expect(state.writeToTty).toBe('');
-
-    state = stepRawInput(state.buf, '\n', false);
     expect(state.action).toBe('submit');
-    expect(state.buf).toBe('a');
+    expect(state.buf).toBe('a'); // CR must not append to the buffer
   });
 
-  test('bare \\r without following \\n does not submit', () => {
+  test('CR submits with the existing buffer intact', () => {
     const state = stepRawInput('hello', '\r', false);
-    expect(state.action).toBe('continue');
+    expect(state.action).toBe('submit');
     expect(state.buf).toBe('hello');
   });
 
@@ -242,12 +238,11 @@ describe('stepRawInput (CRLF loop state transitions)', () => {
     expect(state.writeToTty).toBe('');
   });
 
-  test('regression: CR inside a typed sequence does not corrupt the buffer', () => {
-    // If discard branch is removed, CR would fall through to applyChar,
-    // which would also discard it (code < 0x20), so we need a stronger
-    // assertion: the pipeline end-to-end should submit 'hi' after a CRLF.
+  test('regression: typed text then Enter (lone CR) submits the full buffer', () => {
+    // End-to-end: the loop submits 'hi' as soon as the lone CR arrives,
+    // before any (nonexistent) trailing LF is seen.
     let buf = '';
-    for (const ch of ['h', 'i', '\r', '\n']) {
+    for (const ch of ['h', 'i', '\r']) {
       const s = stepRawInput(buf, ch, false);
       buf = s.buf;
       if (s.action === 'submit') {
