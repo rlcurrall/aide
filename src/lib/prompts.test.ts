@@ -307,6 +307,54 @@ describe('readRaw (sequential prompts share one stdin)', () => {
     input.write('recovered\r');
     expect(await p2).toBe('recovered');
   });
+
+  test('a throw while handling input still restores raw mode and detaches', async () => {
+    const input = fakeTty();
+    const boom = new Error('kaboom');
+    // output throws on the first echo; the read must not leave the terminal in
+    // raw mode with a dangling listener (the dropped for-await `finally`).
+    const io: RawIo = {
+      input,
+      output: () => {
+        throw boom;
+      },
+    };
+
+    const p = readRaw(false, io);
+    input.write('a');
+    await expect(p).rejects.toBe(boom);
+
+    expect(input.isRaw).toBe(false); // raw mode restored
+    expect(input.listenerCount('data')).toBe(0);
+    expect(input.destroyed).toBe(false);
+  });
+
+  test('a stream error rejects and restores raw mode', async () => {
+    const input = fakeTty();
+    const io: RawIo = { input, output: () => {} };
+    const err = new Error('stdin exploded');
+
+    const p = readRaw(false, io);
+    input.emit('error', err);
+    await expect(p).rejects.toBe(err);
+
+    expect(input.isRaw).toBe(false);
+    expect(input.listenerCount('data')).toBe(0);
+    expect(input.listenerCount('error')).toBe(0);
+  });
+
+  test('end-of-stream resolves the buffered input', async () => {
+    const input = fakeTty();
+    const io: RawIo = { input, output: () => {} };
+
+    const p = readRaw(false, io);
+    input.write('partial');
+    input.end();
+    expect(await p).toBe('partial');
+
+    expect(input.isRaw).toBe(false);
+    expect(input.listenerCount('data')).toBe(0);
+  });
 });
 
 describe('applyChar (UTF-8 code-point handling)', () => {
