@@ -235,7 +235,11 @@ export interface RawInputStream {
   resume(): unknown;
   pause(): unknown;
   on(event: 'data', listener: (chunk: Buffer) => void): unknown;
+  on(event: 'error', listener: (err: Error) => void): unknown;
+  on(event: 'end', listener: () => void): unknown;
   removeListener(event: 'data', listener: (chunk: Buffer) => void): unknown;
+  removeListener(event: 'error', listener: (err: Error) => void): unknown;
+  removeListener(event: 'end', listener: () => void): unknown;
 }
 
 export interface RawIo {
@@ -260,6 +264,12 @@ function defaultIo(): RawIo {
  * the async iterator's `return()`, which destroys/aborts stdin - so the *next*
  * readRaw threw "The operation was aborted." A `data` listener leaves the
  * stream intact for subsequent prompts.
+ *
+ * Every exit path - submit, cancel, a throw while decoding, or a stream
+ * error/end - runs through `settle`, which restores raw mode, pauses stdin and
+ * detaches all listeners exactly once. Without this the for-await version's
+ * `finally` guarantee was lost: a throw inside the data handler would leave the
+ * terminal stuck in raw mode with a dangling listener and the promise pending.
  */
 export function readRaw(
   masked: boolean,
@@ -286,37 +296,61 @@ export function readRaw(
   pendingCrlfLf = false;
 
   return new Promise<string>((resolve, reject) => {
-    const cleanup = () => {
+    let settled = false;
+
+    // Single teardown for every outcome: detach listeners, restore the prior
+    // raw-mode state and pause stdin, then deliver the result. Idempotent so a
+    // late error after submit/cancel is ignored rather than double-settling.
+    const settle = (deliver: () => void) => {
+      if (settled) return;
+      settled = true;
       input.removeListener('data', onData);
+      input.removeListener('error', onError);
+      input.removeListener('end', onEnd);
       input.setRawMode(wasRaw);
       input.pause();
+      deliver();
     };
+
     const onData = (chunk: Buffer) => {
-      const decoded = decoder.write(chunk);
-      for (const ch of decoded) {
-        if (skipLeadingLf) {
-          skipLeadingLf = false;
-          if (ch === '\n') continue;
+      try {
+        const decoded = decoder.write(chunk);
+        for (const ch of decoded) {
+          if (skipLeadingLf) {
+            skipLeadingLf = false;
+            if (ch === '\n') continue;
+          }
+          const step = stepRawInput(buf, ch, masked);
+          if (step.action === 'cancel') {
+            output('\n');
+            settle(() => reject(new UserCancelledError()));
+            return;
+          }
+          if (step.action === 'submit') {
+            pendingCrlfLf = ch === '\r';
+            output('\n');
+            settle(() => resolve(step.buf));
+            return;
+          }
+          buf = step.buf;
+          if (step.writeToTty) output(step.writeToTty);
         }
-        const step = stepRawInput(buf, ch, masked);
-        if (step.action === 'cancel') {
-          output('\n');
-          cleanup();
-          reject(new UserCancelledError());
-          return;
-        }
-        if (step.action === 'submit') {
-          pendingCrlfLf = ch === '\r';
-          output('\n');
-          cleanup();
-          resolve(step.buf);
-          return;
-        }
-        buf = step.buf;
-        if (step.writeToTty) output(step.writeToTty);
+      } catch (err) {
+        settle(() =>
+          reject(err instanceof Error ? err : new Error(String(err)))
+        );
       }
     };
+
+    // A stream-level error must reject (the old for-await would have thrown);
+    // an unexpected end resolves whatever was typed, matching the prior
+    // fall-through-and-return-buf behavior.
+    const onError = (err: Error) => settle(() => reject(err));
+    const onEnd = () => settle(() => resolve(buf));
+
     input.on('data', onData);
+    input.on('error', onError);
+    input.on('end', onEnd);
   });
 }
 
