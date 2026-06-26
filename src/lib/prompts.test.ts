@@ -9,6 +9,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { StringDecoder } from 'node:string_decoder';
+import { PassThrough } from 'node:stream';
 
 import {
   text,
@@ -17,10 +18,29 @@ import {
   applyChar,
   classifyControlChar,
   stepRawInput,
+  readRaw,
   UserCancelledError,
   type Prompter,
   type ReadLineOptions,
+  type RawIo,
 } from './prompts.js';
+
+type FakeTty = PassThrough & {
+  isTTY: boolean;
+  isRaw: boolean;
+  setRawMode: (v: boolean) => void;
+};
+
+/** A PassThrough dressed up as a raw-capable TTY for readRaw tests. */
+function fakeTty(): FakeTty {
+  const s = new PassThrough() as FakeTty;
+  s.isTTY = true;
+  s.isRaw = false;
+  s.setRawMode = (v) => {
+    s.isRaw = v;
+  };
+  return s;
+}
 
 class ScriptedPrompter implements Prompter {
   private inputs: string[];
@@ -251,6 +271,41 @@ describe('stepRawInput (line-terminator loop state transitions)', () => {
       }
     }
     throw new Error('expected submit');
+  });
+});
+
+describe('readRaw (sequential prompts share one stdin)', () => {
+  test('two prompts read in sequence without tearing down the stream', async () => {
+    const input = fakeTty();
+    const io: RawIo = { input, output: () => {} };
+
+    const p1 = readRaw(false, io);
+    input.write('https://x.atlassian.net\r');
+    expect(await p1).toBe('https://x.atlassian.net');
+
+    // The stream must survive the first read so the next prompt can use it.
+    // (for-await + early return destroyed it, aborting the second prompt.)
+    expect(input.destroyed).toBe(false);
+
+    const p2 = readRaw(false, io);
+    input.write('me@example.com\r');
+    expect(await p2).toBe('me@example.com');
+
+    expect(input.listenerCount('data')).toBe(0); // listener cleaned up
+  });
+
+  test('Ctrl+C rejects with UserCancelledError and leaves the stream usable', async () => {
+    const input = fakeTty();
+    const io: RawIo = { input, output: () => {} };
+
+    const p1 = readRaw(false, io);
+    input.write('\x03');
+    await expect(p1).rejects.toBeInstanceOf(UserCancelledError);
+    expect(input.destroyed).toBe(false);
+
+    const p2 = readRaw(false, io);
+    input.write('recovered\r');
+    expect(await p2).toBe('recovered');
   });
 });
 
