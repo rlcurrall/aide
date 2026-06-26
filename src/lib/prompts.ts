@@ -224,16 +224,56 @@ export function applyChar(
 // leading LF that is the trailing half of a CRLF pair split across reads.
 let pendingCrlfLf = false;
 
-async function readRaw(masked: boolean): Promise<string> {
-  const stdin = process.stdin;
-  const wasRaw = stdin.isRaw;
-  if (!stdin.isTTY) {
+/**
+ * The slice of stdin readRaw depends on. Declared structurally so tests can
+ * inject a plain stream (e.g. PassThrough) in place of the real TTY.
+ */
+export interface RawInputStream {
+  isTTY?: boolean;
+  isRaw?: boolean;
+  setRawMode(mode: boolean): unknown;
+  resume(): unknown;
+  pause(): unknown;
+  on(event: 'data', listener: (chunk: Buffer) => void): unknown;
+  removeListener(event: 'data', listener: (chunk: Buffer) => void): unknown;
+}
+
+export interface RawIo {
+  input: RawInputStream;
+  output: (s: string) => void;
+}
+
+function defaultIo(): RawIo {
+  return {
+    input: process.stdin as unknown as RawInputStream,
+    output: (s) => process.stdout.write(s),
+  };
+}
+
+/**
+ * Read a single line from a raw-mode TTY. Exported for unit testing via the
+ * injectable `io` seam.
+ *
+ * Input is consumed with a persistent `data` listener that is removed (not the
+ * stream destroyed) when the line completes. An earlier version used
+ * `for await (const chunk of stdin)`, but returning early from that loop calls
+ * the async iterator's `return()`, which destroys/aborts stdin - so the *next*
+ * readRaw threw "The operation was aborted." A `data` listener leaves the
+ * stream intact for subsequent prompts.
+ */
+export function readRaw(
+  masked: boolean,
+  io: RawIo = defaultIo()
+): Promise<string> {
+  const { input, output } = io;
+  if (!input.isTTY) {
     // Non-TTY (piped input): fall back to a whole-line read.
-    return await readPipedLine();
+    return readPipedLine();
   }
 
-  stdin.setRawMode(true);
-  stdin.resume();
+  const wasRaw = Boolean(input.isRaw);
+  input.setRawMode(true);
+  input.resume();
 
   const decoder = new StringDecoder('utf8');
   let buf = '';
@@ -241,11 +281,17 @@ async function readRaw(masked: boolean): Promise<string> {
   // submitted by a CR. A CRLF terminal sends \r\n; we submit on the \r, so a
   // leading \n here is the other half of that pair and must be swallowed rather
   // than submitting an empty line. (A \r\n arriving within one read is already
-  // handled: we return on the \r, abandoning the rest of the chunk.)
+  // handled: we submit on the \r before the \n in the same chunk.)
   let skipLeadingLf = pendingCrlfLf;
   pendingCrlfLf = false;
-  try {
-    for await (const chunk of stdin as AsyncIterable<Buffer>) {
+
+  return new Promise<string>((resolve, reject) => {
+    const cleanup = () => {
+      input.removeListener('data', onData);
+      input.setRawMode(wasRaw);
+      input.pause();
+    };
+    const onData = (chunk: Buffer) => {
       const decoded = decoder.write(chunk);
       for (const ch of decoded) {
         if (skipLeadingLf) {
@@ -254,23 +300,24 @@ async function readRaw(masked: boolean): Promise<string> {
         }
         const step = stepRawInput(buf, ch, masked);
         if (step.action === 'cancel') {
-          process.stdout.write('\n');
-          throw new UserCancelledError();
+          output('\n');
+          cleanup();
+          reject(new UserCancelledError());
+          return;
         }
         if (step.action === 'submit') {
           pendingCrlfLf = ch === '\r';
-          process.stdout.write('\n');
-          return step.buf;
+          output('\n');
+          cleanup();
+          resolve(step.buf);
+          return;
         }
         buf = step.buf;
-        if (step.writeToTty) process.stdout.write(step.writeToTty);
+        if (step.writeToTty) output(step.writeToTty);
       }
-    }
-    return buf;
-  } finally {
-    stdin.setRawMode(wasRaw);
-    stdin.pause();
-  }
+    };
+    input.on('data', onData);
+  });
 }
 
 async function readPipedLine(): Promise<string> {
