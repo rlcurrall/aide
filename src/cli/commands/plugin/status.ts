@@ -16,8 +16,7 @@ interface PluginInfo {
 }
 
 /** Arguments for status command (none currently) */
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
-export interface StatusArgv {}
+export type StatusArgv = Record<string, never>;
 
 /**
  * Parse plugin list output to find aide plugin

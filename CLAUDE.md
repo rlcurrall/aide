@@ -79,9 +79,9 @@ Binaries are output to the `dist/` directory.
 ### Linting, Formatting, and Type Checking
 
 ```bash
-bun run lint              # Run ESLint
+bun run lint              # Run Oxlint
 bun run lint:fix          # Auto-fix linting issues
-bun run format            # Format with Prettier
+bun run format            # Format with Oxfmt
 bun run format:check      # Check formatting
 bunx tsc --noEmit         # Type check without emitting
 ```

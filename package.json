@@ -17,21 +17,16 @@
     "build:all": "bun run build:win && bun run build:linux && bun run build:mac",
     "release": "bun run src/scripts/release.ts",
     "test": "bun test",
-    "lint": "eslint .",
-    "lint:fix": "eslint . --fix",
-    "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "lint": "oxlint .",
+    "lint:fix": "oxlint . --fix",
+    "format": "oxfmt . --write",
+    "format:check": "oxfmt . --check"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/yargs": "^17.0.35",
-    "@typescript-eslint/eslint-plugin": "^8.45.0",
-    "@typescript-eslint/parser": "^8.45.0",
-    "eslint": "^9.36.0",
-    "eslint-config-prettier": "^10.1.8",
-    "eslint-plugin-prettier": "^5.5.4",
-    "globals": "^16.4.0",
-    "prettier": "^3.6.2"
+    "oxfmt": "^0.56.0",
+    "oxlint": "^1.71.0"
   },
   "peerDependencies": {
     "typescript": "^5"

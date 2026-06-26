@@ -1,0 +1,19 @@
+{
+  "ignorePatterns": ["node_modules/**", "dist/**"],
+  "env": {
+    "node": true
+  },
+  "globals": {
+    "Bun": "readonly"
+  },
+  "rules": {
+    "typescript/no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_"
+      }
+    ],
+    "typescript/no-explicit-any": "warn",
+    "no-case-declarations": "off"
+  }
+}

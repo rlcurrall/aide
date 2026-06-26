@@ -42,7 +42,7 @@ function isFormattedArray(value: unknown): boolean {
   if (!Array.isArray(value)) {
     return false;
   }
-  return value.length === 0 || value.every(isAlreadyFormatted);
+  return value.every(isAlreadyFormatted);
 }
 
 /**

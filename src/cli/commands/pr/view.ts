@@ -222,9 +222,8 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
           parsed.repo
         ) {
           const { loadAzureDevOpsConfig } = await import('@lib/config.js');
-          const { AzureDevOpsClient } = await import(
-            '@lib/azure-devops-client.js'
-          );
+          const { AzureDevOpsClient } =
+            await import('@lib/azure-devops-client.js');
           const { config } = await loadAzureDevOpsConfig();
           ctx = {
             platform: 'azure-devops',
