@@ -67,13 +67,16 @@ export function buildGitHubPrUrl(
 /**
  * Parse GitHub git remote URL to extract owner, repo, and host.
  * Supports both SSH and HTTPS formats on github.com and *.ghe.com hosts:
- * - SSH: git@{host}:{owner}/{repo}.git
+ * - SSH: {user}@{host}:{owner}/{repo}.git
  * - HTTPS: https://{host}/{owner}/{repo}.git
+ *
+ * The SSH user is not assumed to be `git` — GHE Cloud orgs commonly use a
+ * custom SSH user (e.g. `acme@acme.ghe.com:...`), so any user is accepted.
  */
 export function parseGitHubRemote(remoteUrl: string): GitHubRemoteInfo | null {
-  // SSH format: git@{host}:owner/repo.git
+  // SSH format: {user}@{host}:owner/repo.git  (user defaults to git but may vary)
   const sshMatch = regex(
-    '^git@(?<host>[^:/]+):(?<owner>[^/@:]+)/(?<repo>.+)$'
+    '^(?:[^@]+@)?(?<host>[^:/]+):(?<owner>[^/@:]+)/(?<repo>.+)$'
   ).exec(remoteUrl)?.groups;
   if (sshMatch) {
     const host = normalizeGitHubHost(sshMatch.host);

@@ -88,6 +88,21 @@ describe('parseGitHubRemote', () => {
     });
   });
 
+  test('parses SSH remotes with a custom (non-git) user', () => {
+    // GHE Cloud orgs commonly use a custom SSH user, e.g. acme@acme.ghe.com.
+    expect(parseGitHubRemote('acme@acme.ghe.com:acme/widgets.git')).toEqual({
+      owner: 'acme',
+      repo: 'widgets',
+      host: 'acme.ghe.com',
+    });
+    // Bare scp-style remote with no user at all.
+    expect(parseGitHubRemote('github.com:acme/widgets.git')).toEqual({
+      owner: 'acme',
+      repo: 'widgets',
+      host: 'github.com',
+    });
+  });
+
   test('returns null for Azure DevOps remotes', () => {
     expect(
       parseGitHubRemote('git@ssh.dev.azure.com:v3/org/proj/repo')
