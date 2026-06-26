@@ -1,3 +1,6 @@
+# Normalize line endings: text files are LF in the repo and on checkout,
+# regardless of core.autocrlf. Keeps prettier/eslint consistent on Windows.
+* text=auto eol=lf
 
 # Use bd merge for beads JSONL files
 .beads/issues.jsonl merge=beads

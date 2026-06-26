@@ -6,10 +6,7 @@
 
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
-import {
-  deleteSecret,
-  type SecretName,
-} from '@lib/secrets.js';
+import { deleteSecret, type SecretName } from '@lib/secrets.js';
 
 export type LogoutResult = 'removed' | 'not-found';
 

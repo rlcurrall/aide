@@ -25,7 +25,11 @@ describe('StoredJiraSchema', () => {
 
   test('rejects empty email', () => {
     expect(() =>
-      v.parse(StoredJiraSchema, { url: 'https://x.y', email: '', apiToken: 't' })
+      v.parse(StoredJiraSchema, {
+        url: 'https://x.y',
+        email: '',
+        apiToken: 't',
+      })
     ).toThrow();
   });
 });

@@ -252,7 +252,10 @@ function makeFetchStub(body: unknown): {
 }
 
 /** Find the value passed immediately after a flag in an argv array. */
-function flagValue(argv: string[] | undefined, flag: string): string | undefined {
+function flagValue(
+  argv: string[] | undefined,
+  flag: string
+): string | undefined {
   if (!argv) return undefined;
   const i = argv.indexOf(flag);
   return i === -1 ? undefined : argv[i + 1];

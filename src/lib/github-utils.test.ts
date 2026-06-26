@@ -120,7 +120,12 @@ describe('parseGitHubPRUrl', () => {
     );
     expect(
       parseGitHubPRUrl('https://acme.ghe.com/acme/widgets/pull/42?foo=1')
-    ).toEqual({ owner: 'acme', repo: 'widgets', number: 42, host: 'acme.ghe.com' });
+    ).toEqual({
+      owner: 'acme',
+      repo: 'widgets',
+      number: 42,
+      host: 'acme.ghe.com',
+    });
   });
 
   test('returns null for non-GitHub PR URLs', () => {
