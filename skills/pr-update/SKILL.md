@@ -25,18 +25,18 @@ aide pr update [--pr <id>] [options]
 
 ### Flags
 
-| Flag            | Description                            |
-| --------------- | -------------------------------------- |
-| `--pr`          | PR ID (auto-detected if omitted)       |
-| `--title`       | Update PR title                        |
+| Flag            | Description                             |
+| --------------- | --------------------------------------- |
+| `--pr`          | PR ID (auto-detected if omitted)        |
+| `--title`       | Update PR title                         |
 | `--description` | Update PR description (alias: `--body`) |
-| `--target`      | Change target/base branch              |
-| `--draft`       | Convert to draft PR                    |
-| `--publish`     | Publish draft PR (make active)         |
-| `--abandon`     | Abandon the PR                         |
-| `--activate`    | Reactivate an abandoned PR             |
-| `--tag`         | Add tag(s) to the PR (repeatable)      |
-| `--remove-tag`  | Remove tag(s) from the PR (repeatable) |
+| `--target`      | Change target/base branch               |
+| `--draft`       | Convert to draft PR                     |
+| `--publish`     | Publish draft PR (make active)          |
+| `--abandon`     | Abandon the PR                          |
+| `--activate`    | Reactivate an abandoned PR              |
+| `--tag`         | Add tag(s) to the PR (repeatable)       |
+| `--remove-tag`  | Remove tag(s) from the PR (repeatable)  |
 
 ## Output Includes
 

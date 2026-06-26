@@ -30,7 +30,9 @@ describe('logout', () => {
     restore();
     const localRestore = installMockSecrets(store, 'delete');
     try {
-      await expect(logout('jira')).rejects.toMatchObject({ name: 'KeyringUnavailableError' });
+      await expect(logout('jira')).rejects.toMatchObject({
+        name: 'KeyringUnavailableError',
+      });
     } finally {
       localRestore();
     }

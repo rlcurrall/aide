@@ -66,7 +66,8 @@ describeIfKeyring('secrets wrapper (real keyring)', () => {
   });
 
   test('setSecret + getSecret round-trips the exact value', async () => {
-    const payload = '{"url":"https://x.atlassian.net","email":"y","apiToken":"z"}';
+    const payload =
+      '{"url":"https://x.atlassian.net","email":"y","apiToken":"z"}';
     await setSecret('jira', payload);
     const result = await getSecret('jira');
     expect(result).toBe(payload);
@@ -85,8 +86,14 @@ describeIfKeyring('secrets wrapper (real keyring)', () => {
   });
 
   test('setSecret overwrites an existing entry', async () => {
-    await setSecret('ado', '{"orgUrl":"https://first","pat":"a","authMethod":"pat"}');
-    await setSecret('ado', '{"orgUrl":"https://second","pat":"b","authMethod":"bearer"}');
+    await setSecret(
+      'ado',
+      '{"orgUrl":"https://first","pat":"a","authMethod":"pat"}'
+    );
+    await setSecret(
+      'ado',
+      '{"orgUrl":"https://second","pat":"b","authMethod":"bearer"}'
+    );
     const result = await getSecret('ado');
     expect(result).toContain('second');
     expect(result).toContain('bearer');
@@ -113,16 +120,22 @@ describe('secrets wrapper (keyring unavailable)', () => {
 
   test('getSecret throws KeyringUnavailableError on backend failure', async () => {
     restore = installMockSecrets(store, 'get');
-    await expect(getSecret('jira')).rejects.toBeInstanceOf(KeyringUnavailableError);
+    await expect(getSecret('jira')).rejects.toBeInstanceOf(
+      KeyringUnavailableError
+    );
   });
 
   test('setSecret throws KeyringUnavailableError on backend failure', async () => {
     restore = installMockSecrets(store, 'set');
-    await expect(setSecret('ado', 'x')).rejects.toBeInstanceOf(KeyringUnavailableError);
+    await expect(setSecret('ado', 'x')).rejects.toBeInstanceOf(
+      KeyringUnavailableError
+    );
   });
 
   test('deleteSecret throws KeyringUnavailableError on backend failure', async () => {
     restore = installMockSecrets(store, 'delete');
-    await expect(deleteSecret('github')).rejects.toBeInstanceOf(KeyringUnavailableError);
+    await expect(deleteSecret('github')).rejects.toBeInstanceOf(
+      KeyringUnavailableError
+    );
   });
 });

@@ -50,7 +50,10 @@ export interface SpawnOptions {
  * bun's `spawnSync`; tests pass a stub to assert the args (e.g. `--hostname`)
  * without invoking the real `gh` binary.
  */
-export type SpawnSyncFn = (cmd: string[], options?: SpawnOptions) => SpawnResult;
+export type SpawnSyncFn = (
+  cmd: string[],
+  options?: SpawnOptions
+) => SpawnResult;
 
 /**
  * Injectable fetch used by the token transport. Defaults to global `fetch`;
@@ -271,16 +274,19 @@ export class GitHubClient {
     endpoint: string,
     body?: unknown
   ): Promise<T> {
-    const response = await this.fetchImpl(`${githubApiBase(this.host)}${endpoint}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'Content-Type': 'application/json',
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    const response = await this.fetchImpl(
+      `${githubApiBase(this.host)}${endpoint}`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          'Content-Type': 'application/json',
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      }
+    );
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -474,14 +480,17 @@ export class GitHubClient {
         }
       }
     } else {
-      const response = await this.fetchImpl(`${githubApiBase(this.host)}/graphql`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ query, variables }),
-      });
+      const response = await this.fetchImpl(
+        `${githubApiBase(this.host)}/graphql`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ query, variables }),
+        }
+      );
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(`${errorPrefix}: ${errorText}`);
