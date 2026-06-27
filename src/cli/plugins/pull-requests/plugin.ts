@@ -1,4 +1,14 @@
-import { prCommandGroup, prListCommand } from '@cli/commands/pr/index.js';
+import {
+  prCommandGroup,
+  prCommentCommand,
+  prCommentsCommand,
+  prCreateCommand,
+  prDiffCommand,
+  prListCommand,
+  prReplyCommand,
+  prUpdateCommand,
+  prViewCommand,
+} from '@cli/commands/pr/index.js';
 import {
   defineAidePlugin,
   pluginCommandModule,
@@ -10,5 +20,12 @@ export const pullRequestsPlugin = defineAidePlugin({
   commands: [
     pluginCommandModule('pr', prCommandGroup),
     pluginCommandModule('pr:list', prListCommand, { parentId: 'pr' }),
+    pluginCommandModule('pr:view', prViewCommand, { parentId: 'pr' }),
+    pluginCommandModule('pr:diff', prDiffCommand, { parentId: 'pr' }),
+    pluginCommandModule('pr:create', prCreateCommand, { parentId: 'pr' }),
+    pluginCommandModule('pr:update', prUpdateCommand, { parentId: 'pr' }),
+    pluginCommandModule('pr:comments', prCommentsCommand, { parentId: 'pr' }),
+    pluginCommandModule('pr:comment', prCommentCommand, { parentId: 'pr' }),
+    pluginCommandModule('pr:reply', prReplyCommand, { parentId: 'pr' }),
   ],
 });

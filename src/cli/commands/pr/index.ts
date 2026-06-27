@@ -5,14 +5,14 @@
  */
 
 import type { CommandModule } from 'yargs';
-import commentsCommand from './comments.js';
-import diffCommand from './diff.js';
-import listCommand from './list.js';
-import prCommentCommand from './pr-comment.js';
-import prCreateCommand from './pr-create.js';
-import prReplyCommand from './pr-reply.js';
-import prUpdateCommand from './pr-update.js';
-import viewCommand from './view.js';
+import commentsCommandModule from './comments.js';
+import diffCommandModule from './diff.js';
+import listCommandModule from './list.js';
+import prCommentCommandModule from './pr-comment.js';
+import prCreateCommandModule from './pr-create.js';
+import prReplyCommandModule from './pr-reply.js';
+import prUpdateCommandModule from './pr-update.js';
+import viewCommandModule from './view.js';
 
 const prExamples = [
   ['$0 pr view --pr 123', 'View PR details'],
@@ -38,18 +38,12 @@ const prExamples = [
   ],
 ] as const;
 
-function createPrCommandGroup(
-  childCommands: readonly unknown[]
-): CommandModule {
+function createPrCommandGroup(): CommandModule {
   return {
     command: 'pr <command>',
     describe: 'Pull request commands (GitHub/Azure DevOps)',
     builder: (yargs) => {
-      let configured = yargs;
-      for (const command of childCommands) {
-        configured = configured.command(command as CommandModule);
-      }
-      configured = configured.demandCommand(1, 'Please specify a pr command');
+      let configured = yargs.demandCommand(1, 'Please specify a pr command');
       for (const [command, description] of prExamples) {
         configured = configured.example(command, description);
       }
@@ -61,25 +55,16 @@ function createPrCommandGroup(
   };
 }
 
-export const prListCommand = listCommand;
+export const prListCommand = listCommandModule;
+export const prViewCommand = viewCommandModule;
+export const prDiffCommand = diffCommandModule;
+export const prCreateCommand = prCreateCommandModule;
+export const prUpdateCommand = prUpdateCommandModule;
+export const prCommentsCommand = commentsCommandModule;
+export const prCommentCommand = prCommentCommandModule;
+export const prReplyCommand = prReplyCommandModule;
 
-export const prCommandGroup: CommandModule = createPrCommandGroup([
-  viewCommand,
-  diffCommand,
-  prCreateCommand,
-  prUpdateCommand,
-  commentsCommand,
-  prCommentCommand,
-  prReplyCommand,
-]);
+export const prCommandGroup: CommandModule = createPrCommandGroup();
 
-export const prCommands: CommandModule = createPrCommandGroup([
-  listCommand,
-  viewCommand,
-  diffCommand,
-  prCreateCommand,
-  prUpdateCommand,
-  commentsCommand,
-  prCommentCommand,
-  prReplyCommand,
-]);
+/** @deprecated Register `prCommandGroup` children through the command registry. */
+export const prCommands: CommandModule = prCommandGroup;

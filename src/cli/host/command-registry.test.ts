@@ -16,6 +16,17 @@ import {
   registerCommands,
 } from './yargs-adapter.js';
 
+const expectedPrChildCommandIds = [
+  'pr:list',
+  'pr:view',
+  'pr:diff',
+  'pr:create',
+  'pr:update',
+  'pr:comments',
+  'pr:comment',
+  'pr:reply',
+] as const;
+
 describe('CommandRegistry', () => {
   test('preserves built-in command order for demand messages and help', () => {
     const registry = createBuiltinCommandRegistry();
@@ -53,9 +64,16 @@ describe('CommandRegistry', () => {
     );
     expect(registry.commandOwner('pr')).toBe('pull-requests');
     expect(registry.commandOwner('pr:list')).toBe('pull-requests');
+    expect(registry.commandOwner('pr:view')).toBe('pull-requests');
+    expect(registry.commandOwner('pr:diff')).toBe('pull-requests');
+    expect(registry.commandOwner('pr:create')).toBe('pull-requests');
+    expect(registry.commandOwner('pr:update')).toBe('pull-requests');
+    expect(registry.commandOwner('pr:comments')).toBe('pull-requests');
+    expect(registry.commandOwner('pr:comment')).toBe('pull-requests');
+    expect(registry.commandOwner('pr:reply')).toBe('pull-requests');
     expect(registry.commandOwner('whoami')).toBe('legacy-auth');
     expect(registry.commandOwner('missing')).toBeNull();
-    expect(registry.childCommandIds('pr')).toEqual(['pr:list']);
+    expect(registry.childCommandIds('pr')).toEqual(expectedPrChildCommandIds);
     expect(registry.allCommandIds()).toEqual([
       'jira',
       'pr',
@@ -65,8 +83,36 @@ describe('CommandRegistry', () => {
       'login',
       'logout',
       'whoami',
-      'pr:list',
+      ...expectedPrChildCommandIds,
     ]);
+  });
+
+  test('keeps built-in pr child routes single-source-of-truth in the registry', () => {
+    const registry = createBuiltinCommandRegistry();
+
+    expect(registry.childCommandIds('pr')).toEqual(expectedPrChildCommandIds);
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'rogue-pr-view',
+          summary: 'Rogue PR view command',
+          commands: [
+            pluginCommandModule(
+              'rogue:pr:view',
+              {
+                command: 'view',
+                describe: 'Rogue PR view command',
+                handler: () => {},
+              },
+              { parentId: 'pr' }
+            ),
+          ],
+        })
+      )
+    ).toThrow(
+      "Command 'rogue:pr:view' route 'view' conflicts with command 'pr:view' under 'pr'"
+    );
   });
 
   test('rejects duplicate command ids', () => {
@@ -330,7 +376,7 @@ describe('CommandRegistry', () => {
       'logout',
       'whoami',
     ]);
-    expect(registry.childCommandIds('pr')).toEqual(['pr:list']);
+    expect(registry.childCommandIds('pr')).toEqual(expectedPrChildCommandIds);
   });
 
   test('freezes retained command and plugin descriptor shells', () => {
@@ -535,5 +581,52 @@ describe('registerCommands', () => {
     }
 
     expect(lines).toEqual(['child output']);
+  });
+
+  test('preserves strict parsing for registry child commands', async () => {
+    const registry = createCommandRegistry();
+
+    registry.registerModule('parent', {
+      command: 'parent <command>',
+      describe: 'Parent command',
+      builder: (yargs) => yargs.demandCommand(1, 'Pick a child command'),
+      handler: () => {},
+    });
+    registry.registerDescriptor(
+      {
+        id: 'parent:child',
+        route: 'child',
+        summary: 'Child command',
+        yargs: {
+          builder: (yargs) =>
+            yargs.option('known', {
+              type: 'string',
+              describe: 'Known option',
+            }),
+        },
+        run: () => Effect.succeed(textResult('child output')),
+      },
+      { parentId: 'parent' }
+    );
+
+    let thrown: unknown;
+    try {
+      await registerCommands(
+        yargs(['parent', 'child', '--bogus'])
+          .scriptName('aide')
+          .exitProcess(false)
+          .fail((message, error) => {
+            throw error ?? new Error(message);
+          }),
+        registry
+      )
+        .strict()
+        .parseAsync();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe('Unknown argument: bogus');
   });
 });
