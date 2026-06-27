@@ -263,12 +263,16 @@ export default {
       type: 'string',
       describe: 'Pull request description/body',
       alias: ['b', 'description'],
+      nargs: 1,
+      requiresArg: true,
     },
     'body-file': {
       type: 'string',
       describe:
         'Read pull request description/body from a file, or - for stdin',
       alias: 'description-file',
+      nargs: 1,
+      requiresArg: true,
     },
     head: {
       type: 'string',

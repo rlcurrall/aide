@@ -52,6 +52,16 @@ export function normalizePullRequestBodyText(text: string): string {
   return text.replace(/\\n/g, '\n');
 }
 
+export function decodePullRequestBodyChunks(
+  chunks: Array<Buffer | string>
+): string {
+  return Buffer.concat(
+    chunks.map((chunk) =>
+      typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk
+    )
+  ).toString('utf8');
+}
+
 export function selectPullRequestBodyInputSource(
   input: PullRequestBodyInput
 ): PullRequestBodyInputSource {
@@ -93,7 +103,7 @@ export function selectPullRequestBodyInputSource(
   }
 
   if (file.value.length === 0) {
-    throw new Error(`${file.flag} cannot be empty`);
+    throw new Error('PR body file path cannot be empty');
   }
 
   return {
@@ -127,12 +137,11 @@ export async function resolvePullRequestBodyInput(
 }
 
 async function readStdin(): Promise<string> {
-  let body = '';
+  const chunks: Array<Buffer | string> = [];
   for await (const chunk of process.stdin as AsyncIterable<Buffer | string>) {
-    body +=
-      typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+    chunks.push(chunk);
   }
-  return body;
+  return decodePullRequestBodyChunks(chunks);
 }
 
 export const defaultPullRequestBodyInputReaders: PullRequestBodyInputReaders = {

@@ -466,11 +466,15 @@ export default {
       type: 'string',
       describe: 'New description for the PR',
       alias: 'body',
+      nargs: 1,
+      requiresArg: true,
     },
     'description-file': {
       type: 'string',
       describe: 'Read new description from a file, or - for stdin',
       alias: 'body-file',
+      nargs: 1,
+      requiresArg: true,
     },
     target: {
       type: 'string',
