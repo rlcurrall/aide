@@ -1,8 +1,12 @@
 import { Effect } from 'effect';
 
-import type { CommandRegistry } from '@cli/host/command-registry.js';
+import type { OwnedPluginCapability } from '@cli/host/command-registry.js';
+import type {
+  AidePullRequestProviderCapability,
+  AidePullRequestRepositoryRef,
+} from '@cli/host/plugin-descriptor.js';
 import type { ResolvedPullRequestProvider } from './provider-resolver.js';
-import { resolvePullRequestProviderFromRegistryForRemote } from './provider-resolver.js';
+import { resolvePullRequestProviderForRemote } from './provider-resolver.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import { loadAzureDevOpsConfig } from '@lib/config.js';
 import { GitHubClient } from '@lib/github-client.js';
@@ -36,37 +40,28 @@ function stringContext(
   return value;
 }
 
-export async function platformContextFromPullRequestProvider(
-  provider: ResolvedPullRequestProvider,
-  clients: PullRequestProviderContextClients = defaultClients
-): Promise<PlatformContext> {
+function legacyRepositoryRef(
+  provider: ResolvedPullRequestProvider
+): AidePullRequestRepositoryRef {
+  if (provider.match.repository !== undefined) {
+    return provider.match.repository;
+  }
+
   switch (provider.capability.providerId) {
-    case 'github': {
-      const host = stringContext(provider, 'host');
-      const owner = stringContext(provider, 'owner');
-      const repo = stringContext(provider, 'repo');
+    case 'github':
       return {
-        platform: 'github',
-        host,
-        owner,
-        repo,
-        client: await clients.createGitHubClient({ host }),
-        autoDiscovered: true,
+        kind: 'github',
+        host: stringContext(provider, 'host'),
+        owner: stringContext(provider, 'owner'),
+        repo: stringContext(provider, 'repo'),
       };
-    }
-    case 'azure-devops': {
-      const org = stringContext(provider, 'org');
-      const project = stringContext(provider, 'project');
-      const repo = stringContext(provider, 'repo');
+    case 'azure-devops':
       return {
-        platform: 'azure-devops',
-        org,
-        project,
-        repo,
-        client: await clients.createAzureDevOpsClient(),
-        autoDiscovered: true,
+        kind: 'azure-devops',
+        org: stringContext(provider, 'org'),
+        project: stringContext(provider, 'project'),
+        repo: stringContext(provider, 'repo'),
       };
-    }
     default:
       throw new Error(
         `Pull request provider '${provider.capability.providerId}' cannot create a legacy platform context`
@@ -74,13 +69,45 @@ export async function platformContextFromPullRequestProvider(
   }
 }
 
+export async function platformContextFromPullRequestProvider(
+  provider: ResolvedPullRequestProvider,
+  clients: PullRequestProviderContextClients = defaultClients
+): Promise<PlatformContext> {
+  const repository = legacyRepositoryRef(provider);
+
+  switch (repository.kind) {
+    case 'github':
+      return {
+        platform: 'github',
+        host: repository.host,
+        owner: repository.owner,
+        repo: repository.repo,
+        client: await clients.createGitHubClient({ host: repository.host }),
+        autoDiscovered: true,
+      };
+    case 'azure-devops':
+      return {
+        platform: 'azure-devops',
+        org: repository.org,
+        project: repository.project,
+        repo: repository.repo,
+        client: await clients.createAzureDevOpsClient(),
+        autoDiscovered: true,
+      };
+    default:
+      throw new Error(
+        `Pull request provider '${repository.providerId}' cannot create a legacy platform context`
+      );
+  }
+}
+
 export async function resolvePullRequestPlatformContextForRemote(
-  registry: CommandRegistry,
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   clients: PullRequestProviderContextClients = defaultClients
 ): Promise<PlatformContext> {
   const provider = await Effect.runPromise(
-    resolvePullRequestProviderFromRegistryForRemote(registry, remoteUrl)
+    resolvePullRequestProviderForRemote(providers, remoteUrl)
   );
   return platformContextFromPullRequestProvider(provider, clients);
 }

@@ -1,9 +1,17 @@
-import type { CommandRegistry } from './command-registry.js';
+import type {
+  CommandRegistry,
+  OwnedPluginCapability,
+} from './command-registry.js';
+import type { AidePullRequestProviderCapability } from './plugin-descriptor.js';
 
 const aideHostContextSymbol = Symbol.for('aide.hostContext');
 
+export interface AideHostServices {
+  readonly pullRequestProviders: () => readonly OwnedPluginCapability<AidePullRequestProviderCapability>[];
+}
+
 export interface AideHostContext {
-  readonly registry: CommandRegistry;
+  readonly services: AideHostServices;
 }
 
 type AideHostContextCarrier = {
@@ -27,4 +35,13 @@ export function getAideHostContext(argv: unknown): AideHostContext | null {
     return null;
   }
   return (argv as AideHostContextCarrier)[aideHostContextSymbol] ?? null;
+}
+
+export function createAideHostServices(
+  registry: CommandRegistry
+): AideHostServices {
+  const pullRequestProviders = registry.capabilities.pullRequestProviders();
+  return Object.freeze({
+    pullRequestProviders: () => pullRequestProviders,
+  });
 }

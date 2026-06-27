@@ -54,6 +54,12 @@ describe('pull request provider resolution', () => {
       owner: 'acme',
       repo: 'widgets',
     });
+    expect(resolved.match.repository).toEqual({
+      kind: 'github',
+      host: 'github.com',
+      owner: 'acme',
+      repo: 'widgets',
+    });
   });
 
   test('resolves GitHub Enterprise Cloud remotes as GitHub provider matches', async () => {
@@ -68,6 +74,12 @@ describe('pull request provider resolution', () => {
 
     expect(resolved.pluginId).toBe('github');
     expect(resolved.match.context).toEqual({
+      host: 'acme.ghe.com',
+      owner: 'acme',
+      repo: 'widgets',
+    });
+    expect(resolved.match.repository).toEqual({
+      kind: 'github',
       host: 'acme.ghe.com',
       owner: 'acme',
       repo: 'widgets',
@@ -87,6 +99,12 @@ describe('pull request provider resolution', () => {
     expect(resolved.pluginId).toBe('azure-devops');
     expect(resolved.capability.providerId).toBe('azure-devops');
     expect(resolved.match.context).toEqual({
+      org: 'acme',
+      project: 'Platform',
+      repo: 'widgets',
+    });
+    expect(resolved.match.repository).toEqual({
+      kind: 'azure-devops',
       org: 'acme',
       project: 'Platform',
       repo: 'widgets',
@@ -111,8 +129,10 @@ describe('pull request provider resolution', () => {
 
     expect(github.pluginId).toBe('github');
     expect(github.match.context?.number).toBe(42);
+    expect(github.match.pullRequest).toEqual({ number: 42 });
     expect(ado.pluginId).toBe('azure-devops');
     expect(ado.match.context?.number).toBe(42);
+    expect(ado.match.pullRequest).toEqual({ number: 42 });
   });
 
   test('fails with a typed unsupported-provider error when no provider matches', async () => {
@@ -209,7 +229,7 @@ describe('pull request provider platform context bridge', () => {
     const calls: string[] = [];
 
     const ctx = await resolvePullRequestPlatformContextForRemote(
-      registry,
+      registry.capabilities.pullRequestProviders(),
       'git@github.com:acme/widgets.git',
       {
         createGitHubClient: async ({ host }) => {
@@ -237,7 +257,7 @@ describe('pull request provider platform context bridge', () => {
     const calls: string[] = [];
 
     const ctx = await resolvePullRequestPlatformContextForRemote(
-      registry,
+      registry.capabilities.pullRequestProviders(),
       'git@ssh.dev.azure.com:v3/acme/Platform/widgets',
       {
         createGitHubClient: async () => {

@@ -79,6 +79,12 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
             source: 'git-remote',
             priority: 100,
             detail: `${parsed.host}/${parsed.owner}/${parsed.repo}`,
+            repository: {
+              kind: 'github',
+              host: parsed.host,
+              owner: parsed.owner,
+              repo: parsed.repo,
+            },
             context: {
               host: parsed.host,
               owner: parsed.owner,
@@ -93,6 +99,15 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
             source: 'pull-request-url',
             priority: 100,
             detail: `${parsed.host}/${parsed.owner}/${parsed.repo}#${parsed.number}`,
+            repository: {
+              kind: 'github',
+              host: parsed.host,
+              owner: parsed.owner,
+              repo: parsed.repo,
+            },
+            pullRequest: {
+              number: parsed.number,
+            },
             context: {
               host: parsed.host,
               owner: parsed.owner,

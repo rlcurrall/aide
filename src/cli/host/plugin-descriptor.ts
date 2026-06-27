@@ -9,15 +9,21 @@ import {
 
 export type AnyYargsCommandModule = CommandModule<object, object>;
 
+export interface AidePluginCommandPlacement {
+  readonly parentId?: string;
+}
+
 export type AidePluginCommand =
   | {
       readonly kind: 'module';
       readonly id: string;
+      readonly parentId?: string;
       readonly module: AnyYargsCommandModule;
     }
   | {
       readonly kind: 'descriptor';
       readonly id: string;
+      readonly parentId?: string;
       readonly descriptor: AnyAideCommandDescriptor;
     };
 
@@ -40,10 +46,40 @@ export type AidePullRequestProviderMatchSource =
   | 'git-remote'
   | 'pull-request-url';
 
+export type AidePullRequestRepositoryRef =
+  | {
+      readonly kind: 'github';
+      readonly host: string;
+      readonly owner: string;
+      readonly repo: string;
+    }
+  | {
+      readonly kind: 'azure-devops';
+      readonly org: string;
+      readonly project: string;
+      readonly repo: string;
+    }
+  | {
+      readonly kind: 'external';
+      readonly providerId: string;
+      readonly displayName: string;
+      readonly metadata?: Readonly<Record<string, string | number | boolean>>;
+    };
+
+export interface AidePullRequestRef {
+  readonly number: number;
+}
+
 export interface AidePullRequestProviderMatch {
   readonly source: AidePullRequestProviderMatchSource;
   readonly priority?: number;
   readonly detail?: string;
+  readonly repository?: AidePullRequestRepositoryRef;
+  readonly pullRequest?: AidePullRequestRef;
+  /**
+   * Transitional metadata for legacy command bridges. New provider-facing code
+   * should prefer typed refs above.
+   */
   readonly context?: Readonly<Record<string, string | number | boolean>>;
 }
 
@@ -91,21 +127,25 @@ export function defineAidePlugin(
 
 export function pluginCommandModule<TBase extends object, TArgs extends object>(
   id: string,
-  module: CommandModule<TBase, TArgs>
+  module: CommandModule<TBase, TArgs>,
+  placement: AidePluginCommandPlacement = {}
 ): AidePluginCommand {
   return {
     kind: 'module',
     id,
+    parentId: placement.parentId,
     module: module as unknown as AnyYargsCommandModule,
   };
 }
 
 export function pluginCommandDescriptor<TArgs extends object>(
-  descriptor: AideCommandDescriptor<TArgs>
+  descriptor: AideCommandDescriptor<TArgs>,
+  placement: AidePluginCommandPlacement = {}
 ): AidePluginCommand {
   return {
     kind: 'descriptor',
     id: descriptor.id,
+    parentId: placement.parentId,
     descriptor: eraseCommandDescriptor(descriptor),
   };
 }

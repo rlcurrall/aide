@@ -1,4 +1,4 @@
-import { prCommands } from '@cli/commands/pr/index.js';
+import { prCommandGroup, prListCommand } from '@cli/commands/pr/index.js';
 import {
   defineAidePlugin,
   pluginCommandModule,
@@ -7,5 +7,8 @@ import {
 export const pullRequestsPlugin = defineAidePlugin({
   id: 'pull-requests',
   summary: 'Pull request workflows for GitHub and Azure DevOps',
-  commands: [pluginCommandModule('pr', prCommands)],
+  commands: [
+    pluginCommandModule('pr', prCommandGroup),
+    pluginCommandModule('pr:list', prListCommand, { parentId: 'pr' }),
+  ],
 });

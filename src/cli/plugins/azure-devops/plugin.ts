@@ -73,6 +73,12 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
             source: 'git-remote',
             priority: 100,
             detail: `${parsed.org}/${parsed.project}/${parsed.repo}`,
+            repository: {
+              kind: 'azure-devops',
+              org: parsed.org,
+              project: parsed.project,
+              repo: parsed.repo,
+            },
             context: {
               org: parsed.org,
               project: parsed.project,
@@ -87,6 +93,15 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
             source: 'pull-request-url',
             priority: 100,
             detail: `${parsed.org}/${parsed.project}/${parsed.repo}#${parsed.prId}`,
+            repository: {
+              kind: 'azure-devops',
+              org: parsed.org,
+              project: parsed.project,
+              repo: parsed.repo,
+            },
+            pullRequest: {
+              number: parsed.prId,
+            },
             context: {
               org: parsed.org,
               project: parsed.project,

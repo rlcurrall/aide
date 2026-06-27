@@ -5,7 +5,11 @@ import yargs from 'yargs';
 import { textResult } from './command-descriptor.js';
 import { createCommandRegistry } from './command-registry.js';
 import { createBuiltinCommandRegistry } from '@cli/plugins/builtin.js';
-import { defineAidePlugin, pluginCommandModule } from './plugin-descriptor.js';
+import {
+  defineAidePlugin,
+  pluginCommandDescriptor,
+  pluginCommandModule,
+} from './plugin-descriptor.js';
 import { getAideHostContext } from './runtime-context.js';
 import {
   commandModuleFromDescriptor,
@@ -48,8 +52,21 @@ describe('CommandRegistry', () => {
       'Please specify a command (jira, pr, plugin, prime, upgrade, login, logout, whoami)'
     );
     expect(registry.commandOwner('pr')).toBe('pull-requests');
+    expect(registry.commandOwner('pr:list')).toBe('pull-requests');
     expect(registry.commandOwner('whoami')).toBe('legacy-auth');
     expect(registry.commandOwner('missing')).toBeNull();
+    expect(registry.childCommandIds('pr')).toEqual(['pr:list']);
+    expect(registry.allCommandIds()).toEqual([
+      'jira',
+      'pr',
+      'plugin',
+      'prime',
+      'upgrade',
+      'login',
+      'logout',
+      'whoami',
+      'pr:list',
+    ]);
   });
 
   test('rejects duplicate command ids', () => {
@@ -177,6 +194,114 @@ describe('CommandRegistry', () => {
     );
   });
 
+  test('allows child route ownership under a command group', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerModule('parent', {
+      command: 'parent <command>',
+      describe: 'Parent command',
+      handler: () => {},
+    });
+    registry.registerDescriptor(
+      {
+        id: 'parent:child',
+        route: 'child',
+        summary: 'Child command',
+        run: () => Effect.succeed(textResult('child')),
+      },
+      { parentId: 'parent' }
+    );
+
+    expect(registry.commandIds()).toEqual(['parent']);
+    expect(registry.childCommandIds('parent')).toEqual(['parent:child']);
+    expect(registry.allCommandIds()).toEqual(['parent', 'parent:child']);
+  });
+
+  test('rejects child commands for missing or non-group parents', () => {
+    const registry = createCommandRegistry();
+
+    expect(() =>
+      registry.registerDescriptor(
+        {
+          id: 'missing:child',
+          route: 'child',
+          summary: 'Child command',
+          run: () => Effect.succeed(textResult('child')),
+        },
+        { parentId: 'missing' }
+      )
+    ).toThrow("Command 'missing:child' parent 'missing' is not registered");
+
+    registry.registerModule('plain', {
+      command: 'plain',
+      describe: 'Plain command',
+      handler: () => {},
+    });
+
+    expect(() =>
+      registry.registerDescriptor(
+        {
+          id: 'plain:child',
+          route: 'child',
+          summary: 'Child command',
+          run: () => Effect.succeed(textResult('child')),
+        },
+        { parentId: 'plain' }
+      )
+    ).toThrow(
+      "Command 'plain:child' parent 'plain' does not accept subcommands"
+    );
+  });
+
+  test('rejects duplicate child routes under the same parent', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'parent-plugin',
+        summary: 'Parent plugin',
+        commands: [
+          pluginCommandModule('parent', {
+            command: 'parent <command>',
+            describe: 'Parent command',
+            handler: () => {},
+          }),
+        ],
+      })
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'child-plugin',
+          summary: 'Child plugin',
+          commands: [
+            pluginCommandDescriptor(
+              {
+                id: 'parent:first-child',
+                route: 'child',
+                summary: 'First child',
+                run: () => Effect.succeed(textResult('first')),
+              },
+              { parentId: 'parent' }
+            ),
+            pluginCommandDescriptor(
+              {
+                id: 'parent:second-child',
+                route: 'child',
+                summary: 'Second child',
+                run: () => Effect.succeed(textResult('second')),
+              },
+              { parentId: 'parent' }
+            ),
+          ],
+        })
+      )
+    ).toThrow(
+      "Plugin 'child-plugin' declares route 'child' under 'parent' for commands 'parent:first-child' and 'parent:second-child'"
+    );
+  });
+
   test('returns array snapshots for plugins and commands', () => {
     const registry = createBuiltinCommandRegistry();
 
@@ -205,6 +330,7 @@ describe('CommandRegistry', () => {
       'logout',
       'whoami',
     ]);
+    expect(registry.childCommandIds('pr')).toEqual(['pr:list']);
   });
 
   test('freezes retained command and plugin descriptor shells', () => {
@@ -319,13 +445,17 @@ describe('commandModuleFromDescriptor', () => {
 describe('registerCommands', () => {
   test('attaches host context to legacy yargs module handlers', async () => {
     const registry = createCommandRegistry();
-    let observedRegistry: unknown;
+    let observedProviderCount: number | undefined;
+    let observedHasRegistryProperty: boolean | undefined;
 
     registry.registerModule('sample', {
       command: 'sample',
       describe: 'Sample command',
       handler: (argv) => {
-        observedRegistry = getAideHostContext(argv)?.registry;
+        const context = getAideHostContext(argv);
+        observedProviderCount = context?.services.pullRequestProviders().length;
+        observedHasRegistryProperty =
+          context !== null && 'registry' in (context as object);
       },
     });
 
@@ -336,12 +466,13 @@ describe('registerCommands', () => {
       .strict()
       .parseAsync();
 
-    expect(observedRegistry).toBe(registry);
+    expect(observedProviderCount).toBe(0);
+    expect(observedHasRegistryProperty).toBe(false);
   });
 
   test('attaches host context to nested legacy yargs module handlers', async () => {
     const registry = createCommandRegistry();
-    let observedRegistry: unknown;
+    let observedProviderCount: number | undefined;
 
     registry.registerModule('parent', {
       command: 'parent <command>',
@@ -351,7 +482,8 @@ describe('registerCommands', () => {
           command: 'child',
           describe: 'Child command',
           handler: (argv) => {
-            observedRegistry = getAideHostContext(argv)?.registry;
+            observedProviderCount =
+              getAideHostContext(argv)?.services.pullRequestProviders().length;
           },
         }),
       handler: () => {},
@@ -364,6 +496,44 @@ describe('registerCommands', () => {
       .strict()
       .parseAsync();
 
-    expect(observedRegistry).toBe(registry);
+    expect(observedProviderCount).toBe(0);
+  });
+
+  test('composes registry child commands into parent yargs modules', async () => {
+    const registry = createCommandRegistry();
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.join(' '));
+    };
+
+    registry.registerModule('parent', {
+      command: 'parent <command>',
+      describe: 'Parent command',
+      builder: (yargs) => yargs.demandCommand(1, 'Pick a child command'),
+      handler: () => {},
+    });
+    registry.registerDescriptor(
+      {
+        id: 'parent:child',
+        route: 'child',
+        summary: 'Child command',
+        run: () => Effect.succeed(textResult('child output')),
+      },
+      { parentId: 'parent' }
+    );
+
+    try {
+      await registerCommands(
+        yargs(['parent', 'child']).scriptName('aide').exitProcess(false),
+        registry
+      )
+        .strict()
+        .parseAsync();
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(lines).toEqual(['child output']);
   });
 });
