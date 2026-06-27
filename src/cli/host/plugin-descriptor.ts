@@ -1,0 +1,111 @@
+import type { CommandModule } from 'yargs';
+import type { Effect } from 'effect';
+
+import {
+  eraseCommandDescriptor,
+  type AideCommandDescriptor,
+  type AnyAideCommandDescriptor,
+} from './command-descriptor.js';
+
+export type AnyYargsCommandModule = CommandModule<object, object>;
+
+export type AidePluginCommand =
+  | {
+      readonly kind: 'module';
+      readonly id: string;
+      readonly module: AnyYargsCommandModule;
+    }
+  | {
+      readonly kind: 'descriptor';
+      readonly id: string;
+      readonly descriptor: AnyAideCommandDescriptor;
+    };
+
+export type AidePluginAuthState =
+  | 'configured'
+  | 'not-configured'
+  | 'misconfigured'
+  | 'unavailable';
+
+export interface AidePluginAuthStatus {
+  readonly state: AidePluginAuthState;
+  readonly detail?: string;
+}
+
+export interface AidePluginAuthCapability {
+  readonly status: () => Effect.Effect<AidePluginAuthStatus, unknown, never>;
+}
+
+export type AidePullRequestProviderMatchSource =
+  | 'git-remote'
+  | 'pull-request-url';
+
+export interface AidePullRequestProviderMatch {
+  readonly source: AidePullRequestProviderMatchSource;
+  readonly priority?: number;
+  readonly detail?: string;
+  readonly context?: Readonly<Record<string, string | number | boolean>>;
+}
+
+export interface AidePullRequestProviderFeatures {
+  readonly draftPullRequests?: boolean;
+  readonly reviewComments?: boolean;
+  readonly threadedComments?: boolean;
+  readonly enterpriseHosts?: boolean;
+}
+
+export interface AidePullRequestProviderCapability {
+  readonly providerId: string;
+  readonly priority: number;
+  readonly features: AidePullRequestProviderFeatures;
+  readonly matchRemote: (
+    remoteUrl: string
+  ) => AidePullRequestProviderMatch | null;
+  readonly matchPullRequestUrl: (
+    url: string
+  ) => AidePullRequestProviderMatch | null;
+  readonly authStatus: () => Effect.Effect<
+    AidePluginAuthStatus,
+    unknown,
+    never
+  >;
+}
+
+export interface AidePluginCapabilities {
+  readonly auth?: AidePluginAuthCapability;
+  readonly pullRequestProvider?: AidePullRequestProviderCapability;
+}
+
+export interface AidePluginDescriptor {
+  readonly id: string;
+  readonly summary: string;
+  readonly commands: readonly AidePluginCommand[];
+  readonly capabilities?: AidePluginCapabilities;
+}
+
+export function defineAidePlugin(
+  plugin: AidePluginDescriptor
+): AidePluginDescriptor {
+  return plugin;
+}
+
+export function pluginCommandModule<TBase extends object, TArgs extends object>(
+  id: string,
+  module: CommandModule<TBase, TArgs>
+): AidePluginCommand {
+  return {
+    kind: 'module',
+    id,
+    module: module as unknown as AnyYargsCommandModule,
+  };
+}
+
+export function pluginCommandDescriptor<TArgs extends object>(
+  descriptor: AideCommandDescriptor<TArgs>
+): AidePluginCommand {
+  return {
+    kind: 'descriptor',
+    id: descriptor.id,
+    descriptor: eraseCommandDescriptor(descriptor),
+  };
+}

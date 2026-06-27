@@ -10,40 +10,25 @@ import { hideBin } from 'yargs/helpers';
 import { VERSION, CLI_NAME } from './help.js';
 import { cleanupOldBackup } from './update.js';
 import { UserCancelledError } from '@lib/prompts.js';
-
-// Import service command modules
-import { jiraCommands } from './commands/jira/index.js';
-import { prCommands } from './commands/pr/index.js';
-import { pluginCommands } from './commands/plugin/index.js';
-import primeCommand from './commands/prime.js';
-import upgradeCommand from './commands/upgrade.js';
-import loginCommand from './commands/login.js';
-import logoutCommand from './commands/logout.js';
-import whoamiCommand from './commands/whoami.js';
+import { registerCommands } from './host/yargs-adapter.js';
+import { createBuiltinCommandRegistry } from './plugins/builtin.js';
 
 async function main(): Promise<number> {
   // Clean up any old backup files from previous upgrades
   cleanupOldBackup();
+  const registry = createBuiltinCommandRegistry();
 
   try {
-    await yargs(hideBin(process.argv))
-      .scriptName(CLI_NAME)
-      .version(VERSION)
-      .help()
-      .alias('h', 'help')
-      .alias('v', 'version')
-      .command(jiraCommands)
-      .command(prCommands)
-      .command(pluginCommands)
-      .command(primeCommand)
-      .command(upgradeCommand)
-      .command(loginCommand)
-      .command(logoutCommand)
-      .command(whoamiCommand)
-      .demandCommand(
-        1,
-        'Please specify a command (jira, pr, plugin, prime, upgrade, login, logout, whoami)'
-      )
+    await registerCommands(
+      yargs(hideBin(process.argv))
+        .scriptName(CLI_NAME)
+        .version(VERSION)
+        .help()
+        .alias('h', 'help')
+        .alias('v', 'version'),
+      registry
+    )
+      .demandCommand(1, registry.demandMessage())
       .strict()
       .wrap(Math.min(100, process.stdout.columns || 80))
       .fail((msg, err) => {
