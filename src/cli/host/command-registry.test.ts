@@ -87,7 +87,7 @@ describe('CommandRegistry', () => {
     ]);
   });
 
-  test('keeps built-in pr child routes single-source-of-truth in the registry', () => {
+  test('keeps built-in pr child routes reserved to the owning plugin', () => {
     const registry = createBuiltinCommandRegistry();
 
     expect(registry.childCommandIds('pr')).toEqual(expectedPrChildCommandIds);
@@ -111,7 +111,7 @@ describe('CommandRegistry', () => {
         })
       )
     ).toThrow(
-      "Command 'rogue:pr:view' route 'view' conflicts with command 'pr:view' under 'pr'"
+      "Command 'rogue:pr:view' from plugin 'rogue-pr-view' cannot extend parent 'pr' owned by plugin 'pull-requests' at route 'view'"
     );
   });
 
@@ -263,6 +263,245 @@ describe('CommandRegistry', () => {
     expect(registry.allCommandIds()).toEqual(['parent', 'parent:child']);
   });
 
+  test('allows same-plugin child routes under command groups by default', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'parent-plugin',
+        summary: 'Parent plugin',
+        commands: [
+          pluginCommandModule('parent', {
+            command: 'parent <command>',
+            describe: 'Parent command',
+            handler: () => {},
+          }),
+          pluginCommandDescriptor(
+            {
+              id: 'parent:child',
+              route: 'child',
+              summary: 'Child command',
+              run: () => Effect.succeed(textResult('child')),
+            },
+            { parentId: 'parent' }
+          ),
+        ],
+      })
+    );
+
+    expect(registry.childCommandIds('parent')).toEqual(['parent:child']);
+  });
+
+  test('allows same-plugin child routes regardless of declaration order', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'parent-plugin',
+        summary: 'Parent plugin',
+        commands: [
+          pluginCommandDescriptor(
+            {
+              id: 'parent:child',
+              route: 'child',
+              summary: 'Child command',
+              run: () => Effect.succeed(textResult('child')),
+            },
+            { parentId: 'parent' }
+          ),
+          pluginCommandModule('parent', {
+            command: 'parent <command>',
+            describe: 'Parent command',
+            handler: () => {},
+          }),
+        ],
+      })
+    );
+
+    expect(registry.childCommandIds('parent')).toEqual(['parent:child']);
+  });
+
+  test('rejects cross-plugin child routes by default', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'parent-plugin',
+        summary: 'Parent plugin',
+        commands: [
+          pluginCommandModule('parent', {
+            command: 'parent <command>',
+            describe: 'Parent command',
+            handler: () => {},
+          }),
+        ],
+      })
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'child-plugin',
+          summary: 'Child plugin',
+          commands: [
+            pluginCommandDescriptor(
+              {
+                id: 'parent:child',
+                route: 'child',
+                summary: 'Child command',
+                run: () => Effect.succeed(textResult('child')),
+              },
+              { parentId: 'parent' }
+            ),
+          ],
+        })
+      )
+    ).toThrow(
+      "Command 'parent:child' from plugin 'child-plugin' cannot extend parent 'parent' owned by plugin 'parent-plugin' at route 'child'"
+    );
+  });
+
+  test('allows cross-plugin child routes when the parent extension policy is open', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'parent-plugin',
+        summary: 'Parent plugin',
+        commands: [
+          pluginCommandModule(
+            'parent',
+            {
+              command: 'parent <command>',
+              describe: 'Parent command',
+              handler: () => {},
+            },
+            { extension: { kind: 'open' } }
+          ),
+        ],
+      })
+    );
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'child-plugin',
+        summary: 'Child plugin',
+        commands: [
+          pluginCommandDescriptor(
+            {
+              id: 'parent:child',
+              route: 'child',
+              summary: 'Child command',
+              run: () => Effect.succeed(textResult('child')),
+            },
+            { parentId: 'parent' }
+          ),
+        ],
+      })
+    );
+
+    expect(registry.childCommandIds('parent')).toEqual(['parent:child']);
+  });
+
+  test('allows cross-plugin child routes only for allowlisted plugins', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'parent-plugin',
+        summary: 'Parent plugin',
+        commands: [
+          pluginCommandModule(
+            'parent',
+            {
+              command: 'parent <command>',
+              describe: 'Parent command',
+              handler: () => {},
+            },
+            {
+              extension: {
+                kind: 'allowlist',
+                pluginIds: ['allowed-child-plugin'],
+              },
+            }
+          ),
+        ],
+      })
+    );
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'allowed-child-plugin',
+        summary: 'Allowed child plugin',
+        commands: [
+          pluginCommandDescriptor(
+            {
+              id: 'parent:allowed-child',
+              route: 'allowed',
+              summary: 'Allowed child command',
+              run: () => Effect.succeed(textResult('allowed')),
+            },
+            { parentId: 'parent' }
+          ),
+        ],
+      })
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'blocked-child-plugin',
+          summary: 'Blocked child plugin',
+          commands: [
+            pluginCommandDescriptor(
+              {
+                id: 'parent:blocked-child',
+                route: 'blocked',
+                summary: 'Blocked child command',
+                run: () => Effect.succeed(textResult('blocked')),
+              },
+              { parentId: 'parent' }
+            ),
+          ],
+        })
+      )
+    ).toThrow(
+      "Command 'parent:blocked-child' from plugin 'blocked-child-plugin' cannot extend parent 'parent' owned by plugin 'parent-plugin' at route 'blocked'"
+    );
+    expect(registry.childCommandIds('parent')).toEqual([
+      'parent:allowed-child',
+    ]);
+  });
+
+  test('rejects invalid allowlist plugin ids without registering the plugin', () => {
+    const registry = createCommandRegistry();
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'parent-plugin',
+          summary: 'Parent plugin',
+          commands: [
+            pluginCommandModule(
+              'parent',
+              {
+                command: 'parent <command>',
+                describe: 'Parent command',
+                handler: () => {},
+              },
+              {
+                extension: {
+                  kind: 'allowlist',
+                  pluginIds: ['bad plugin'],
+                },
+              }
+            ),
+          ],
+        })
+      )
+    ).toThrow("Plugin id 'bad plugin' must not contain whitespace");
+    expect(registry.pluginIds()).toEqual([]);
+    expect(registry.commandIds()).toEqual([]);
+  });
+
   test('rejects child commands for missing or non-group parents', () => {
     const registry = createCommandRegistry();
 
@@ -299,29 +538,66 @@ describe('CommandRegistry', () => {
     );
   });
 
-  test('rejects duplicate child routes under the same parent', () => {
+  test('rejects extension policy on commands that are not command groups', () => {
     const registry = createCommandRegistry();
-
-    registry.registerPlugin(
-      defineAidePlugin({
-        id: 'parent-plugin',
-        summary: 'Parent plugin',
-        commands: [
-          pluginCommandModule('parent', {
-            command: 'parent <command>',
-            describe: 'Parent command',
-            handler: () => {},
-          }),
-        ],
-      })
-    );
 
     expect(() =>
       registry.registerPlugin(
         defineAidePlugin({
-          id: 'child-plugin',
-          summary: 'Child plugin',
+          id: 'plain-plugin',
+          summary: 'Plain plugin',
           commands: [
+            pluginCommandModule(
+              'plain',
+              {
+                command: 'plain',
+                describe: 'Plain command',
+                handler: () => {},
+              },
+              { extension: { kind: 'open' } }
+            ),
+          ],
+        })
+      )
+    ).toThrow(
+      "Command 'plain' declares an extension policy but does not accept subcommands"
+    );
+    expect(() =>
+      registry.registerModule(
+        'direct-plain',
+        {
+          command: 'direct-plain',
+          describe: 'Direct plain command',
+          handler: () => {},
+        },
+        { extension: { kind: 'open' } }
+      )
+    ).toThrow(
+      "Command 'direct-plain' declares an extension policy but does not accept subcommands"
+    );
+
+    registry.registerModule('direct-plain', {
+      command: 'direct-plain',
+      describe: 'Direct plain command',
+      handler: () => {},
+    });
+    expect(registry.commandIds()).toEqual(['direct-plain']);
+  });
+
+  test('rejects duplicate child routes under the same parent', () => {
+    const registry = createCommandRegistry();
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'parent-plugin',
+          summary: 'Parent plugin',
+          commands: [
+            pluginCommandModule('parent', {
+              command: 'parent <command>',
+              describe: 'Parent command',
+              handler: () => {},
+            }),
             pluginCommandDescriptor(
               {
                 id: 'parent:first-child',
@@ -344,7 +620,7 @@ describe('CommandRegistry', () => {
         })
       )
     ).toThrow(
-      "Plugin 'child-plugin' declares route 'child' under 'parent' for commands 'parent:first-child' and 'parent:second-child'"
+      "Plugin 'parent-plugin' declares route 'child' under 'parent' for commands 'parent:first-child' and 'parent:second-child'"
     );
   });
 

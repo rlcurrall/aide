@@ -6,6 +6,7 @@ import {
   type AnyAideCommandDescriptor,
 } from './command-descriptor.js';
 import type {
+  AideCommandExtensionPolicy,
   AidePluginAuthCapability,
   AidePluginCommand,
   AidePluginDescriptor,
@@ -13,10 +14,31 @@ import type {
   AnyYargsCommandModule,
 } from './plugin-descriptor.js';
 
+const defaultExtensionPolicy: AideCommandExtensionPolicy = Object.freeze({
+  kind: 'same-plugin',
+});
+
 function eraseCommandModule<TBase extends object, TArgs extends object>(
   module: CommandModule<TBase, TArgs>
 ): AnyYargsCommandModule {
   return Object.freeze({ ...module }) as unknown as AnyYargsCommandModule;
+}
+
+function snapshotExtensionPolicy(
+  policy: AideCommandExtensionPolicy | undefined
+): AideCommandExtensionPolicy | undefined {
+  if (policy === undefined) return undefined;
+  if (policy.kind !== 'allowlist') return Object.freeze({ ...policy });
+
+  const pluginIds = policy.pluginIds.map((pluginId) => {
+    assertId('Plugin', pluginId);
+    return pluginId;
+  });
+
+  return Object.freeze({
+    kind: 'allowlist',
+    pluginIds: Object.freeze(pluginIds),
+  });
 }
 
 function snapshotCommandDescriptor<TArgs extends object>(
@@ -81,6 +103,7 @@ function snapshotPlugin(plugin: AidePluginDescriptor): AidePluginDescriptor {
         kind: 'module',
         id: command.id,
         parentId: command.parentId,
+        extension: snapshotExtensionPolicy(command.extension),
         module: eraseCommandModule(command.module),
       });
     }
@@ -89,6 +112,7 @@ function snapshotPlugin(plugin: AidePluginDescriptor): AidePluginDescriptor {
       kind: 'descriptor',
       id: command.id,
       parentId: command.parentId,
+      extension: snapshotExtensionPolicy(command.extension),
       descriptor: snapshotCommandDescriptor(command.descriptor),
     });
   });
@@ -110,6 +134,7 @@ export type RegisteredCommand =
       readonly id: string;
       readonly pluginId?: string;
       readonly parentId?: string;
+      readonly extension?: AideCommandExtensionPolicy;
       readonly routeKeys: readonly string[];
       readonly module: AnyYargsCommandModule;
     }
@@ -118,12 +143,14 @@ export type RegisteredCommand =
       readonly id: string;
       readonly pluginId?: string;
       readonly parentId?: string;
+      readonly extension?: AideCommandExtensionPolicy;
       readonly routeKeys: readonly string[];
       readonly descriptor: AnyAideCommandDescriptor;
     };
 
 export interface RegisterCommandOptions {
   readonly parentId?: string;
+  readonly extension?: AideCommandExtensionPolicy;
 }
 
 export interface OwnedPluginCapability<TCapability> {
@@ -140,6 +167,10 @@ export class CommandRegistry {
   readonly #routeOwners = new Map<string, string>();
   readonly #childRouteOwners = new Map<string, Map<string, string>>();
   readonly #commandGroupIds = new Set<string>();
+  readonly #commandExtensionPolicies = new Map<
+    string,
+    AideCommandExtensionPolicy
+  >();
   readonly #commandOwners = new Map<string, string>();
 
   readonly capabilities = {
@@ -173,19 +204,24 @@ export class CommandRegistry {
       kind: 'module' as const,
       id,
       parentId: options.parentId,
+      extension: snapshotExtensionPolicy(options.extension),
       routeKeys: freezeRouteKeys(keys),
       module: eraseCommandModule(module),
     });
 
+    const acceptsChildren = routeAcceptsChildCommands(module.command);
     if (options.parentId === undefined) {
+      if (!acceptsChildren && entry.extension !== undefined) {
+        this.#assertExtensionOnlyOnCommandGroup(id);
+      }
       this.#assertRoutesAvailable(id, keys);
       this.#commands.push(entry);
       this.#claimRoutes(id, keys);
-      if (routeAcceptsChildCommands(module.command)) {
-        this.#commandGroupIds.add(id);
+      if (acceptsChildren) {
+        this.#claimCommandGroup(id, entry.extension);
       }
     } else {
-      this.#assertParentAcceptsChildren(id, options.parentId);
+      this.#assertParentAcceptsChildren(id, options.parentId, undefined, keys);
       this.#assertChildRoutesAvailable(id, options.parentId, keys);
       this.#addChildCommand(options.parentId, entry);
       this.#claimChildRoutes(id, options.parentId, keys);
@@ -207,19 +243,29 @@ export class CommandRegistry {
       kind: 'descriptor' as const,
       id: descriptor.id,
       parentId: options.parentId,
+      extension: snapshotExtensionPolicy(options.extension),
       routeKeys: freezeRouteKeys(keys),
       descriptor: snapshotCommandDescriptor(descriptor),
     });
 
+    const acceptsChildren = routeAcceptsChildCommands(descriptor.route);
     if (options.parentId === undefined) {
+      if (!acceptsChildren && entry.extension !== undefined) {
+        this.#assertExtensionOnlyOnCommandGroup(descriptor.id);
+      }
       this.#assertRoutesAvailable(descriptor.id, keys);
       this.#commands.push(entry);
       this.#claimRoutes(descriptor.id, keys);
-      if (routeAcceptsChildCommands(descriptor.route)) {
-        this.#commandGroupIds.add(descriptor.id);
+      if (acceptsChildren) {
+        this.#claimCommandGroup(descriptor.id, entry.extension);
       }
     } else {
-      this.#assertParentAcceptsChildren(descriptor.id, options.parentId);
+      this.#assertParentAcceptsChildren(
+        descriptor.id,
+        options.parentId,
+        undefined,
+        keys
+      );
       this.#assertChildRoutesAvailable(descriptor.id, options.parentId, keys);
       this.#addChildCommand(options.parentId, entry);
       this.#claimChildRoutes(descriptor.id, options.parentId, keys);
@@ -252,16 +298,27 @@ export class CommandRegistry {
     }
 
     const pluginCommandIds = new Set(commandIds);
-    const pluginGroupIds = new Set(
-      snapshot.commands.flatMap((command) => {
-        if (command.parentId !== undefined) return [];
-        const acceptsChildren =
-          command.kind === 'module'
-            ? routeAcceptsChildCommands(command.module.command)
-            : routeAcceptsChildCommands(command.descriptor.route);
-        return acceptsChildren ? [command.id] : [];
-      })
-    );
+    const pluginGroupIds = new Set<string>();
+    const pluginExtensionPolicies = new Map<
+      string,
+      AideCommandExtensionPolicy
+    >();
+    for (const command of snapshot.commands) {
+      if (command.parentId !== undefined) continue;
+      const acceptsChildren =
+        command.kind === 'module'
+          ? routeAcceptsChildCommands(command.module.command)
+          : routeAcceptsChildCommands(command.descriptor.route);
+      if (acceptsChildren) {
+        pluginGroupIds.add(command.id);
+        pluginExtensionPolicies.set(
+          command.id,
+          command.extension ?? defaultExtensionPolicy
+        );
+      } else if (command.extension !== undefined) {
+        this.#assertExtensionOnlyOnCommandGroup(command.id);
+      }
+    }
 
     const commandRouteKeys = new Map<string, readonly string[]>();
     const pluginRouteOwners = new Map<string, string>();
@@ -309,6 +366,14 @@ export class CommandRegistry {
           `Command '${command.id}' parent '${command.parentId}' does not accept subcommands`
         );
       }
+      if (!parentInSamePlugin) {
+        this.#assertParentExtensionPermits(
+          command.id,
+          command.parentId,
+          snapshot.id,
+          keys
+        );
+      }
 
       let routeOwners = pluginChildRouteOwners.get(command.parentId);
       if (routeOwners === undefined) {
@@ -338,6 +403,7 @@ export class CommandRegistry {
               kind: 'module' as const,
               id: command.id,
               pluginId: snapshot.id,
+              extension: command.extension,
               routeKeys: freezeRouteKeys(resolvedKeys),
               module: command.module,
             })
@@ -345,6 +411,7 @@ export class CommandRegistry {
               kind: 'descriptor' as const,
               id: command.id,
               pluginId: snapshot.id,
+              extension: command.extension,
               routeKeys: freezeRouteKeys(resolvedKeys),
               descriptor: command.descriptor,
             });
@@ -353,7 +420,10 @@ export class CommandRegistry {
       this.#commandOwners.set(command.id, snapshot.id);
       this.#claimRoutes(command.id, resolvedKeys);
       if (pluginGroupIds.has(command.id)) {
-        this.#commandGroupIds.add(command.id);
+        this.#claimCommandGroup(
+          command.id,
+          pluginExtensionPolicies.get(command.id)
+        );
       }
     }
 
@@ -367,6 +437,7 @@ export class CommandRegistry {
               id: command.id,
               pluginId: snapshot.id,
               parentId: command.parentId,
+              extension: command.extension,
               routeKeys: freezeRouteKeys(resolvedKeys),
               module: command.module,
             })
@@ -375,6 +446,7 @@ export class CommandRegistry {
               id: command.id,
               pluginId: snapshot.id,
               parentId: command.parentId,
+              extension: command.extension,
               routeKeys: freezeRouteKeys(resolvedKeys),
               descriptor: command.descriptor,
             });
@@ -458,7 +530,18 @@ export class CommandRegistry {
     }
   }
 
-  #assertParentAcceptsChildren(commandId: string, parentId: string): void {
+  #assertExtensionOnlyOnCommandGroup(commandId: string): never {
+    throw new Error(
+      `Command '${commandId}' declares an extension policy but does not accept subcommands`
+    );
+  }
+
+  #assertParentAcceptsChildren(
+    commandId: string,
+    parentId: string,
+    childPluginId: string | undefined,
+    routeKeys: readonly string[]
+  ): void {
     if (!this.#ids.has(parentId)) {
       throw new Error(
         `Command '${commandId}' parent '${parentId}' is not registered`
@@ -469,6 +552,46 @@ export class CommandRegistry {
         `Command '${commandId}' parent '${parentId}' does not accept subcommands`
       );
     }
+    this.#assertParentExtensionPermits(
+      commandId,
+      parentId,
+      childPluginId,
+      routeKeys
+    );
+  }
+
+  #assertParentExtensionPermits(
+    commandId: string,
+    parentId: string,
+    childPluginId: string | undefined,
+    routeKeys: readonly string[]
+  ): void {
+    const parentPluginId = this.#commandOwners.get(parentId);
+    if (parentPluginId === childPluginId) return;
+
+    const policy =
+      this.#commandExtensionPolicies.get(parentId) ?? defaultExtensionPolicy;
+    if (policy.kind === 'open') return;
+    if (
+      policy.kind === 'allowlist' &&
+      childPluginId !== undefined &&
+      policy.pluginIds.includes(childPluginId)
+    ) {
+      return;
+    }
+
+    const routeKey = routeKeys[0] ?? '<unknown>';
+    const childOwner =
+      childPluginId === undefined
+        ? 'direct registry registration'
+        : `plugin '${childPluginId}'`;
+    const parentOwner =
+      parentPluginId === undefined
+        ? 'no plugin owner'
+        : `plugin '${parentPluginId}'`;
+    throw new Error(
+      `Command '${commandId}' from ${childOwner} cannot extend parent '${parentId}' owned by ${parentOwner} at route '${routeKey}'`
+    );
   }
 
   #assertChildRoutesAvailable(
@@ -498,6 +621,17 @@ export class CommandRegistry {
     for (const key of keys) {
       this.#routeOwners.set(key, commandId);
     }
+  }
+
+  #claimCommandGroup(
+    commandId: string,
+    policy: AideCommandExtensionPolicy | undefined
+  ): void {
+    this.#commandGroupIds.add(commandId);
+    this.#commandExtensionPolicies.set(
+      commandId,
+      policy ?? defaultExtensionPolicy
+    );
   }
 
   #claimChildRoutes(

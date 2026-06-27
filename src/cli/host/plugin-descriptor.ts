@@ -9,8 +9,21 @@ import {
 
 export type AnyYargsCommandModule = CommandModule<object, object>;
 
+export type AideCommandExtensionPolicy =
+  | {
+      readonly kind: 'same-plugin';
+    }
+  | {
+      readonly kind: 'open';
+    }
+  | {
+      readonly kind: 'allowlist';
+      readonly pluginIds: readonly string[];
+    };
+
 export interface AidePluginCommandPlacement {
   readonly parentId?: string;
+  readonly extension?: AideCommandExtensionPolicy;
 }
 
 export type AidePluginCommand =
@@ -18,12 +31,14 @@ export type AidePluginCommand =
       readonly kind: 'module';
       readonly id: string;
       readonly parentId?: string;
+      readonly extension?: AideCommandExtensionPolicy;
       readonly module: AnyYargsCommandModule;
     }
   | {
       readonly kind: 'descriptor';
       readonly id: string;
       readonly parentId?: string;
+      readonly extension?: AideCommandExtensionPolicy;
       readonly descriptor: AnyAideCommandDescriptor;
     };
 
@@ -134,6 +149,7 @@ export function pluginCommandModule<TBase extends object, TArgs extends object>(
     kind: 'module',
     id,
     parentId: placement.parentId,
+    extension: placement.extension,
     module: module as unknown as AnyYargsCommandModule,
   };
 }
@@ -146,6 +162,7 @@ export function pluginCommandDescriptor<TArgs extends object>(
     kind: 'descriptor',
     id: descriptor.id,
     parentId: placement.parentId,
+    extension: placement.extension,
     descriptor: eraseCommandDescriptor(descriptor),
   };
 }
