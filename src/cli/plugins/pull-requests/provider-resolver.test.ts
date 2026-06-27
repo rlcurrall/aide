@@ -1,15 +1,25 @@
 import { describe, expect, test } from 'bun:test';
 import { Effect } from 'effect';
 
-import type { OwnedPluginCapability } from '@cli/host/command-registry.js';
-import type { AidePullRequestProviderCapability } from '@cli/host/plugin-descriptor.js';
+import {
+  createCommandRegistry,
+  type OwnedPluginCapability,
+} from '@cli/host/command-registry.js';
+import {
+  defineAidePlugin,
+  type AidePullRequestProviderCapability,
+  type AidePullRequestProviderMatch,
+} from '@cli/host/plugin-descriptor.js';
 import { createAzureDevOpsPlugin } from '@cli/plugins/azure-devops/plugin.js';
 import { createBuiltinCommandRegistry } from '@cli/plugins/builtin.js';
 import { createGitHubPlugin } from '@cli/plugins/github/plugin.js';
 import type { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import type { GitHubClient } from '@lib/github-client.js';
 
-import { resolvePullRequestPlatformContextForRemote } from './provider-context.js';
+import {
+  platformContextFromPullRequestProvider,
+  resolvePullRequestPlatformContextForRemote,
+} from './provider-context.js';
 import {
   AmbiguousPullRequestProviderError,
   UnsupportedPullRequestProviderError,
@@ -21,19 +31,47 @@ import {
 function fakeProvider(
   pluginId: string,
   providerId: string,
-  priority: number
+  priority: number,
+  remoteMatch?: AidePullRequestProviderMatch,
+  pullRequestUrlMatch?: AidePullRequestProviderMatch
 ): OwnedPluginCapability<AidePullRequestProviderCapability> {
   return {
     pluginId,
-    capability: {
+    capability: fakeProviderCapability(
       providerId,
       priority,
-      features: {},
-      authStatus: () => Effect.succeed({ state: 'configured' }),
-      matchRemote: () => ({ source: 'git-remote', priority }),
-      matchPullRequestUrl: () => ({ source: 'pull-request-url', priority }),
-    },
+      remoteMatch,
+      pullRequestUrlMatch
+    ),
   };
+}
+
+function fakeProviderCapability(
+  providerId: string,
+  priority: number,
+  remoteMatch?: AidePullRequestProviderMatch,
+  pullRequestUrlMatch?: AidePullRequestProviderMatch
+): AidePullRequestProviderCapability {
+  return {
+    providerId,
+    priority,
+    features: {},
+    authStatus: () => Effect.succeed({ state: 'configured' }),
+    matchRemote: () => remoteMatch ?? { source: 'git-remote', priority },
+    matchPullRequestUrl: () =>
+      pullRequestUrlMatch ?? { source: 'pull-request-url', priority },
+  };
+}
+
+function pluginWithPullRequestProvider(pluginId: string, providerId: string) {
+  return defineAidePlugin({
+    id: pluginId,
+    summary: `${pluginId} provider`,
+    commands: [],
+    capabilities: {
+      pullRequestProvider: fakeProviderCapability(providerId, 50),
+    },
+  });
 }
 
 describe('pull request provider resolution', () => {
@@ -188,6 +226,49 @@ describe('pull request provider resolution', () => {
   });
 });
 
+describe('pull request provider registry security', () => {
+  test('rejects reserved provider ids from non-owner plugins', () => {
+    const registry = createCommandRegistry();
+
+    expect(() =>
+      registry.registerPlugin(
+        pluginWithPullRequestProvider('evil-github', 'github')
+      )
+    ).toThrow(
+      "Plugin 'evil-github' cannot declare reserved pull request provider 'github' (reserved for plugin 'github')"
+    );
+    expect(() =>
+      registry.registerPlugin(
+        pluginWithPullRequestProvider('evil-ado', 'azure-devops')
+      )
+    ).toThrow(
+      "Plugin 'evil-ado' cannot declare reserved pull request provider 'azure-devops' (reserved for plugin 'azure-devops')"
+    );
+    expect(registry.pluginIds()).toEqual([]);
+  });
+
+  test('rejects duplicate pull request provider ids', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerPlugin(
+      pluginWithPullRequestProvider('gitlab-one', 'gitlab')
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        pluginWithPullRequestProvider('gitlab-two', 'gitlab')
+      )
+    ).toThrow(
+      "Pull request provider 'gitlab' is already registered by plugin 'gitlab-one'"
+    );
+    expect(
+      registry.capabilities
+        .pullRequestProviders()
+        .map((provider) => provider.capability.providerId)
+    ).toEqual(['gitlab']);
+  });
+});
+
 describe('pull request provider auth capabilities', () => {
   test('maps GitHub gh CLI auth into configured provider status', async () => {
     const plugin = createGitHubPlugin({
@@ -280,5 +361,127 @@ describe('pull request provider platform context bridge', () => {
       autoDiscovered: true,
     });
     expect(calls).toEqual(['ado']);
+  });
+
+  test('rejects high-priority external providers that forge GitHub core refs', async () => {
+    const registry = createBuiltinCommandRegistry();
+    const calls: string[] = [];
+    const maliciousProvider = fakeProvider(
+      'evil-plugin',
+      'evil-provider',
+      1000,
+      {
+        source: 'git-remote',
+        priority: 1000,
+        repository: {
+          kind: 'github',
+          host: 'evil.example',
+          owner: 'acme',
+          repo: 'widgets',
+        },
+      }
+    );
+
+    await expect(
+      resolvePullRequestPlatformContextForRemote(
+        [maliciousProvider, ...registry.capabilities.pullRequestProviders()],
+        'git@github.com:acme/widgets.git',
+        {
+          createGitHubClient: async ({ host }) => {
+            calls.push(`github:${host}`);
+            return { kind: 'github-client' } as unknown as GitHubClient;
+          },
+          createAzureDevOpsClient: async () => {
+            calls.push('ado');
+            return {
+              kind: 'azure-devops-client',
+            } as unknown as AzureDevOpsClient;
+          },
+        }
+      )
+    ).rejects.toThrow(
+      "Pull request provider 'evil-provider' from plugin 'evil-plugin' cannot provide 'github' repository refs to the legacy platform bridge"
+    );
+    expect(calls).toEqual([]);
+  });
+
+  test('rejects high-priority external providers that forge Azure DevOps core refs', async () => {
+    const calls: string[] = [];
+    const maliciousProvider = fakeProvider(
+      'evil-plugin',
+      'evil-provider',
+      1000,
+      {
+        source: 'git-remote',
+        priority: 1000,
+        repository: {
+          kind: 'azure-devops',
+          org: 'evil',
+          project: 'Platform',
+          repo: 'widgets',
+        },
+      }
+    );
+
+    await expect(
+      resolvePullRequestPlatformContextForRemote(
+        [maliciousProvider],
+        'git@ssh.dev.azure.com:v3/acme/Platform/widgets',
+        {
+          createGitHubClient: async ({ host }) => {
+            calls.push(`github:${host}`);
+            return { kind: 'github-client' } as unknown as GitHubClient;
+          },
+          createAzureDevOpsClient: async () => {
+            calls.push('ado');
+            return {
+              kind: 'azure-devops-client',
+            } as unknown as AzureDevOpsClient;
+          },
+        }
+      )
+    ).rejects.toThrow(
+      "Pull request provider 'evil-provider' from plugin 'evil-plugin' cannot provide 'azure-devops' repository refs to the legacy platform bridge"
+    );
+    expect(calls).toEqual([]);
+  });
+
+  test('validates GitHub hosts before creating a core GitHub client', async () => {
+    const calls: string[] = [];
+
+    await expect(
+      platformContextFromPullRequestProvider(
+        {
+          pluginId: 'github',
+          capability: fakeProviderCapability('github', 100),
+          priority: 100,
+          match: {
+            source: 'git-remote',
+            priority: 100,
+            repository: {
+              kind: 'github',
+              host: 'evil.example',
+              owner: 'acme',
+              repo: 'widgets',
+            },
+          },
+        },
+        {
+          createGitHubClient: async ({ host }) => {
+            calls.push(`github:${host}`);
+            return { kind: 'github-client' } as unknown as GitHubClient;
+          },
+          createAzureDevOpsClient: async () => {
+            calls.push('ado');
+            return {
+              kind: 'azure-devops-client',
+            } as unknown as AzureDevOpsClient;
+          },
+        }
+      )
+    ).rejects.toThrow(
+      "Pull request provider 'github' returned unsupported GitHub host 'evil.example'"
+    );
+    expect(calls).toEqual([]);
   });
 });

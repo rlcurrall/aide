@@ -122,6 +122,28 @@ export interface AidePullRequestProviderCapability {
   >;
 }
 
+export const corePullRequestProviderOwners = Object.freeze({
+  github: 'github',
+  'azure-devops': 'azure-devops',
+} as const);
+
+export function corePullRequestProviderOwner(
+  providerId: string
+): string | undefined {
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      corePullRequestProviderOwners,
+      providerId
+    )
+  ) {
+    return undefined;
+  }
+
+  return corePullRequestProviderOwners[
+    providerId as keyof typeof corePullRequestProviderOwners
+  ];
+}
+
 export interface AidePluginCapabilities {
   readonly auth?: AidePluginAuthCapability;
   readonly pullRequestProvider?: AidePullRequestProviderCapability;

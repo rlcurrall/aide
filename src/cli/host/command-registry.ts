@@ -8,11 +8,13 @@ import {
 import type {
   AideCommandExtensionPolicy,
   AidePluginAuthCapability,
+  AidePluginCapabilities,
   AidePluginCommand,
   AidePluginDescriptor,
   AidePullRequestProviderCapability,
   AnyYargsCommandModule,
 } from './plugin-descriptor.js';
+import { corePullRequestProviderOwner } from './plugin-descriptor.js';
 
 const defaultExtensionPolicy: AideCommandExtensionPolicy = Object.freeze({
   kind: 'same-plugin',
@@ -58,7 +60,32 @@ function freezeRouteKeys(keys: readonly string[]): readonly string[] {
   return Object.freeze([...keys]);
 }
 
-function assertId(kind: 'Command' | 'Plugin', id: string): void {
+function snapshotPluginCapabilities(
+  capabilities: AidePluginCapabilities | undefined
+): AidePluginCapabilities | undefined {
+  if (capabilities === undefined) return undefined;
+
+  return Object.freeze({
+    auth:
+      capabilities.auth === undefined
+        ? undefined
+        : Object.freeze({ ...capabilities.auth }),
+    pullRequestProvider:
+      capabilities.pullRequestProvider === undefined
+        ? undefined
+        : Object.freeze({
+            ...capabilities.pullRequestProvider,
+            features: Object.freeze({
+              ...capabilities.pullRequestProvider.features,
+            }),
+          }),
+  });
+}
+
+function assertId(
+  kind: 'Command' | 'Plugin' | 'Pull request provider',
+  id: string
+): void {
   if (id.trim() === '') {
     throw new Error(`${kind} id must not be empty`);
   }
@@ -121,10 +148,7 @@ function snapshotPlugin(plugin: AidePluginDescriptor): AidePluginDescriptor {
     id: plugin.id,
     summary: plugin.summary,
     commands: Object.freeze(commands),
-    capabilities:
-      plugin.capabilities === undefined
-        ? undefined
-        : Object.freeze({ ...plugin.capabilities }),
+    capabilities: snapshotPluginCapabilities(plugin.capabilities),
   });
 }
 
@@ -172,6 +196,7 @@ export class CommandRegistry {
     AideCommandExtensionPolicy
   >();
   readonly #commandOwners = new Map<string, string>();
+  readonly #pullRequestProviderOwners = new Map<string, string>();
 
   readonly capabilities = {
     auth: (): readonly OwnedPluginCapability<AidePluginAuthCapability>[] =>
@@ -285,6 +310,13 @@ export class CommandRegistry {
     assertId('Plugin', plugin.id);
     const snapshot = snapshotPlugin(plugin);
     this.#assertPluginAvailable(snapshot.id);
+    const pullRequestProvider = snapshot.capabilities?.pullRequestProvider;
+    if (pullRequestProvider !== undefined) {
+      this.#assertPullRequestProviderAvailable(
+        snapshot.id,
+        pullRequestProvider.providerId
+      );
+    }
 
     const commandIds = snapshot.commands.map((command) => {
       assertId('Command', command.id);
@@ -466,6 +498,12 @@ export class CommandRegistry {
     }
 
     this.#pluginIds.add(snapshot.id);
+    if (pullRequestProvider !== undefined) {
+      this.#pullRequestProviderOwners.set(
+        pullRequestProvider.providerId,
+        snapshot.id
+      );
+    }
     return this;
   }
 
@@ -525,6 +563,27 @@ export class CommandRegistry {
   #assertPluginAvailable(id: string): void {
     if (this.#pluginIds.has(id)) {
       throw new Error(`Plugin '${id}' is already registered`);
+    }
+  }
+
+  #assertPullRequestProviderAvailable(
+    pluginId: string,
+    providerId: string
+  ): void {
+    assertId('Pull request provider', providerId);
+
+    const reservedOwner = corePullRequestProviderOwner(providerId);
+    if (reservedOwner !== undefined && reservedOwner !== pluginId) {
+      throw new Error(
+        `Plugin '${pluginId}' cannot declare reserved pull request provider '${providerId}' (reserved for plugin '${reservedOwner}')`
+      );
+    }
+
+    const existingOwner = this.#pullRequestProviderOwners.get(providerId);
+    if (existingOwner !== undefined) {
+      throw new Error(
+        `Pull request provider '${providerId}' is already registered by plugin '${existingOwner}'`
+      );
     }
   }
 

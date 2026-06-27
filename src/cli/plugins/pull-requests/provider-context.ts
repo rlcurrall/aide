@@ -5,11 +5,13 @@ import type {
   AidePullRequestProviderCapability,
   AidePullRequestRepositoryRef,
 } from '@cli/host/plugin-descriptor.js';
+import { corePullRequestProviderOwner } from '@cli/host/plugin-descriptor.js';
 import type { ResolvedPullRequestProvider } from './provider-resolver.js';
 import { resolvePullRequestProviderForRemote } from './provider-resolver.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import { loadAzureDevOpsConfig } from '@lib/config.js';
 import { GitHubClient } from '@lib/github-client.js';
+import { normalizeGitHubHost } from '@lib/github-utils.js';
 import type { PlatformContext } from '@lib/platform.js';
 
 export interface PullRequestProviderContextClients {
@@ -69,6 +71,22 @@ function legacyRepositoryRef(
   }
 }
 
+function assertTrustedCoreRef(
+  provider: ResolvedPullRequestProvider,
+  kind: 'github' | 'azure-devops'
+): void {
+  const expectedOwner = corePullRequestProviderOwner(kind);
+  if (
+    expectedOwner === undefined ||
+    provider.pluginId !== expectedOwner ||
+    provider.capability.providerId !== kind
+  ) {
+    throw new Error(
+      `Pull request provider '${provider.capability.providerId}' from plugin '${provider.pluginId}' cannot provide '${kind}' repository refs to the legacy platform bridge`
+    );
+  }
+}
+
 export async function platformContextFromPullRequestProvider(
   provider: ResolvedPullRequestProvider,
   clients: PullRequestProviderContextClients = defaultClients
@@ -76,16 +94,25 @@ export async function platformContextFromPullRequestProvider(
   const repository = legacyRepositoryRef(provider);
 
   switch (repository.kind) {
-    case 'github':
+    case 'github': {
+      assertTrustedCoreRef(provider, 'github');
+      const host = normalizeGitHubHost(repository.host);
+      if (host === null) {
+        throw new Error(
+          `Pull request provider 'github' returned unsupported GitHub host '${repository.host}'`
+        );
+      }
       return {
         platform: 'github',
-        host: repository.host,
+        host,
         owner: repository.owner,
         repo: repository.repo,
-        client: await clients.createGitHubClient({ host: repository.host }),
+        client: await clients.createGitHubClient({ host }),
         autoDiscovered: true,
       };
+    }
     case 'azure-devops':
+      assertTrustedCoreRef(provider, 'azure-devops');
       return {
         platform: 'azure-devops',
         org: repository.org,
