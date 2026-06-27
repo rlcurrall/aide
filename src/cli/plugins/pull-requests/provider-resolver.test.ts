@@ -363,29 +363,67 @@ describe('pull request provider platform context bridge', () => {
     expect(calls).toEqual(['ado']);
   });
 
-  test('rejects high-priority external providers that forge GitHub core refs', async () => {
+  test('uses trusted GitHub provider when a high-priority external provider matches the same remote', async () => {
     const registry = createBuiltinCommandRegistry();
     const calls: string[] = [];
-    const maliciousProvider = fakeProvider(
-      'evil-plugin',
-      'evil-provider',
-      1000,
+    const shadowingProvider = fakeProvider('gitlab-plugin', 'gitlab', 1000, {
+      source: 'git-remote',
+      priority: 1000,
+      repository: {
+        kind: 'github',
+        host: 'evil.example',
+        owner: 'acme',
+        repo: 'widgets',
+      },
+    });
+
+    const ctx = await resolvePullRequestPlatformContextForRemote(
+      [shadowingProvider, ...registry.capabilities.pullRequestProviders()],
+      'git@github.com:acme/widgets.git',
       {
-        source: 'git-remote',
-        priority: 1000,
-        repository: {
-          kind: 'github',
-          host: 'evil.example',
-          owner: 'acme',
-          repo: 'widgets',
+        createGitHubClient: async ({ host }) => {
+          calls.push(`github:${host}`);
+          return { kind: 'github-client' } as unknown as GitHubClient;
+        },
+        createAzureDevOpsClient: async () => {
+          calls.push('ado');
+          return {
+            kind: 'azure-devops-client',
+          } as unknown as AzureDevOpsClient;
         },
       }
     );
 
+    expect(ctx).toMatchObject({
+      platform: 'github',
+      host: 'github.com',
+      owner: 'acme',
+      repo: 'widgets',
+      autoDiscovered: true,
+    });
+    expect(calls).toEqual(['github:github.com']);
+  });
+
+  test('rejects direct external providers that forge GitHub core refs', async () => {
+    const calls: string[] = [];
+
     await expect(
-      resolvePullRequestPlatformContextForRemote(
-        [maliciousProvider, ...registry.capabilities.pullRequestProviders()],
-        'git@github.com:acme/widgets.git',
+      platformContextFromPullRequestProvider(
+        {
+          pluginId: 'evil-plugin',
+          capability: fakeProviderCapability('evil-provider', 1000),
+          priority: 1000,
+          match: {
+            source: 'git-remote',
+            priority: 1000,
+            repository: {
+              kind: 'github',
+              host: 'evil.example',
+              owner: 'acme',
+              repo: 'widgets',
+            },
+          },
+        },
         {
           createGitHubClient: async ({ host }) => {
             calls.push(`github:${host}`);
@@ -403,6 +441,46 @@ describe('pull request provider platform context bridge', () => {
       "Pull request provider 'evil-provider' from plugin 'evil-plugin' cannot provide 'github' repository refs to the legacy platform bridge"
     );
     expect(calls).toEqual([]);
+  });
+
+  test('uses trusted Azure DevOps provider when a high-priority external provider matches the same remote', async () => {
+    const registry = createBuiltinCommandRegistry();
+    const calls: string[] = [];
+    const shadowingProvider = fakeProvider('gitlab-plugin', 'gitlab', 1000, {
+      source: 'git-remote',
+      priority: 1000,
+      repository: {
+        kind: 'external',
+        providerId: 'gitlab',
+        displayName: 'GitLab',
+      },
+    });
+
+    const ctx = await resolvePullRequestPlatformContextForRemote(
+      [shadowingProvider, ...registry.capabilities.pullRequestProviders()],
+      'git@ssh.dev.azure.com:v3/acme/Platform/widgets',
+      {
+        createGitHubClient: async ({ host }) => {
+          calls.push(`github:${host}`);
+          return { kind: 'github-client' } as unknown as GitHubClient;
+        },
+        createAzureDevOpsClient: async () => {
+          calls.push('ado');
+          return {
+            kind: 'azure-devops-client',
+          } as unknown as AzureDevOpsClient;
+        },
+      }
+    );
+
+    expect(ctx).toMatchObject({
+      platform: 'azure-devops',
+      org: 'acme',
+      project: 'Platform',
+      repo: 'widgets',
+      autoDiscovered: true,
+    });
+    expect(calls).toEqual(['ado']);
   });
 
   test('rejects high-priority external providers that forge Azure DevOps core refs', async () => {

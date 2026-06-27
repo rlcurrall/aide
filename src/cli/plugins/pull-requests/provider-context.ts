@@ -87,6 +87,13 @@ function assertTrustedCoreRef(
   }
 }
 
+function isTrustedCoreProvider(provider: ResolvedPullRequestProvider): boolean {
+  const expectedOwner = corePullRequestProviderOwner(
+    provider.capability.providerId
+  );
+  return expectedOwner !== undefined && provider.pluginId === expectedOwner;
+}
+
 export async function platformContextFromPullRequestProvider(
   provider: ResolvedPullRequestProvider,
   clients: PullRequestProviderContextClients = defaultClients
@@ -134,7 +141,9 @@ export async function resolvePullRequestPlatformContextForRemote(
   clients: PullRequestProviderContextClients = defaultClients
 ): Promise<PlatformContext> {
   const provider = await Effect.runPromise(
-    resolvePullRequestProviderForRemote(providers, remoteUrl)
+    resolvePullRequestProviderForRemote(providers, remoteUrl, {
+      preferred: isTrustedCoreProvider,
+    })
   );
   return platformContextFromPullRequestProvider(provider, clients);
 }

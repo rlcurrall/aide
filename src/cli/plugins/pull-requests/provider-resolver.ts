@@ -26,6 +26,14 @@ export interface ResolvedPullRequestProvider {
   readonly priority: number;
 }
 
+export interface PullRequestProviderResolutionOptions {
+  /**
+   * Prefer a subset of matching providers when available. If no preferred
+   * provider matches, resolution falls back to all matches.
+   */
+  readonly preferred?: (provider: ResolvedPullRequestProvider) => boolean;
+}
+
 export class UnsupportedPullRequestProviderError extends Data.TaggedError(
   'UnsupportedPullRequestProviderError'
 )<{
@@ -90,7 +98,8 @@ function collectMatches(
 function selectProvider(
   matches: readonly ResolvedPullRequestProvider[],
   source: PullRequestProviderLookupSource,
-  value: string
+  value: string,
+  options: PullRequestProviderResolutionOptions = {}
 ): Effect.Effect<
   ResolvedPullRequestProvider,
   PullRequestProviderResolutionError
@@ -101,7 +110,10 @@ function selectProvider(
     );
   }
 
-  const sorted = [...matches].sort((a, b) => b.priority - a.priority);
+  const preferredMatches =
+    options.preferred === undefined ? [] : matches.filter(options.preferred);
+  const selectable = preferredMatches.length > 0 ? preferredMatches : matches;
+  const sorted = [...selectable].sort((a, b) => b.priority - a.priority);
   const winner = sorted[0];
   if (winner === undefined) {
     return Effect.fail(
@@ -126,7 +138,8 @@ function selectProvider(
 
 export function resolvePullRequestProviderForRemote(
   providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
-  remoteUrl: string
+  remoteUrl: string,
+  options: PullRequestProviderResolutionOptions = {}
 ): Effect.Effect<
   ResolvedPullRequestProvider,
   PullRequestProviderResolutionError
@@ -134,13 +147,15 @@ export function resolvePullRequestProviderForRemote(
   return selectProvider(
     collectMatches(providers, (provider) => provider.matchRemote(remoteUrl)),
     'git-remote',
-    remoteUrl
+    remoteUrl,
+    options
   );
 }
 
 export function resolvePullRequestProviderForUrl(
   providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
-  url: string
+  url: string,
+  options: PullRequestProviderResolutionOptions = {}
 ): Effect.Effect<
   ResolvedPullRequestProvider,
   PullRequestProviderResolutionError
@@ -148,7 +163,8 @@ export function resolvePullRequestProviderForUrl(
   return selectProvider(
     collectMatches(providers, (provider) => provider.matchPullRequestUrl(url)),
     'pull-request-url',
-    url
+    url,
+    options
   );
 }
 
