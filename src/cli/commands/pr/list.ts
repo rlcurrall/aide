@@ -5,6 +5,7 @@
 
 import { logProgress } from '@lib/cli-utils.js';
 import { handleCommandError } from '@lib/errors.js';
+import { getGitRemoteUrl } from '@lib/git-utils.js';
 import type { AzureDevOpsPullRequest } from '@lib/types.js';
 import type { GitHubPullRequest } from '@lib/github-types.js';
 import { resolvePlatformContext, type PlatformContext } from '@lib/platform.js';
@@ -18,6 +19,8 @@ import {
   type ListArgs,
   type OutputFormat,
 } from '@schemas/pr/list.js';
+import { getAideHostContext } from '@cli/host/runtime-context.js';
+import { resolvePullRequestPlatformContextForRemote } from '@cli/plugins/pull-requests/provider-context.js';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 // ============================================================================
@@ -246,7 +249,7 @@ async function handler(argv: ArgumentsCamelCase<ListArgs>): Promise<void> {
   const format = args.format ?? 'text';
 
   try {
-    const ctx = await resolvePlatformContext(args.project, args.repo);
+    const ctx = await resolveListPlatformContext(argv, args);
     if (ctx.autoDiscovered) {
       if (ctx.platform === 'github') {
         logProgress(
@@ -270,6 +273,25 @@ async function handler(argv: ArgumentsCamelCase<ListArgs>): Promise<void> {
   } catch (error) {
     handleCommandError(error);
   }
+}
+
+async function resolveListPlatformContext(
+  argv: ArgumentsCamelCase<ListArgs>,
+  args: ListArgs
+): Promise<PlatformContext> {
+  const hostContext = getAideHostContext(argv);
+  const remoteUrl = getGitRemoteUrl();
+  const hasExplicitRepoContext =
+    args.project !== undefined || args.repo !== undefined;
+
+  if (hostContext && remoteUrl && !hasExplicitRepoContext) {
+    return resolvePullRequestPlatformContextForRemote(
+      hostContext.registry,
+      remoteUrl
+    );
+  }
+
+  return resolvePlatformContext(args.project, args.repo);
 }
 
 export default {

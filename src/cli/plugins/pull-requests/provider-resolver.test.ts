@@ -6,7 +6,10 @@ import type { AidePullRequestProviderCapability } from '@cli/host/plugin-descrip
 import { createAzureDevOpsPlugin } from '@cli/plugins/azure-devops/plugin.js';
 import { createBuiltinCommandRegistry } from '@cli/plugins/builtin.js';
 import { createGitHubPlugin } from '@cli/plugins/github/plugin.js';
+import type { AzureDevOpsClient } from '@lib/azure-devops-client.js';
+import type { GitHubClient } from '@lib/github-client.js';
 
+import { resolvePullRequestPlatformContextForRemote } from './provider-context.js';
 import {
   AmbiguousPullRequestProviderError,
   UnsupportedPullRequestProviderError,
@@ -197,5 +200,65 @@ describe('pull request provider auth capabilities', () => {
       state: 'misconfigured',
       detail: 'bad stored credentials',
     });
+  });
+});
+
+describe('pull request provider platform context bridge', () => {
+  test('creates a GitHub platform context from the resolved provider match', async () => {
+    const registry = createBuiltinCommandRegistry();
+    const calls: string[] = [];
+
+    const ctx = await resolvePullRequestPlatformContextForRemote(
+      registry,
+      'git@github.com:acme/widgets.git',
+      {
+        createGitHubClient: async ({ host }) => {
+          calls.push(`github:${host}`);
+          return { kind: 'github-client' } as unknown as GitHubClient;
+        },
+        createAzureDevOpsClient: async () => {
+          throw new Error('Azure DevOps client should not be created');
+        },
+      }
+    );
+
+    expect(ctx).toMatchObject({
+      platform: 'github',
+      host: 'github.com',
+      owner: 'acme',
+      repo: 'widgets',
+      autoDiscovered: true,
+    });
+    expect(calls).toEqual(['github:github.com']);
+  });
+
+  test('creates an Azure DevOps platform context from the resolved provider match', async () => {
+    const registry = createBuiltinCommandRegistry();
+    const calls: string[] = [];
+
+    const ctx = await resolvePullRequestPlatformContextForRemote(
+      registry,
+      'git@ssh.dev.azure.com:v3/acme/Platform/widgets',
+      {
+        createGitHubClient: async () => {
+          throw new Error('GitHub client should not be created');
+        },
+        createAzureDevOpsClient: async () => {
+          calls.push('ado');
+          return {
+            kind: 'azure-devops-client',
+          } as unknown as AzureDevOpsClient;
+        },
+      }
+    );
+
+    expect(ctx).toMatchObject({
+      platform: 'azure-devops',
+      org: 'acme',
+      project: 'Platform',
+      repo: 'widgets',
+      autoDiscovered: true,
+    });
+    expect(calls).toEqual(['ado']);
   });
 });

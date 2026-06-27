@@ -6,7 +6,11 @@ import { textResult } from './command-descriptor.js';
 import { createCommandRegistry } from './command-registry.js';
 import { createBuiltinCommandRegistry } from '@cli/plugins/builtin.js';
 import { defineAidePlugin, pluginCommandModule } from './plugin-descriptor.js';
-import { commandModuleFromDescriptor } from './yargs-adapter.js';
+import { getAideHostContext } from './runtime-context.js';
+import {
+  commandModuleFromDescriptor,
+  registerCommands,
+} from './yargs-adapter.js';
 
 describe('CommandRegistry', () => {
   test('preserves built-in command order for demand messages and help', () => {
@@ -309,5 +313,57 @@ describe('commandModuleFromDescriptor', () => {
     }
 
     expect(lines).toEqual(['descriptor output']);
+  });
+});
+
+describe('registerCommands', () => {
+  test('attaches host context to legacy yargs module handlers', async () => {
+    const registry = createCommandRegistry();
+    let observedRegistry: unknown;
+
+    registry.registerModule('sample', {
+      command: 'sample',
+      describe: 'Sample command',
+      handler: (argv) => {
+        observedRegistry = getAideHostContext(argv)?.registry;
+      },
+    });
+
+    await registerCommands(
+      yargs(['sample']).scriptName('aide').exitProcess(false),
+      registry
+    )
+      .strict()
+      .parseAsync();
+
+    expect(observedRegistry).toBe(registry);
+  });
+
+  test('attaches host context to nested legacy yargs module handlers', async () => {
+    const registry = createCommandRegistry();
+    let observedRegistry: unknown;
+
+    registry.registerModule('parent', {
+      command: 'parent <command>',
+      describe: 'Parent command',
+      builder: (yargs) =>
+        yargs.command({
+          command: 'child',
+          describe: 'Child command',
+          handler: (argv) => {
+            observedRegistry = getAideHostContext(argv)?.registry;
+          },
+        }),
+      handler: () => {},
+    });
+
+    await registerCommands(
+      yargs(['parent', 'child']).scriptName('aide').exitProcess(false),
+      registry
+    )
+      .strict()
+      .parseAsync();
+
+    expect(observedRegistry).toBe(registry);
   });
 });

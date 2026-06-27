@@ -6,6 +6,7 @@ import {
   type AideCommandDescriptor,
 } from './command-descriptor.js';
 import type { CommandRegistry } from './command-registry.js';
+import { attachAideHostContext } from './runtime-context.js';
 
 export function commandModuleFromDescriptor<TArgs extends object>(
   descriptor: AideCommandDescriptor<TArgs>
@@ -22,7 +23,9 @@ export function commandModuleFromDescriptor<TArgs extends object>(
 }
 
 export function registerCommands(yargs: Argv, registry: CommandRegistry): Argv {
-  let configured = yargs;
+  let configured = yargs.middleware((argv) => {
+    attachAideHostContext(argv, { registry });
+  }, true);
 
   for (const entry of registry.commands()) {
     configured = configured.command(
