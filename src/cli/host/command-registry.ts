@@ -221,6 +221,9 @@ export class CommandRegistry {
         this.#claimCommandGroup(id, entry.extension);
       }
     } else {
+      if (entry.extension !== undefined) {
+        this.#assertExtensionOnlyOnTopLevelCommandGroup(id);
+      }
       this.#assertParentAcceptsChildren(id, options.parentId, undefined, keys);
       this.#assertChildRoutesAvailable(id, options.parentId, keys);
       this.#addChildCommand(options.parentId, entry);
@@ -260,6 +263,9 @@ export class CommandRegistry {
         this.#claimCommandGroup(descriptor.id, entry.extension);
       }
     } else {
+      if (entry.extension !== undefined) {
+        this.#assertExtensionOnlyOnTopLevelCommandGroup(descriptor.id);
+      }
       this.#assertParentAcceptsChildren(
         descriptor.id,
         options.parentId,
@@ -327,6 +333,9 @@ export class CommandRegistry {
     for (const command of snapshot.commands) {
       if (command.parentId === command.id) {
         throw new Error(`Command '${command.id}' cannot be its own parent`);
+      }
+      if (command.parentId !== undefined && command.extension !== undefined) {
+        this.#assertExtensionOnlyOnTopLevelCommandGroup(command.id);
       }
 
       const keys =
@@ -533,6 +542,12 @@ export class CommandRegistry {
   #assertExtensionOnlyOnCommandGroup(commandId: string): never {
     throw new Error(
       `Command '${commandId}' declares an extension policy but does not accept subcommands`
+    );
+  }
+
+  #assertExtensionOnlyOnTopLevelCommandGroup(commandId: string): never {
+    throw new Error(
+      `Command '${commandId}' declares an extension policy but is not a top-level command group`
     );
   }
 

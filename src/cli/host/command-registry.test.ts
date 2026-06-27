@@ -359,6 +359,8 @@ describe('CommandRegistry', () => {
     ).toThrow(
       "Command 'parent:child' from plugin 'child-plugin' cannot extend parent 'parent' owned by plugin 'parent-plugin' at route 'child'"
     );
+    expect(registry.pluginIds()).toEqual(['parent-plugin']);
+    expect(registry.childCommandIds('parent')).toEqual([]);
   });
 
   test('allows cross-plugin child routes when the parent extension policy is open', () => {
@@ -427,6 +429,78 @@ describe('CommandRegistry', () => {
         ],
       })
     );
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'allowed-child-plugin',
+        summary: 'Allowed child plugin',
+        commands: [
+          pluginCommandDescriptor(
+            {
+              id: 'parent:allowed-child',
+              route: 'allowed',
+              summary: 'Allowed child command',
+              run: () => Effect.succeed(textResult('allowed')),
+            },
+            { parentId: 'parent' }
+          ),
+        ],
+      })
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'blocked-child-plugin',
+          summary: 'Blocked child plugin',
+          commands: [
+            pluginCommandDescriptor(
+              {
+                id: 'parent:blocked-child',
+                route: 'blocked',
+                summary: 'Blocked child command',
+                run: () => Effect.succeed(textResult('blocked')),
+              },
+              { parentId: 'parent' }
+            ),
+          ],
+        })
+      )
+    ).toThrow(
+      "Command 'parent:blocked-child' from plugin 'blocked-child-plugin' cannot extend parent 'parent' owned by plugin 'parent-plugin' at route 'blocked'"
+    );
+    expect(registry.childCommandIds('parent')).toEqual([
+      'parent:allowed-child',
+    ]);
+  });
+
+  test('snapshots allowlist policy plugin ids', () => {
+    const registry = createCommandRegistry();
+    const pluginIds = ['allowed-child-plugin'];
+
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'parent-plugin',
+        summary: 'Parent plugin',
+        commands: [
+          pluginCommandModule(
+            'parent',
+            {
+              command: 'parent <command>',
+              describe: 'Parent command',
+              handler: () => {},
+            },
+            {
+              extension: {
+                kind: 'allowlist',
+                pluginIds,
+              },
+            }
+          ),
+        ],
+      })
+    );
+    pluginIds[0] = 'blocked-child-plugin';
+
     registry.registerPlugin(
       defineAidePlugin({
         id: 'allowed-child-plugin',
@@ -582,6 +656,78 @@ describe('CommandRegistry', () => {
       handler: () => {},
     });
     expect(registry.commandIds()).toEqual(['direct-plain']);
+  });
+
+  test('rejects extension policy on child commands', () => {
+    const pluginRegistry = createCommandRegistry();
+
+    expect(() =>
+      pluginRegistry.registerPlugin(
+        defineAidePlugin({
+          id: 'parent-plugin',
+          summary: 'Parent plugin',
+          commands: [
+            pluginCommandModule('parent', {
+              command: 'parent <command>',
+              describe: 'Parent command',
+              handler: () => {},
+            }),
+            pluginCommandDescriptor(
+              {
+                id: 'parent:child',
+                route: 'child',
+                summary: 'Child command',
+                run: () => Effect.succeed(textResult('child')),
+              },
+              {
+                parentId: 'parent',
+                extension: { kind: 'open' },
+              }
+            ),
+          ],
+        })
+      )
+    ).toThrow(
+      "Command 'parent:child' declares an extension policy but is not a top-level command group"
+    );
+    expect(pluginRegistry.pluginIds()).toEqual([]);
+    expect(pluginRegistry.commandIds()).toEqual([]);
+
+    const directRegistry = createCommandRegistry();
+    directRegistry.registerModule('parent', {
+      command: 'parent <command>',
+      describe: 'Parent command',
+      handler: () => {},
+    });
+
+    expect(() =>
+      directRegistry.registerDescriptor(
+        {
+          id: 'parent:child',
+          route: 'child',
+          summary: 'Child command',
+          run: () => Effect.succeed(textResult('child')),
+        },
+        {
+          parentId: 'parent',
+          extension: { kind: 'open' },
+        }
+      )
+    ).toThrow(
+      "Command 'parent:child' declares an extension policy but is not a top-level command group"
+    );
+    expect(directRegistry.childCommandIds('parent')).toEqual([]);
+
+    directRegistry.registerDescriptor(
+      {
+        id: 'parent:child',
+        route: 'child',
+        summary: 'Child command',
+        run: () => Effect.succeed(textResult('child')),
+      },
+      { parentId: 'parent' }
+    );
+    expect(directRegistry.childCommandIds('parent')).toEqual(['parent:child']);
   });
 
   test('rejects duplicate child routes under the same parent', () => {
