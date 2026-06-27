@@ -17,6 +17,7 @@ import {
   type OutputFormat,
   type PrCreateArgs,
 } from '@schemas/pr/pr-create.js';
+import { resolvePullRequestBodyInput } from './body-input.js';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 // ============================================================================
@@ -120,10 +121,11 @@ function formatGitHubOutput(
 
 async function handler(argv: ArgumentsCamelCase<PrCreateArgs>): Promise<void> {
   const args = validateArgs(PrCreateArgsSchema, argv, 'pr-create arguments');
-  const { title, body, draft, format, tag: tags } = args;
+  const { title, draft, format, tag: tags } = args;
   let { head, base } = args;
 
   try {
+    const body = (await resolvePullRequestBodyInput(args)) ?? '';
     const ctx = await resolvePlatformContext(args.project, args.repo);
     if (ctx.autoDiscovered) {
       if (ctx.platform === 'github') {
@@ -176,7 +178,7 @@ async function handler(argv: ArgumentsCamelCase<PrCreateArgs>): Promise<void> {
         head,
         base,
         title,
-        body || '',
+        body,
         { draft }
       );
 
@@ -209,7 +211,7 @@ async function handler(argv: ArgumentsCamelCase<PrCreateArgs>): Promise<void> {
         sourceRefName,
         targetRefName,
         title,
-        body || '',
+        body,
         { isDraft: draft }
       );
 
@@ -261,6 +263,12 @@ export default {
       type: 'string',
       describe: 'Pull request description/body',
       alias: ['b', 'description'],
+    },
+    'body-file': {
+      type: 'string',
+      describe:
+        'Read pull request description/body from a file, or - for stdin',
+      alias: 'description-file',
     },
     head: {
       type: 'string',

@@ -26,6 +26,7 @@ import {
   type OutputFormat,
   type PrUpdateArgs,
 } from '@schemas/pr/pr-update.js';
+import { resolvePullRequestBodyInput } from './body-input.js';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 // ============================================================================
@@ -151,7 +152,6 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
   const {
     format,
     title,
-    description,
     target,
     draft,
     publish,
@@ -171,6 +171,7 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
   }
 
   try {
+    const description = await resolvePullRequestBodyInput(args);
     let ctx: PlatformContext | undefined;
     try {
       ctx = await resolvePlatformContext(args.project, args.repo);
@@ -465,6 +466,11 @@ export default {
       type: 'string',
       describe: 'New description for the PR',
       alias: 'body',
+    },
+    'description-file': {
+      type: 'string',
+      describe: 'Read new description from a file, or - for stdin',
+      alias: 'body-file',
     },
     target: {
       type: 'string',
