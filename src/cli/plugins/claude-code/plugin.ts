@@ -7,5 +7,7 @@ import {
 export const claudeCodePlugin = defineAidePlugin({
   id: 'claude-code',
   summary: 'Claude Code plugin installation helpers',
-  commands: [pluginCommandModule('plugin', pluginCommands)],
+  commands: [
+    pluginCommandModule('plugin', pluginCommands, { acceptsChildren: false }),
+  ],
 });

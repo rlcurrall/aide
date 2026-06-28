@@ -25,6 +25,7 @@ export type AideCommandExtensionPolicy =
 
 export interface AidePluginCommandPlacement {
   readonly parentId?: string;
+  readonly acceptsChildren?: boolean;
   readonly extension?: AideCommandExtensionPolicy;
 }
 
@@ -33,6 +34,7 @@ export type AidePluginCommand =
       readonly kind: 'module';
       readonly id: string;
       readonly parentId?: string;
+      readonly acceptsChildren?: boolean;
       readonly extension?: AideCommandExtensionPolicy;
       readonly module: AnyYargsCommandModule;
     }
@@ -40,6 +42,7 @@ export type AidePluginCommand =
       readonly kind: 'descriptor';
       readonly id: string;
       readonly parentId?: string;
+      readonly acceptsChildren?: boolean;
       readonly extension?: AideCommandExtensionPolicy;
       readonly descriptor: AnyAideCommandDescriptor;
     };
@@ -260,6 +263,7 @@ export function pluginCommandModule<TBase extends object, TArgs extends object>(
     kind: 'module',
     id,
     parentId: placement.parentId,
+    acceptsChildren: placement.acceptsChildren,
     extension: placement.extension,
     module: module as unknown as AnyYargsCommandModule,
   };
@@ -281,6 +285,7 @@ export function pluginCommandDescriptor<TArgs extends object>(
     kind: 'descriptor',
     id: descriptor.id,
     parentId: placement.parentId,
+    acceptsChildren: placement.acceptsChildren,
     extension: placement.extension,
     descriptor: eraseCommandDescriptor(
       descriptor as HostAideCommandDescriptor<TArgs>

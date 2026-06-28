@@ -19,6 +19,7 @@ export const pullRequestsPlugin = defineAidePlugin({
   summary: 'Pull request workflows for GitHub and Azure DevOps',
   commands: [
     pluginCommandModule('pr', prCommandGroup, {
+      acceptsChildren: true,
       extension: { kind: 'same-plugin' },
     }),
     pluginCommandModule('pr:list', prListCommand, { parentId: 'pr' }),

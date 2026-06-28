@@ -7,5 +7,7 @@ import {
 export const jiraPlugin = defineAidePlugin({
   id: 'jira',
   summary: 'Jira ticket management',
-  commands: [pluginCommandModule('jira', jiraCommands)],
+  commands: [
+    pluginCommandModule('jira', jiraCommands, { acceptsChildren: false }),
+  ],
 });

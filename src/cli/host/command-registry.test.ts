@@ -436,6 +436,63 @@ describe('CommandRegistry', () => {
     expect(registry.childCommandIds('parent')).toEqual(['parent:child']);
   });
 
+  test('allows cross-plugin child routes under same-plugin child groups that opt into open extension', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'parent-plugin',
+        summary: 'Parent plugin',
+        commands: [
+          pluginCommandModule(
+            'parent',
+            {
+              command: 'parent',
+              describe: 'Parent command',
+              handler: () => {},
+            },
+            { acceptsChildren: true }
+          ),
+          pluginCommandDescriptor(
+            {
+              id: 'parent:child',
+              route: 'child',
+              summary: 'Child command group',
+              run: () => Effect.succeed(textResult('child')),
+            },
+            {
+              parentId: 'parent',
+              acceptsChildren: true,
+              extension: { kind: 'open' },
+            }
+          ),
+        ],
+      })
+    );
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'grandchild-plugin',
+        summary: 'Grandchild plugin',
+        commands: [
+          pluginCommandDescriptor(
+            {
+              id: 'parent:child:grandchild',
+              route: 'grandchild',
+              summary: 'Grandchild command',
+              run: () => Effect.succeed(textResult('grandchild')),
+            },
+            { parentId: 'parent:child' }
+          ),
+        ],
+      })
+    );
+
+    expect(registry.childCommandIds('parent')).toEqual(['parent:child']);
+    expect(registry.childCommandIds('parent:child')).toEqual([
+      'parent:child:grandchild',
+    ]);
+  });
+
   test('allows cross-plugin child routes only for allowlisted plugins', () => {
     const registry = createCommandRegistry();
 
@@ -690,7 +747,7 @@ describe('CommandRegistry', () => {
     expect(registry.commandIds()).toEqual(['direct-plain']);
   });
 
-  test('rejects extension policy on child commands', () => {
+  test('rejects extension policy on child commands that are not command groups', () => {
     const pluginRegistry = createCommandRegistry();
 
     expect(() =>
@@ -720,7 +777,7 @@ describe('CommandRegistry', () => {
         })
       )
     ).toThrow(
-      "Command 'parent:child' declares an extension policy but is not a top-level command group"
+      "Command 'parent:child' declares an extension policy but does not accept subcommands"
     );
     expect(pluginRegistry.pluginIds()).toEqual([]);
     expect(pluginRegistry.commandIds()).toEqual([]);
@@ -746,7 +803,7 @@ describe('CommandRegistry', () => {
         }
       )
     ).toThrow(
-      "Command 'parent:child' declares an extension policy but is not a top-level command group"
+      "Command 'parent:child' declares an extension policy but does not accept subcommands"
     );
     expect(directRegistry.childCommandIds('parent')).toEqual([]);
 
@@ -760,6 +817,213 @@ describe('CommandRegistry', () => {
       { parentId: 'parent' }
     );
     expect(directRegistry.childCommandIds('parent')).toEqual(['parent:child']);
+  });
+
+  test('allows explicit child command groups with extension policies', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerModule(
+      'parent',
+      {
+        command: 'parent',
+        describe: 'Parent command',
+        handler: () => {},
+      },
+      { acceptsChildren: true }
+    );
+    registry.registerDescriptor(
+      {
+        id: 'parent:child',
+        route: 'child',
+        summary: 'Child command group',
+        run: () => Effect.succeed(textResult('child')),
+      },
+      {
+        parentId: 'parent',
+        acceptsChildren: true,
+        extension: { kind: 'open' },
+      }
+    );
+    registry.registerDescriptor(
+      {
+        id: 'parent:child:grandchild',
+        route: 'grandchild',
+        summary: 'Grandchild command',
+        run: () => Effect.succeed(textResult('grandchild')),
+      },
+      { parentId: 'parent:child' }
+    );
+
+    expect(registry.childCommandIds('parent')).toEqual(['parent:child']);
+    expect(registry.childCommandIds('parent:child')).toEqual([
+      'parent:child:grandchild',
+    ]);
+    expect(registry.allCommandIds()).toEqual([
+      'parent',
+      'parent:child',
+      'parent:child:grandchild',
+    ]);
+  });
+
+  test('lets explicit command group metadata override route syntax fallback', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerModule(
+      'parent',
+      {
+        command: 'parent <command>',
+        describe: 'Parent command',
+        handler: () => {},
+      },
+      { acceptsChildren: false }
+    );
+
+    expect(() =>
+      registry.registerDescriptor(
+        {
+          id: 'parent:child',
+          route: 'child',
+          summary: 'Child command',
+          run: () => Effect.succeed(textResult('child')),
+        },
+        { parentId: 'parent' }
+      )
+    ).toThrow(
+      "Command 'parent:child' parent 'parent' does not accept subcommands"
+    );
+    expect(() =>
+      registry.registerModule(
+        'other',
+        {
+          command: 'other <command>',
+          describe: 'Other command',
+          handler: () => {},
+        },
+        {
+          acceptsChildren: false,
+          extension: { kind: 'open' },
+        }
+      )
+    ).toThrow(
+      "Command 'other' declares an extension policy but does not accept subcommands"
+    );
+    expect(registry.childCommandIds('parent')).toEqual([]);
+    expect(registry.commandIds()).toEqual(['parent']);
+  });
+
+  test('rejects non-boolean plugin command group metadata before mutating the registry', () => {
+    const registry = createCommandRegistry();
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'malformed-plugin',
+          summary: 'Malformed plugin',
+          commands: [
+            pluginCommandModule(
+              'malformed',
+              {
+                command: 'malformed',
+                describe: 'Malformed command',
+                handler: () => {},
+              },
+              { acceptsChildren: 'yes' as unknown as boolean }
+            ),
+          ],
+        })
+      )
+    ).toThrow(
+      "Plugin 'malformed-plugin' command 'malformed' acceptsChildren must be a boolean"
+    );
+    expect(registry.pluginIds()).toEqual([]);
+    expect(registry.commandIds()).toEqual([]);
+  });
+
+  test('rejects plugin command parent cycles before mutating the registry', () => {
+    const registry = createCommandRegistry();
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'cycle-plugin',
+          summary: 'Plugin with a command parent cycle',
+          commands: [
+            pluginCommandDescriptor(
+              {
+                id: 'cycle:a',
+                route: 'a',
+                summary: 'Cycle command A',
+                run: () => Effect.succeed(textResult('a')),
+              },
+              { parentId: 'cycle:b', acceptsChildren: true }
+            ),
+            pluginCommandDescriptor(
+              {
+                id: 'cycle:b',
+                route: 'b',
+                summary: 'Cycle command B',
+                run: () => Effect.succeed(textResult('b')),
+              },
+              { parentId: 'cycle:a', acceptsChildren: true }
+            ),
+          ],
+        })
+      )
+    ).toThrow(
+      "Plugin 'cycle-plugin' declares a command parent cycle: cycle:a -> cycle:b -> cycle:a"
+    );
+    expect(registry.pluginIds()).toEqual([]);
+    expect(registry.allCommandIds()).toEqual([]);
+  });
+
+  test('registers recursive plugin command groups in parent-depth order', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'recursive-plugin',
+        summary: 'Recursive command plugin',
+        commands: [
+          pluginCommandDescriptor(
+            {
+              id: 'recursive:child:grandchild',
+              route: 'grandchild',
+              summary: 'Grandchild command',
+              run: () => Effect.succeed(textResult('grandchild')),
+            },
+            { parentId: 'recursive:child' }
+          ),
+          pluginCommandDescriptor(
+            {
+              id: 'recursive:child',
+              route: 'child',
+              summary: 'Child command group',
+              run: () => Effect.succeed(textResult('child')),
+            },
+            { parentId: 'recursive', acceptsChildren: true }
+          ),
+          pluginCommandModule(
+            'recursive',
+            {
+              command: 'recursive',
+              describe: 'Recursive parent command',
+              handler: () => {},
+            },
+            { acceptsChildren: true }
+          ),
+        ],
+      })
+    );
+
+    expect(registry.childCommandIds('recursive')).toEqual(['recursive:child']);
+    expect(registry.childCommandIds('recursive:child')).toEqual([
+      'recursive:child:grandchild',
+    ]);
+    expect(registry.allCommandIds()).toEqual([
+      'recursive',
+      'recursive:child',
+      'recursive:child:grandchild',
+    ]);
   });
 
   test('rejects duplicate child routes under the same parent', () => {
@@ -1351,6 +1615,63 @@ describe('registerCommands', () => {
     }
 
     expect(lines).toEqual(['child output']);
+  });
+
+  test('composes explicit recursive registry command groups into yargs modules', async () => {
+    const registry = createCommandRegistry();
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.join(' '));
+    };
+
+    registry.registerModule(
+      'parent',
+      {
+        command: 'parent',
+        describe: 'Parent command',
+        builder: (yargs) => yargs.demandCommand(1, 'Pick a child command'),
+        handler: () => {},
+      },
+      { acceptsChildren: true }
+    );
+    registry.registerDescriptor(
+      {
+        id: 'parent:child',
+        route: 'child',
+        summary: 'Child command group',
+        yargs: {
+          builder: (yargs) =>
+            yargs.demandCommand(1, 'Pick a grandchild command'),
+        },
+        run: () => Effect.succeed(textResult('child output')),
+      },
+      { parentId: 'parent', acceptsChildren: true }
+    );
+    registry.registerDescriptor(
+      {
+        id: 'parent:child:grandchild',
+        route: 'grandchild',
+        summary: 'Grandchild command',
+        run: () => Effect.succeed(textResult('grandchild output')),
+      },
+      { parentId: 'parent:child' }
+    );
+
+    try {
+      await registerCommands(
+        yargs(['parent', 'child', 'grandchild'])
+          .scriptName('aide')
+          .exitProcess(false),
+        registry
+      )
+        .strict()
+        .parseAsync();
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(lines).toEqual(['grandchild output']);
   });
 
   test('preserves strict parsing for registry child commands', async () => {
