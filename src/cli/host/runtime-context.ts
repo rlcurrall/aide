@@ -2,13 +2,18 @@ import { Context, type Effect } from 'effect';
 
 import type { CommandRegistry } from './command-registry.js';
 import type {
+  AidePullRequestListRequest,
+  AidePullRequestListResult,
   AidePullRequestRemoteMatch,
   AidePullRequestUrlMatch,
 } from './plugin-descriptor.js';
 import {
+  listPullRequestsForRemote,
+  type PullRequestProviderOperationInvocationError,
   resolvePullRequestProviderForRemote,
   resolvePullRequestProviderForUrl,
   type PullRequestProviderResolutionError,
+  type PullRequestProviderOperationOptions,
   type PullRequestProviderResolutionOptions,
   type ResolvedPullRequestProvider,
 } from './pull-request-provider-resolver.js';
@@ -29,6 +34,14 @@ export interface AideHostServices {
   ) => Effect.Effect<
     ResolvedPullRequestProvider<AidePullRequestUrlMatch>,
     PullRequestProviderResolutionError
+  >;
+  readonly listPullRequestsForRemote: (
+    remoteUrl: string,
+    request?: Omit<AidePullRequestListRequest, 'match'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestListResult,
+    PullRequestProviderOperationInvocationError
   >;
 }
 
@@ -82,5 +95,16 @@ export function createAideHostServices(
       url: string,
       options: PullRequestProviderResolutionOptions<AidePullRequestUrlMatch> = {}
     ) => resolvePullRequestProviderForUrl(pullRequestProviders, url, options),
+    listPullRequestsForRemote: (
+      remoteUrl: string,
+      request: Omit<AidePullRequestListRequest, 'match'> = {},
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      listPullRequestsForRemote(
+        pullRequestProviders,
+        remoteUrl,
+        request,
+        options
+      ),
   });
 }

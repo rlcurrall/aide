@@ -2,6 +2,9 @@ import { Effect } from 'effect';
 
 import {
   defineAidePlugin,
+  type AidePullRequestListRequest,
+  type AidePullRequestListResult,
+  type AidePullRequestListItemStatus,
   type AidePluginAuthStatus,
 } from '@cli/host/plugin-descriptor.js';
 import {
@@ -9,12 +12,27 @@ import {
   type ConfigStatus,
   type GithubConfigValue,
 } from '@lib/config.js';
-import { parseGitHubPRUrl, parseGitHubRemote } from '@lib/github-utils.js';
+import { GitHubClient } from '@lib/github-client.js';
+import type {
+  GitHubListPROptions,
+  GitHubPullRequest,
+} from '@lib/github-types.js';
+import {
+  getGitHubPRStatus,
+  mapStatusToGitHubState,
+  parseGitHubPRUrl,
+  parseGitHubRemote,
+} from '@lib/github-utils.js';
 
 type ProbeGithubConfig = () => Promise<ConfigStatus<GithubConfigValue>>;
+type GitHubPullRequestListClient = Pick<GitHubClient, 'listPullRequests'>;
+type CreateGitHubClient = (options: {
+  readonly host: string;
+}) => Promise<GitHubPullRequestListClient>;
 
 interface GitHubPluginOptions {
   readonly probeConfig?: ProbeGithubConfig;
+  readonly createClient?: CreateGitHubClient;
 }
 
 function mapGithubAuthStatus(
@@ -51,11 +69,61 @@ function mapGithubAuthStatus(
 
 export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
   const probeConfig = opts.probeConfig ?? (() => probeGithubConfig());
+  const createClient =
+    opts.createClient ?? ((options) => GitHubClient.create(options));
   const authStatus = () =>
     Effect.tryPromise({
       try: () => probeConfig(),
       catch: (error) => error,
     }).pipe(Effect.map(mapGithubAuthStatus));
+
+  const listPullRequests = (
+    request: AidePullRequestListRequest
+  ): Effect.Effect<AidePullRequestListResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'github') {
+          throw new Error(
+            `GitHub provider cannot list pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const client = await createClient({ host: repository.host });
+        const options: GitHubListPROptions = {
+          state: mapStatusToGitHubState(request.status),
+          per_page: request.limit,
+        };
+        let prs = await client.listPullRequests(
+          repository.owner,
+          repository.repo,
+          options
+        );
+
+        if (request.status === 'abandoned') {
+          prs = prs.filter((pr) => !pr.merged);
+        }
+        if (request.status === 'completed') {
+          prs = prs.filter((pr) => pr.merged);
+        }
+        if (request.limit && prs.length > request.limit) {
+          prs = prs.slice(0, request.limit);
+        }
+        if (request.createdBy) {
+          const searchTerm = request.createdBy.toLowerCase();
+          prs = prs.filter((pr) =>
+            pr.user.login.toLowerCase().includes(searchTerm)
+          );
+        }
+
+        return {
+          repository,
+          repositoryLabel: `${repository.host}/${repository.owner}/${repository.repo}`,
+          pullRequests: prs.map(githubPullRequestToListItem),
+        };
+      },
+      catch: (error) => error,
+    });
 
   return defineAidePlugin({
     id: 'github',
@@ -105,9 +173,43 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
             },
           };
         },
+        operations: {
+          listPullRequests,
+        },
       },
     },
   });
 }
 
 export const githubPlugin = createGitHubPlugin();
+
+function githubPullRequestStatus(
+  pr: GitHubPullRequest
+): AidePullRequestListItemStatus {
+  const status = getGitHubPRStatus(pr);
+  if (
+    status === 'active' ||
+    status === 'completed' ||
+    status === 'abandoned' ||
+    status === 'draft'
+  ) {
+    return status;
+  }
+  return 'active';
+}
+
+function githubPullRequestToListItem(pr: GitHubPullRequest) {
+  return {
+    id: pr.number,
+    title: pr.title,
+    status: githubPullRequestStatus(pr),
+    createdAt: pr.created_at,
+    author: {
+      displayName: pr.user.login,
+      username: pr.user.login,
+    },
+    ...(pr.body === null ? {} : { description: pr.body }),
+    url: pr.html_url,
+    draft: pr.draft,
+  } as const;
+}

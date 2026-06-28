@@ -115,6 +115,54 @@ export interface AidePullRequestProviderFeatures {
   readonly enterpriseHosts?: boolean;
 }
 
+export type AidePullRequestListFilterStatus =
+  | 'active'
+  | 'completed'
+  | 'abandoned'
+  | 'all';
+
+export type AidePullRequestListItemStatus =
+  | 'active'
+  | 'completed'
+  | 'abandoned'
+  | 'draft';
+
+export interface AidePullRequestListRequest {
+  readonly match: AidePullRequestRemoteMatch;
+  readonly status?: AidePullRequestListFilterStatus;
+  readonly limit?: number;
+  readonly createdBy?: string;
+}
+
+export interface AidePullRequestAuthor {
+  readonly displayName: string;
+  readonly username?: string;
+  readonly email?: string;
+}
+
+export interface AidePullRequestListItem {
+  readonly id: number;
+  readonly title: string;
+  readonly status: AidePullRequestListItemStatus;
+  readonly createdAt: string;
+  readonly author: AidePullRequestAuthor;
+  readonly description?: string;
+  readonly url?: string;
+  readonly draft?: boolean;
+}
+
+export interface AidePullRequestListResult {
+  readonly repository: AidePullRequestRepositoryRef;
+  readonly repositoryLabel?: string;
+  readonly pullRequests: readonly AidePullRequestListItem[];
+}
+
+export interface AidePullRequestProviderOperations {
+  readonly listPullRequests?: (
+    request: AidePullRequestListRequest
+  ) => Effect.Effect<AidePullRequestListResult, unknown, never>;
+}
+
 export interface AidePullRequestProviderCapability {
   readonly providerId: string;
   readonly priority: number;
@@ -123,6 +171,7 @@ export interface AidePullRequestProviderCapability {
     remoteUrl: string
   ) => AidePullRequestRemoteMatch | null;
   readonly matchPullRequestUrl: (url: string) => AidePullRequestUrlMatch | null;
+  readonly operations?: AidePullRequestProviderOperations;
   readonly authStatus: () => Effect.Effect<
     AidePluginAuthStatus,
     unknown,

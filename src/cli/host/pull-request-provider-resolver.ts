@@ -6,6 +6,10 @@ import type {
 } from './command-registry.js';
 import type {
   AidePullRequestProviderCapability,
+  AidePullRequestListItem,
+  AidePullRequestListItemStatus,
+  AidePullRequestListRequest,
+  AidePullRequestListResult,
   AidePullRequestProviderFeatures,
   AidePullRequestProviderMatch,
   AidePullRequestProviderMatchSource,
@@ -34,6 +38,12 @@ export interface ResolvedPullRequestProvider<
   readonly priority: number;
 }
 
+interface ResolvedPullRequestProviderCandidate<
+  TMatch extends AidePullRequestProviderMatch = AidePullRequestProviderMatch,
+> extends ResolvedPullRequestProvider<TMatch> {
+  readonly capability: AidePullRequestProviderCapability;
+}
+
 export interface PullRequestProviderResolutionOptions<
   TMatch extends AidePullRequestProviderMatch = AidePullRequestProviderMatch,
 > {
@@ -44,6 +54,11 @@ export interface PullRequestProviderResolutionOptions<
   readonly preferred?: (
     provider: ResolvedPullRequestProvider<TMatch>
   ) => boolean;
+  readonly matcherTimeout?: Duration.DurationInput;
+}
+
+export interface PullRequestProviderOperationOptions {
+  readonly operationTimeout?: Duration.DurationInput;
   readonly matcherTimeout?: Duration.DurationInput;
 }
 
@@ -116,6 +131,57 @@ export class PullRequestProviderTimeoutError extends Data.TaggedError(
   }
 }
 
+export class UnsupportedPullRequestProviderOperationError extends Data.TaggedError(
+  'UnsupportedPullRequestProviderOperationError'
+)<{
+  readonly pluginId: string;
+  readonly providerId: string;
+  readonly operation: string;
+}> {
+  override get message(): string {
+    return `Pull request provider '${this.providerId}' from plugin '${this.pluginId}' does not implement ${this.operation}`;
+  }
+}
+
+export class InvalidPullRequestProviderOperationResultError extends Data.TaggedError(
+  'InvalidPullRequestProviderOperationResultError'
+)<{
+  readonly pluginId: string;
+  readonly providerId: string;
+  readonly operation: string;
+  readonly reason: string;
+}> {
+  override get message(): string {
+    return `Pull request provider '${this.providerId}' from plugin '${this.pluginId}' returned invalid ${this.operation} result: ${this.reason}`;
+  }
+}
+
+export class PullRequestProviderOperationError extends Data.TaggedError(
+  'PullRequestProviderOperationError'
+)<{
+  readonly pluginId: string;
+  readonly providerId: string;
+  readonly operation: string;
+  readonly cause: unknown;
+}> {
+  override get message(): string {
+    const detail = this.cause instanceof Error ? `: ${this.cause.message}` : '';
+    return `Pull request provider '${this.providerId}' from plugin '${this.pluginId}' failed during ${this.operation}${detail}`;
+  }
+}
+
+export class PullRequestProviderOperationTimeoutError extends Data.TaggedError(
+  'PullRequestProviderOperationTimeoutError'
+)<{
+  readonly pluginId: string;
+  readonly providerId: string;
+  readonly operation: string;
+}> {
+  override get message(): string {
+    return `Pull request provider '${this.providerId}' from plugin '${this.pluginId}' timed out during ${this.operation}`;
+  }
+}
+
 export type PullRequestProviderResolutionError =
   | UnsupportedPullRequestProviderError
   | AmbiguousPullRequestProviderError
@@ -123,7 +189,15 @@ export type PullRequestProviderResolutionError =
   | PullRequestProviderInvocationError
   | PullRequestProviderTimeoutError;
 
+export type PullRequestProviderOperationInvocationError =
+  | PullRequestProviderResolutionError
+  | UnsupportedPullRequestProviderOperationError
+  | InvalidPullRequestProviderOperationResultError
+  | PullRequestProviderOperationError
+  | PullRequestProviderOperationTimeoutError;
+
 const defaultMatcherTimeout = '2 seconds' satisfies Duration.DurationInput;
+const defaultOperationTimeout = '10 seconds' satisfies Duration.DurationInput;
 
 function candidateSummary<TMatch extends AidePullRequestProviderMatch>(
   resolved: ResolvedPullRequestProvider<TMatch>
@@ -141,6 +215,10 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
+}
+
+function isValidDateString(value: string): boolean {
+  return Number.isFinite(Date.parse(value));
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -230,6 +308,34 @@ function snapshotRepositoryRef(
   }
 }
 
+function repositoryRefsMatch(
+  actual: AidePullRequestRepositoryRef,
+  expected: AidePullRequestRepositoryRef
+): boolean {
+  switch (actual.kind) {
+    case 'github':
+      if (expected.kind !== 'github') return false;
+      return (
+        actual.host === expected.host &&
+        actual.owner === expected.owner &&
+        actual.repo === expected.repo
+      );
+    case 'azure-devops':
+      if (expected.kind !== 'azure-devops') return false;
+      return (
+        actual.org === expected.org &&
+        actual.project === expected.project &&
+        actual.repo === expected.repo
+      );
+    case 'external':
+      if (expected.kind !== 'external') return false;
+      return (
+        actual.providerId === expected.providerId &&
+        actual.displayName === expected.displayName
+      );
+  }
+}
+
 function snapshotPullRequestRef(value: unknown): AidePullRequestRef | null {
   if (
     !isRecord(value) ||
@@ -241,6 +347,141 @@ function snapshotPullRequestRef(value: unknown): AidePullRequestRef | null {
   }
 
   return Object.freeze({ number: value.number });
+}
+
+function snapshotPullRequestAuthor(
+  value: unknown
+): AidePullRequestListItem['author'] | null {
+  if (!isRecord(value) || !isNonEmptyString(value.displayName)) {
+    return null;
+  }
+
+  const username = value.username;
+  const email = value.email;
+  if (username !== undefined && typeof username !== 'string') {
+    return null;
+  }
+  if (email !== undefined && typeof email !== 'string') {
+    return null;
+  }
+
+  return Object.freeze({
+    displayName: value.displayName,
+    ...(username === undefined ? {} : { username }),
+    ...(email === undefined ? {} : { email }),
+  });
+}
+
+function isPullRequestListItemStatus(
+  value: unknown
+): value is AidePullRequestListItemStatus {
+  return (
+    value === 'active' ||
+    value === 'completed' ||
+    value === 'abandoned' ||
+    value === 'draft'
+  );
+}
+
+function snapshotPullRequestListItem(
+  value: unknown
+): AidePullRequestListItem | null {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== 'number' ||
+    !Number.isSafeInteger(value.id) ||
+    value.id <= 0 ||
+    !isNonEmptyString(value.title) ||
+    !isPullRequestListItemStatus(value.status) ||
+    !isNonEmptyString(value.createdAt) ||
+    !isValidDateString(value.createdAt)
+  ) {
+    return null;
+  }
+
+  const author = snapshotPullRequestAuthor(value.author);
+  if (author === null) {
+    return null;
+  }
+
+  const description = value.description;
+  const url = value.url;
+  const draft = value.draft;
+  if (description !== undefined && typeof description !== 'string') {
+    return null;
+  }
+  if (url !== undefined && typeof url !== 'string') {
+    return null;
+  }
+  if (draft !== undefined && typeof draft !== 'boolean') {
+    return null;
+  }
+
+  return Object.freeze({
+    id: value.id,
+    title: value.title,
+    status: value.status,
+    createdAt: value.createdAt,
+    author,
+    ...(description === undefined ? {} : { description }),
+    ...(url === undefined ? {} : { url }),
+    ...(draft === undefined ? {} : { draft }),
+  });
+}
+
+function validatePullRequestListResult(
+  provider: ResolvedPullRequestProviderCandidate<AidePullRequestRemoteMatch>,
+  result: unknown
+): Effect.Effect<
+  AidePullRequestListResult,
+  InvalidPullRequestProviderOperationResultError
+> {
+  const invalid = (reason: string) =>
+    Effect.fail(
+      new InvalidPullRequestProviderOperationResultError({
+        pluginId: provider.pluginId,
+        providerId: provider.providerId,
+        operation: 'listPullRequests',
+        reason,
+      })
+    );
+
+  if (!isRecord(result)) {
+    return invalid('result must be an object');
+  }
+
+  const repository = snapshotRepositoryRef(result.repository);
+  if (repository === null) {
+    return invalid('invalid repository ref');
+  }
+  if (!repositoryRefsMatch(repository, provider.match.repository)) {
+    return invalid('repository ref does not match selected provider match');
+  }
+  if (!Array.isArray(result.pullRequests)) {
+    return invalid('pullRequests must be an array');
+  }
+
+  const repositoryLabel = result.repositoryLabel;
+  if (repositoryLabel !== undefined && typeof repositoryLabel !== 'string') {
+    return invalid('repositoryLabel must be a string');
+  }
+
+  const pullRequests: AidePullRequestListItem[] = [];
+  for (const item of result.pullRequests) {
+    const snapshot = snapshotPullRequestListItem(item);
+    if (snapshot === null) {
+      return invalid('invalid pull request item');
+    }
+    pullRequests.push(snapshot);
+  }
+
+  return Effect.succeed(
+    Object.freeze({
+      repository,
+      ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
+      pullRequests: Object.freeze(pullRequests),
+    })
+  );
 }
 
 function validationFailureReason(cause: unknown): string {
@@ -431,7 +672,7 @@ function collectMatches<TMatch extends AidePullRequestProviderMatch>(
     'matcherTimeout'
   > = {}
 ): Effect.Effect<
-  ResolvedPullRequestProvider<TMatch>[],
+  ResolvedPullRequestProviderCandidate<TMatch>[],
   | InvalidPullRequestProviderMatchError
   | PullRequestProviderInvocationError
   | PullRequestProviderTimeoutError
@@ -487,6 +728,7 @@ function collectMatches<TMatch extends AidePullRequestProviderMatch>(
                   {
                     pluginId,
                     providerId: capability.providerId,
+                    capability,
                     features: capability.features,
                     match: validMatch,
                     priority,
@@ -503,12 +745,12 @@ function collectMatches<TMatch extends AidePullRequestProviderMatch>(
 }
 
 function selectProvider<TMatch extends AidePullRequestProviderMatch>(
-  matches: readonly ResolvedPullRequestProvider<TMatch>[],
+  matches: readonly ResolvedPullRequestProviderCandidate<TMatch>[],
   source: PullRequestProviderLookupSource,
   value: string,
   options: PullRequestProviderResolutionOptions<TMatch> = {}
 ): Effect.Effect<
-  ResolvedPullRequestProvider<TMatch>,
+  ResolvedPullRequestProviderCandidate<TMatch>,
   PullRequestProviderResolutionError
 > {
   if (matches.length === 0) {
@@ -543,6 +785,33 @@ function selectProvider<TMatch extends AidePullRequestProviderMatch>(
   return Effect.succeed(winner);
 }
 
+function stripProviderCapability<TMatch extends AidePullRequestProviderMatch>(
+  provider: ResolvedPullRequestProviderCandidate<TMatch>
+): ResolvedPullRequestProvider<TMatch> {
+  return Object.freeze({
+    pluginId: provider.pluginId,
+    providerId: provider.providerId,
+    features: provider.features,
+    match: provider.match,
+    priority: provider.priority,
+  });
+}
+
+function selectProviderCandidate<TMatch extends AidePullRequestProviderMatch>(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  source: PullRequestProviderLookupSource,
+  value: string,
+  match: (capability: AidePullRequestProviderCapability) => TMatch | null,
+  options: PullRequestProviderResolutionOptions<TMatch> = {}
+): Effect.Effect<
+  ResolvedPullRequestProviderCandidate<TMatch>,
+  PullRequestProviderResolutionError
+> {
+  return collectMatches(providers, source, value, match, options).pipe(
+    Effect.flatMap((matches) => selectProvider(matches, source, value, options))
+  );
+}
+
 export function resolvePullRequestProviderForRemote(
   providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
@@ -551,17 +820,13 @@ export function resolvePullRequestProviderForRemote(
   ResolvedPullRequestProvider<AidePullRequestRemoteMatch>,
   PullRequestProviderResolutionError
 > {
-  return collectMatches(
+  return selectProviderCandidate(
     providers,
     'git-remote',
     remoteUrl,
     (provider) => provider.matchRemote(remoteUrl),
     options
-  ).pipe(
-    Effect.flatMap((matches) =>
-      selectProvider(matches, 'git-remote', remoteUrl, options)
-    )
-  );
+  ).pipe(Effect.map(stripProviderCapability));
 }
 
 export function resolvePullRequestProviderForUrl(
@@ -572,15 +837,119 @@ export function resolvePullRequestProviderForUrl(
   ResolvedPullRequestProvider<AidePullRequestUrlMatch>,
   PullRequestProviderResolutionError
 > {
-  return collectMatches(
+  return selectProviderCandidate(
     providers,
     'pull-request-url',
     url,
     (provider) => provider.matchPullRequestUrl(url),
     options
+  ).pipe(Effect.map(stripProviderCapability));
+}
+
+export function listPullRequestsWithProvider(
+  provider: ResolvedPullRequestProviderCandidate<AidePullRequestRemoteMatch>,
+  request: Omit<AidePullRequestListRequest, 'match'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+): Effect.Effect<
+  AidePullRequestListResult,
+  | UnsupportedPullRequestProviderOperationError
+  | InvalidPullRequestProviderOperationResultError
+  | PullRequestProviderOperationError
+  | PullRequestProviderOperationTimeoutError
+> {
+  const operation = provider.capability.operations?.listPullRequests;
+  if (operation === undefined) {
+    return Effect.fail(
+      new UnsupportedPullRequestProviderOperationError({
+        pluginId: provider.pluginId,
+        providerId: provider.providerId,
+        operation: 'listPullRequests',
+      })
+    );
+  }
+
+  return Effect.suspend(
+    (): Effect.Effect<
+      AidePullRequestListResult,
+      | InvalidPullRequestProviderOperationResultError
+      | PullRequestProviderOperationError,
+      never
+    > => {
+      let operationResult: unknown;
+      try {
+        operationResult = operation({ ...request, match: provider.match });
+      } catch (cause) {
+        return Effect.fail(
+          new PullRequestProviderOperationError({
+            pluginId: provider.pluginId,
+            providerId: provider.providerId,
+            operation: 'listPullRequests',
+            cause,
+          })
+        );
+      }
+
+      if (!Effect.isEffect(operationResult)) {
+        return Effect.fail(
+          new InvalidPullRequestProviderOperationResultError({
+            pluginId: provider.pluginId,
+            providerId: provider.providerId,
+            operation: 'listPullRequests',
+            reason: 'operation must return an Effect',
+          })
+        );
+      }
+
+      return (
+        operationResult as Effect.Effect<
+          AidePullRequestListResult,
+          unknown,
+          never
+        >
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new PullRequestProviderOperationError({
+              pluginId: provider.pluginId,
+              providerId: provider.providerId,
+              operation: 'listPullRequests',
+              cause,
+            })
+        )
+      );
+    }
   ).pipe(
-    Effect.flatMap((matches) =>
-      selectProvider(matches, 'pull-request-url', url, options)
+    Effect.timeoutFail({
+      duration: options.operationTimeout ?? defaultOperationTimeout,
+      onTimeout: () =>
+        new PullRequestProviderOperationTimeoutError({
+          pluginId: provider.pluginId,
+          providerId: provider.providerId,
+          operation: 'listPullRequests',
+        }),
+    }),
+    Effect.flatMap((result) => validatePullRequestListResult(provider, result))
+  );
+}
+
+export function listPullRequestsForRemote(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  remoteUrl: string,
+  request: Omit<AidePullRequestListRequest, 'match'> = {},
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestListResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidate(
+    providers,
+    'git-remote',
+    remoteUrl,
+    (provider) => provider.matchRemote(remoteUrl),
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      listPullRequestsWithProvider(provider, request, options)
     )
   );
 }

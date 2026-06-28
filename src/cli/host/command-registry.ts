@@ -14,6 +14,7 @@ import type {
   AidePluginCommand,
   AidePluginDescriptor,
   AidePullRequestProviderCapability,
+  AidePullRequestProviderOperations,
   AnyYargsCommandModule,
 } from './plugin-descriptor.js';
 import { corePullRequestProviderOwner } from './plugin-descriptor.js';
@@ -128,6 +129,38 @@ function snapshotPullRequestProviderFeatures(
   return Object.freeze(snapshot);
 }
 
+function snapshotPullRequestProviderOperations(
+  pluginId: string,
+  providerId: string,
+  operations: unknown
+): AidePullRequestProviderOperations | undefined {
+  if (operations === undefined) return undefined;
+  if (!isRecord(operations)) {
+    throw new Error(
+      `Plugin '${pluginId}' pull request provider '${providerId}' operations must be an object`
+    );
+  }
+
+  const listPullRequests = operations.listPullRequests;
+  if (
+    listPullRequests !== undefined &&
+    typeof listPullRequests !== 'function'
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' pull request provider '${providerId}' operation 'listPullRequests' must be a function`
+    );
+  }
+
+  if (listPullRequests === undefined) {
+    return Object.freeze({});
+  }
+
+  return Object.freeze({
+    listPullRequests:
+      listPullRequests as AidePullRequestProviderOperations['listPullRequests'],
+  });
+}
+
 function snapshotPullRequestProviderCapability(
   pluginId: string,
   capability: unknown
@@ -176,6 +209,11 @@ function snapshotPullRequestProviderCapability(
     features: snapshotPullRequestProviderFeatures(
       pluginId,
       capability.features
+    ),
+    operations: snapshotPullRequestProviderOperations(
+      pluginId,
+      capability.providerId,
+      capability.operations
     ),
     matchRemote:
       capability.matchRemote as AidePullRequestProviderCapability['matchRemote'],

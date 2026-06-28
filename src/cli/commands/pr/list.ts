@@ -3,35 +3,42 @@
  * Supports Azure DevOps and GitHub
  */
 
+import { Effect } from 'effect';
+import type { ArgumentsCamelCase, CommandModule } from 'yargs';
+
+import type {
+  AidePullRequestListItem,
+  AidePullRequestListItemStatus,
+  AidePullRequestListResult,
+  AidePullRequestRepositoryRef,
+} from '@cli/host/plugin-descriptor.js';
+import { getAideHostContext } from '@cli/host/runtime-context.js';
 import { logProgress } from '@lib/cli-utils.js';
 import { handleCommandError } from '@lib/errors.js';
 import { getGitRemoteUrl } from '@lib/git-utils.js';
-import type { AzureDevOpsPullRequest } from '@lib/types.js';
 import type { GitHubPullRequest } from '@lib/github-types.js';
-import { resolvePlatformContext, type PlatformContext } from '@lib/platform.js';
 import {
   getGitHubPRStatus,
   mapStatusToGitHubState,
 } from '@lib/github-utils.js';
+import { resolvePlatformContext, type PlatformContext } from '@lib/platform.js';
+import type { AzureDevOpsPullRequest } from '@lib/types.js';
 import { validateArgs } from '@lib/validation.js';
 import {
   ListArgsSchema,
   type ListArgs,
   type OutputFormat,
 } from '@schemas/pr/list.js';
-import { getAideHostContext } from '@cli/host/runtime-context.js';
-import { resolvePullRequestPlatformContextForRemote } from '@cli/plugins/pull-requests/provider-context.js';
-import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 // ============================================================================
-// Azure DevOps Formatting
+// Provider-neutral Formatting
 // ============================================================================
 
-function formatAdoOutput(
-  prs: AzureDevOpsPullRequest[],
-  format: OutputFormat,
-  repoInfo?: { project: string; repo: string }
+function formatPullRequestListOutput(
+  result: AidePullRequestListResult,
+  format: OutputFormat
 ): string {
+  const prs = result.pullRequests;
   if (format === 'json') {
     return JSON.stringify(prs, null, 2);
   }
@@ -44,15 +51,15 @@ function formatAdoOutput(
 
   if (format === 'markdown') {
     let output = `# Pull Requests`;
-    if (repoInfo) {
-      output += ` - ${repoInfo.project}/${repoInfo.repo}`;
+    if (result.repositoryLabel) {
+      output += ` - ${result.repositoryLabel}`;
     }
     output += `\n\nTotal: ${prs.length} PR${prs.length === 1 ? '' : 's'}\n\n`;
 
     for (const pr of prs) {
-      const date = new Date(pr.creationDate).toISOString().split('T')[0];
-      output += `## #${pr.pullRequestId}: ${pr.title}\n`;
-      output += `**Status:** ${pr.status} | **Created:** ${date} | **By:** ${pr.createdBy.displayName}\n`;
+      const date = new Date(pr.createdAt).toISOString().split('T')[0];
+      output += `## #${pr.id}: ${pr.title}\n`;
+      output += `**Status:** ${pr.status} | **Created:** ${date} | **By:** ${pr.author.displayName}\n`;
       if (pr.description) {
         output += `\n${pr.description}\n`;
       }
@@ -62,19 +69,18 @@ function formatAdoOutput(
     return output;
   }
 
-  // Text format
   let output = `Pull Requests`;
-  if (repoInfo) {
-    output += ` - ${repoInfo.project}/${repoInfo.repo}`;
+  if (result.repositoryLabel) {
+    output += ` - ${result.repositoryLabel}`;
   }
   output += ` (${prs.length} total)\n`;
   output += '='.repeat(70) + '\n\n';
 
   for (const pr of prs) {
-    const date = new Date(pr.creationDate).toLocaleDateString();
-    output += `[PR #${pr.pullRequestId}] ${pr.title}\n`;
+    const date = new Date(pr.createdAt).toLocaleDateString();
+    output += `[PR #${pr.id}] ${pr.title}\n`;
     output += `  Status: ${pr.status}\n`;
-    output += `  Created: ${date} by ${pr.createdBy.displayName}\n`;
+    output += `  Created: ${date} by ${pr.author.displayName}\n`;
     if (pr.description) {
       const shortDesc =
         pr.description.length > 100
@@ -89,87 +95,15 @@ function formatAdoOutput(
 }
 
 // ============================================================================
-// GitHub Formatting
-// ============================================================================
-
-function formatGitHubOutput(
-  prs: GitHubPullRequest[],
-  format: OutputFormat,
-  repoInfo?: { owner: string; repo: string }
-): string {
-  if (format === 'json') {
-    return JSON.stringify(prs, null, 2);
-  }
-
-  if (prs.length === 0) {
-    return format === 'markdown'
-      ? `# Pull Requests\n\nNo pull requests found.`
-      : `No pull requests found.`;
-  }
-
-  if (format === 'markdown') {
-    let output = `# Pull Requests`;
-    if (repoInfo) {
-      output += ` - ${repoInfo.owner}/${repoInfo.repo}`;
-    }
-    output += `\n\nTotal: ${prs.length} PR${prs.length === 1 ? '' : 's'}\n\n`;
-
-    for (const pr of prs) {
-      const date = new Date(pr.created_at).toISOString().split('T')[0];
-      const status = getGitHubPRStatus(pr);
-      output += `## #${pr.number}: ${pr.title}\n`;
-      output += `**Status:** ${status} | **Created:** ${date} | **By:** ${pr.user.login}\n`;
-      if (pr.body) {
-        output += `\n${pr.body}\n`;
-      }
-      output += `\n---\n\n`;
-    }
-
-    return output;
-  }
-
-  // Text format
-  let output = `Pull Requests`;
-  if (repoInfo) {
-    output += ` - ${repoInfo.owner}/${repoInfo.repo}`;
-  }
-  output += ` (${prs.length} total)\n`;
-  output += '='.repeat(70) + '\n\n';
-
-  for (const pr of prs) {
-    const date = new Date(pr.created_at).toLocaleDateString();
-    const status = getGitHubPRStatus(pr);
-    output += `[PR #${pr.number}] ${pr.title}\n`;
-    output += `  Status: ${status}\n`;
-    output += `  Created: ${date} by ${pr.user.login}\n`;
-    if (pr.body) {
-      const shortDesc =
-        pr.body.length > 100 ? pr.body.substring(0, 97) + '...' : pr.body;
-      output += `  Description: ${shortDesc}\n`;
-    }
-    output += `\n`;
-  }
-
-  return output;
-}
-
-// ============================================================================
 // Handler
 // ============================================================================
 
-async function handleGitHub(
+async function listGitHubPullRequests(
   ctx: Extract<PlatformContext, { platform: 'github' }>,
   args: ListArgs
-): Promise<void> {
+): Promise<AidePullRequestListResult> {
   const { status, limit } = args;
-  const format = args.format ?? 'text';
   const createdBy = args.createdBy ?? args.author;
-
-  logProgress('Fetching pull requests...', format);
-  if (status) logProgress(`Status: ${status}`, format);
-  if (createdBy) logProgress(`Created by: ${createdBy}`, format);
-  if (limit) logProgress(`Limit: ${limit}`, format);
-  logProgress('', format);
 
   const ghState = mapStatusToGitHubState(status);
   let prs = await ctx.client.listPullRequests(ctx.owner, ctx.repo, {
@@ -177,46 +111,40 @@ async function handleGitHub(
     per_page: limit,
   });
 
-  // For "abandoned" status, filter to closed-but-not-merged
   if (status === 'abandoned') {
     prs = prs.filter((pr) => !pr.merged);
   }
-  // For "completed" status, filter to merged only
   if (status === 'completed') {
     prs = prs.filter((pr) => pr.merged);
   }
-
-  // Apply limit after client-side filtering
   if (limit && prs.length > limit) {
     prs = prs.slice(0, limit);
   }
-
-  // Client-side filtering by creator
   if (createdBy) {
     const searchTerm = createdBy.toLowerCase();
     prs = prs.filter((pr) => pr.user.login.toLowerCase().includes(searchTerm));
   }
 
-  const output = formatGitHubOutput(prs, format, {
+  const repository = {
+    kind: 'github',
+    host: ctx.host,
     owner: ctx.owner,
     repo: ctx.repo,
-  });
-  console.log(output);
+  } as const;
+
+  return {
+    repository,
+    repositoryLabel: repositoryLabel(repository),
+    pullRequests: prs.map(githubPullRequestToListItem),
+  };
 }
 
-async function handleAdo(
+async function listAzureDevOpsPullRequests(
   ctx: Extract<PlatformContext, { platform: 'azure-devops' }>,
   args: ListArgs
-): Promise<void> {
+): Promise<AidePullRequestListResult> {
   const { status, limit } = args;
-  const format = args.format ?? 'text';
   const createdBy = args.createdBy ?? args.author;
-
-  logProgress('Fetching pull requests...', format);
-  if (status) logProgress(`Status: ${status}`, format);
-  if (createdBy) logProgress(`Created by: ${createdBy}`, format);
-  if (limit) logProgress(`Limit: ${limit}`, format);
-  logProgress('', format);
 
   const response = await ctx.client.listPullRequests(ctx.project, ctx.repo, {
     status,
@@ -224,8 +152,6 @@ async function handleAdo(
   });
 
   let prs = response.value;
-
-  // Client-side filtering by creator
   if (createdBy) {
     const searchTerm = createdBy.toLowerCase();
     prs = prs.filter((pr) => {
@@ -237,11 +163,18 @@ async function handleAdo(
     });
   }
 
-  const output = formatAdoOutput(prs, format, {
+  const repository = {
+    kind: 'azure-devops',
+    org: ctx.org,
     project: ctx.project,
     repo: ctx.repo,
-  });
-  console.log(output);
+  } as const;
+
+  return {
+    repository,
+    repositoryLabel: repositoryLabel(repository),
+    pullRequests: prs.map(azureDevOpsPullRequestToListItem),
+  };
 }
 
 async function handler(argv: ArgumentsCamelCase<ListArgs>): Promise<void> {
@@ -249,49 +182,126 @@ async function handler(argv: ArgumentsCamelCase<ListArgs>): Promise<void> {
   const format = args.format ?? 'text';
 
   try {
-    const ctx = await resolveListPlatformContext(argv, args);
-    if (ctx.autoDiscovered) {
-      if (ctx.platform === 'github') {
-        logProgress(
-          `Auto-discovered: ${ctx.host}/${ctx.owner}/${ctx.repo}`,
-          format
-        );
-      } else {
-        logProgress(
-          `Auto-discovered: ${ctx.org}/${ctx.project}/${ctx.repo}`,
-          format
-        );
-      }
+    logListRequest(args, format);
+
+    const resolved = await resolvePullRequestList(argv, args);
+    if (resolved.autoDiscovered) {
+      logProgress(
+        `Auto-discovered: ${resolved.result.repositoryLabel}`,
+        format
+      );
       logProgress('', format);
     }
 
-    if (ctx.platform === 'github') {
-      await handleGitHub(ctx, args);
-    } else {
-      await handleAdo(ctx, args);
-    }
+    console.log(formatPullRequestListOutput(resolved.result, format));
   } catch (error) {
     handleCommandError(error);
   }
 }
 
-async function resolveListPlatformContext(
+async function resolvePullRequestList(
   argv: ArgumentsCamelCase<ListArgs>,
   args: ListArgs
-): Promise<PlatformContext> {
+): Promise<{
+  readonly result: AidePullRequestListResult;
+  readonly autoDiscovered: boolean;
+}> {
   const hostContext = getAideHostContext(argv);
   const remoteUrl = getGitRemoteUrl();
   const hasExplicitRepoContext =
     args.project !== undefined || args.repo !== undefined;
 
   if (hostContext && remoteUrl && !hasExplicitRepoContext) {
-    return resolvePullRequestPlatformContextForRemote(
-      hostContext.services,
-      remoteUrl
+    const result = await Effect.runPromise(
+      hostContext.services.listPullRequestsForRemote(remoteUrl, {
+        status: args.status,
+        limit: args.limit,
+        createdBy: args.createdBy ?? args.author,
+      })
     );
+    return { result, autoDiscovered: true };
   }
 
-  return resolvePlatformContext(args.project, args.repo);
+  const ctx = await resolvePlatformContext(args.project, args.repo);
+  const result =
+    ctx.platform === 'github'
+      ? await listGitHubPullRequests(ctx, args)
+      : await listAzureDevOpsPullRequests(ctx, args);
+  return { result, autoDiscovered: ctx.autoDiscovered };
+}
+
+function logListRequest(args: ListArgs, format: OutputFormat): void {
+  const { status, limit } = args;
+  const createdBy = args.createdBy ?? args.author;
+
+  logProgress('Fetching pull requests...', format);
+  if (status) logProgress(`Status: ${status}`, format);
+  if (createdBy) logProgress(`Created by: ${createdBy}`, format);
+  if (limit) logProgress(`Limit: ${limit}`, format);
+  logProgress('', format);
+}
+
+function githubPullRequestStatus(
+  pr: GitHubPullRequest
+): AidePullRequestListItemStatus {
+  const status = getGitHubPRStatus(pr);
+  if (
+    status === 'active' ||
+    status === 'completed' ||
+    status === 'abandoned' ||
+    status === 'draft'
+  ) {
+    return status;
+  }
+  return 'active';
+}
+
+function githubPullRequestToListItem(
+  pr: GitHubPullRequest
+): AidePullRequestListItem {
+  return {
+    id: pr.number,
+    title: pr.title,
+    status: githubPullRequestStatus(pr),
+    createdAt: pr.created_at,
+    author: {
+      displayName: pr.user.login,
+      username: pr.user.login,
+    },
+    ...(pr.body === null ? {} : { description: pr.body }),
+    url: pr.html_url,
+    draft: pr.draft,
+  };
+}
+
+function azureDevOpsPullRequestToListItem(
+  pr: AzureDevOpsPullRequest
+): AidePullRequestListItem {
+  return {
+    id: pr.pullRequestId,
+    title: pr.title,
+    status: pr.isDraft ? 'draft' : pr.status,
+    createdAt: pr.creationDate,
+    author: {
+      displayName: pr.createdBy.displayName,
+      ...(pr.createdBy.uniqueName === undefined
+        ? {}
+        : { email: pr.createdBy.uniqueName }),
+    },
+    ...(pr.description === undefined ? {} : { description: pr.description }),
+    draft: pr.isDraft ?? false,
+  };
+}
+
+function repositoryLabel(repository: AidePullRequestRepositoryRef): string {
+  switch (repository.kind) {
+    case 'github':
+      return `${repository.host}/${repository.owner}/${repository.repo}`;
+    case 'azure-devops':
+      return `${repository.org}/${repository.project}/${repository.repo}`;
+    case 'external':
+      return repository.displayName;
+  }
 }
 
 export default {
