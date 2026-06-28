@@ -5,6 +5,8 @@ import {
   eraseCommandDescriptor,
   type AideCommandDescriptor,
   type AnyAideCommandDescriptor,
+  type HostAideCommandDescriptor,
+  type ServiceFreeAideCommandDescriptor,
 } from './command-descriptor.js';
 
 export type AnyYargsCommandModule = CommandModule<object, object>;
@@ -182,8 +184,16 @@ export function pluginCommandModule<TBase extends object, TArgs extends object>(
   };
 }
 
+export function pluginCommandDescriptor<TArgs extends object, E = unknown>(
+  descriptor: ServiceFreeAideCommandDescriptor<TArgs, E>,
+  placement?: AidePluginCommandPlacement
+): AidePluginCommand;
+export function pluginCommandDescriptor<TArgs extends object, E = unknown>(
+  descriptor: HostAideCommandDescriptor<TArgs, E>,
+  placement?: AidePluginCommandPlacement
+): AidePluginCommand;
 export function pluginCommandDescriptor<TArgs extends object>(
-  descriptor: AideCommandDescriptor<TArgs>,
+  descriptor: AideCommandDescriptor<TArgs, unknown, unknown>,
   placement: AidePluginCommandPlacement = {}
 ): AidePluginCommand {
   return {
@@ -191,6 +201,8 @@ export function pluginCommandDescriptor<TArgs extends object>(
     id: descriptor.id,
     parentId: placement.parentId,
     extension: placement.extension,
-    descriptor: eraseCommandDescriptor(descriptor),
+    descriptor: eraseCommandDescriptor(
+      descriptor as HostAideCommandDescriptor<TArgs>
+    ),
   };
 }

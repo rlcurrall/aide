@@ -286,7 +286,7 @@ async function resolveListPlatformContext(
 
   if (hostContext && remoteUrl && !hasExplicitRepoContext) {
     return resolvePullRequestPlatformContextForRemote(
-      hostContext.services.pullRequestProviders(),
+      hostContext.services,
       remoteUrl
     );
   }

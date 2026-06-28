@@ -6,6 +6,10 @@ import {
   type OwnedPluginCapability,
 } from '@cli/host/command-registry.js';
 import {
+  createAideHostServices,
+  type AideHostServices,
+} from '@cli/host/runtime-context.js';
+import {
   defineAidePlugin,
   type AidePullRequestProviderCapability,
   type AidePullRequestRemoteMatch,
@@ -24,6 +28,7 @@ import {
 import {
   AmbiguousPullRequestProviderError,
   InvalidPullRequestProviderMatchError,
+  PullRequestProviderInvocationError,
   UnsupportedPullRequestProviderError,
   resolvePullRequestProviderForRemote,
   resolvePullRequestProviderForUrl,
@@ -123,6 +128,20 @@ function pluginWithPullRequestProvider(pluginId: string, providerId: string) {
   });
 }
 
+function hostServicesForProviders(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[]
+): Pick<
+  AideHostServices,
+  'resolvePullRequestProviderForRemote' | 'resolvePullRequestProviderForUrl'
+> {
+  return {
+    resolvePullRequestProviderForRemote: (remoteUrl, options = {}) =>
+      resolvePullRequestProviderForRemote(providers, remoteUrl, options),
+    resolvePullRequestProviderForUrl: (url, options = {}) =>
+      resolvePullRequestProviderForUrl(providers, url, options),
+  };
+}
+
 describe('pull request provider resolution', () => {
   test('resolves github.com remotes through the GitHub provider plugin', async () => {
     const registry = createBuiltinCommandRegistry();
@@ -135,7 +154,7 @@ describe('pull request provider resolution', () => {
     );
 
     expect(resolved.pluginId).toBe('github');
-    expect(resolved.capability.providerId).toBe('github');
+    expect(resolved.providerId).toBe('github');
     expect(resolved.match.repository).toEqual({
       kind: 'github',
       host: 'github.com',
@@ -174,7 +193,7 @@ describe('pull request provider resolution', () => {
     );
 
     expect(resolved.pluginId).toBe('azure-devops');
-    expect(resolved.capability.providerId).toBe('azure-devops');
+    expect(resolved.providerId).toBe('azure-devops');
     expect(resolved.match.repository).toEqual({
       kind: 'azure-devops',
       org: 'acme',
@@ -307,6 +326,104 @@ describe('pull request provider resolution', () => {
       throw new Error('Expected invalid provider match error');
     }
     expect(error.reason).toBe('match must be an object or null');
+  });
+
+  test('wraps throwing provider matchers as typed invocation errors', async () => {
+    const providers: OwnedPluginCapability<AidePullRequestProviderCapability>[] =
+      [
+        {
+          pluginId: 'broken-plugin',
+          capability: {
+            providerId: 'broken-provider',
+            priority: 100,
+            features: {},
+            authStatus: () => Effect.succeed({ state: 'configured' }),
+            matchRemote: () => {
+              throw new Error('boom');
+            },
+            matchPullRequestUrl: () => null,
+          },
+        },
+      ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, 'matched-remote').pipe(
+        Effect.flip
+      )
+    );
+
+    expect(error).toBeInstanceOf(PullRequestProviderInvocationError);
+    if (!(error instanceof PullRequestProviderInvocationError)) {
+      throw new Error('Expected provider invocation error');
+    }
+    expect(error.pluginId).toBe('broken-plugin');
+    expect(error.providerId).toBe('broken-provider');
+    expect(error.cause).toBeInstanceOf(Error);
+    expect(error.message).toContain('boom');
+  });
+
+  test('wraps throwing provider match object getters as typed invalid matches', async () => {
+    const providers = [
+      malformedProvider('broken-plugin', 'broken-provider', 100, {
+        remote: () =>
+          new Proxy(
+            {},
+            {
+              get: () => {
+                throw new Error('getter boom');
+              },
+            }
+          ),
+      }),
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, 'matched-remote').pipe(
+        Effect.flip
+      )
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error.pluginId).toBe('broken-plugin');
+    expect(error.providerId).toBe('broken-provider');
+    expect(error.reason).toBe('match validation failed: getter boom');
+  });
+
+  test('snapshots validated provider matches before returning them', async () => {
+    let repositoryReads = 0;
+    const providers = [
+      malformedProvider('shape-plugin', 'shape-provider', 100, {
+        remote: () => ({
+          source: 'git-remote',
+          priority: 100,
+          get repository() {
+            repositoryReads += 1;
+            return repositoryReads === 1
+              ? externalRepository('shape-provider')
+              : {
+                  kind: 'github',
+                  host: 'evil.example',
+                  owner: 'acme',
+                  repo: 'widgets',
+                };
+          },
+        }),
+      }),
+    ];
+
+    const resolved = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, 'matched-remote')
+    );
+
+    expect(repositoryReads).toBe(1);
+    expect(Object.isFrozen(resolved.match)).toBe(true);
+    expect(Object.isFrozen(resolved.match.repository)).toBe(true);
+    const repository = resolved.match.repository;
+    expect(repository).toEqual(externalRepository('shape-provider'));
+    expect(resolved.match.repository).toBe(repository);
   });
 
   test('rejects provider matches with the wrong source for the lookup', async () => {
@@ -577,6 +694,47 @@ describe('pull request provider registry security', () => {
         .map((provider) => provider.capability.providerId)
     ).toEqual(['gitlab']);
   });
+
+  test('rejects malformed pull request provider capabilities at registration', () => {
+    const registry = createCommandRegistry();
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'broken-plugin',
+          summary: 'Broken provider plugin',
+          commands: [],
+          capabilities: {
+            pullRequestProvider: {
+              providerId: 'broken-provider',
+              priority: 100,
+              features: {},
+              authStatus: () => Effect.succeed({ state: 'configured' }),
+              matchRemote: null,
+              matchPullRequestUrl: () => null,
+            } as unknown as AidePullRequestProviderCapability,
+          },
+        })
+      )
+    ).toThrow(
+      "Plugin 'broken-plugin' pull request provider capability field 'matchRemote' must be a function"
+    );
+    expect(registry.pluginIds()).toEqual([]);
+  });
+
+  test('returns immutable pull request provider capability snapshots', () => {
+    const registry = createCommandRegistry();
+    registry.registerPlugin(
+      pluginWithPullRequestProvider('gitlab-plugin', 'gitlab')
+    );
+
+    const providers = registry.capabilities.pullRequestProviders();
+
+    expect(Object.isFrozen(providers)).toBe(true);
+    expect(Object.isFrozen(providers[0])).toBe(true);
+    expect(Object.isFrozen(providers[0]!.capability)).toBe(true);
+    expect(Object.isFrozen(providers[0]!.capability.features)).toBe(true);
+  });
 });
 
 describe('pull request provider auth capabilities', () => {
@@ -620,7 +778,7 @@ describe('pull request provider platform context bridge', () => {
     const calls: string[] = [];
 
     const ctx = await resolvePullRequestPlatformContextForRemote(
-      registry.capabilities.pullRequestProviders(),
+      createAideHostServices(registry),
       'git@github.com:acme/widgets.git',
       {
         createGitHubClient: async ({ host }) => {
@@ -648,7 +806,7 @@ describe('pull request provider platform context bridge', () => {
     const calls: string[] = [];
 
     const ctx = await resolvePullRequestPlatformContextForRemote(
-      registry.capabilities.pullRequestProviders(),
+      createAideHostServices(registry),
       'git@ssh.dev.azure.com:v3/acme/Platform/widgets',
       {
         createGitHubClient: async () => {
@@ -688,7 +846,10 @@ describe('pull request provider platform context bridge', () => {
     });
 
     const ctx = await resolvePullRequestPlatformContextForRemote(
-      [shadowingProvider, ...registry.capabilities.pullRequestProviders()],
+      hostServicesForProviders([
+        shadowingProvider,
+        ...registry.capabilities.pullRequestProviders(),
+      ]),
       'git@github.com:acme/widgets.git',
       {
         createGitHubClient: async ({ host }) => {
@@ -721,7 +882,8 @@ describe('pull request provider platform context bridge', () => {
       platformContextFromPullRequestProvider(
         {
           pluginId: 'evil-plugin',
-          capability: fakeProviderCapability('evil-provider', 1000),
+          providerId: 'evil-provider',
+          features: {},
           priority: 1000,
           match: {
             source: 'git-remote',
@@ -767,7 +929,10 @@ describe('pull request provider platform context bridge', () => {
     });
 
     const ctx = await resolvePullRequestPlatformContextForRemote(
-      [shadowingProvider, ...registry.capabilities.pullRequestProviders()],
+      hostServicesForProviders([
+        shadowingProvider,
+        ...registry.capabilities.pullRequestProviders(),
+      ]),
       'git@ssh.dev.azure.com:v3/acme/Platform/widgets',
       {
         createGitHubClient: async ({ host }) => {
@@ -813,7 +978,7 @@ describe('pull request provider platform context bridge', () => {
 
     await expect(
       resolvePullRequestPlatformContextForRemote(
-        [maliciousProvider],
+        hostServicesForProviders([maliciousProvider]),
         'git@ssh.dev.azure.com:v3/acme/Platform/widgets',
         {
           createGitHubClient: async ({ host }) => {
@@ -841,7 +1006,8 @@ describe('pull request provider platform context bridge', () => {
       platformContextFromPullRequestProvider(
         {
           pluginId: 'github',
-          capability: fakeProviderCapability('github', 100),
+          providerId: 'github',
+          features: {},
           priority: 100,
           match: {
             source: 'git-remote',

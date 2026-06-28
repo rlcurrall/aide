@@ -4,6 +4,8 @@ import {
   eraseCommandDescriptor,
   type AideCommandDescriptor,
   type AnyAideCommandDescriptor,
+  type HostAideCommandDescriptor,
+  type ServiceFreeAideCommandDescriptor,
 } from './command-descriptor.js';
 import type {
   AideCommandExtensionPolicy,
@@ -43,8 +45,8 @@ function snapshotExtensionPolicy(
   });
 }
 
-function snapshotCommandDescriptor<TArgs extends object>(
-  descriptor: AideCommandDescriptor<TArgs>
+function snapshotCommandDescriptor<TArgs extends object, E = unknown>(
+  descriptor: HostAideCommandDescriptor<TArgs, E>
 ): AnyAideCommandDescriptor {
   const erased = eraseCommandDescriptor(descriptor);
   return Object.freeze({
@@ -60,25 +62,151 @@ function freezeRouteKeys(keys: readonly string[]): readonly string[] {
   return Object.freeze([...keys]);
 }
 
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function assertFunction(
+  pluginId: string,
+  capability: string,
+  field: string,
+  value: unknown
+): asserts value is (...args: never[]) => unknown {
+  if (typeof value !== 'function') {
+    throw new Error(
+      `Plugin '${pluginId}' ${capability} capability field '${field}' must be a function`
+    );
+  }
+}
+
+function snapshotAuthCapability(
+  pluginId: string,
+  capability: unknown
+): AidePluginAuthCapability {
+  if (!isRecord(capability)) {
+    throw new Error(`Plugin '${pluginId}' auth capability must be an object`);
+  }
+
+  assertFunction(pluginId, 'auth', 'status', capability.status);
+
+  return Object.freeze({
+    status: capability.status as AidePluginAuthCapability['status'],
+  });
+}
+
+function snapshotPullRequestProviderFeatures(
+  pluginId: string,
+  features: unknown
+): AidePullRequestProviderCapability['features'] {
+  if (!isRecord(features)) {
+    throw new Error(
+      `Plugin '${pluginId}' pull request provider features must be an object`
+    );
+  }
+
+  const snapshot: Record<string, boolean> = {};
+  for (const key of [
+    'draftPullRequests',
+    'reviewComments',
+    'threadedComments',
+    'enterpriseHosts',
+  ] as const) {
+    const value = features[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'boolean') {
+      throw new Error(
+        `Plugin '${pluginId}' pull request provider feature '${key}' must be a boolean`
+      );
+    }
+    snapshot[key] = value;
+  }
+
+  return Object.freeze(snapshot);
+}
+
+function snapshotPullRequestProviderCapability(
+  pluginId: string,
+  capability: unknown
+): AidePullRequestProviderCapability {
+  if (!isRecord(capability)) {
+    throw new Error(
+      `Plugin '${pluginId}' pull request provider capability must be an object`
+    );
+  }
+
+  if (typeof capability.providerId !== 'string') {
+    throw new Error(
+      `Plugin '${pluginId}' pull request provider id must be a string`
+    );
+  }
+  assertId('Pull request provider', capability.providerId);
+
+  if (!isFiniteNumber(capability.priority)) {
+    throw new Error(
+      `Plugin '${pluginId}' pull request provider '${capability.providerId}' priority must be a finite number`
+    );
+  }
+
+  assertFunction(
+    pluginId,
+    'pull request provider',
+    'matchRemote',
+    capability.matchRemote
+  );
+  assertFunction(
+    pluginId,
+    'pull request provider',
+    'matchPullRequestUrl',
+    capability.matchPullRequestUrl
+  );
+  assertFunction(
+    pluginId,
+    'pull request provider',
+    'authStatus',
+    capability.authStatus
+  );
+
+  return Object.freeze({
+    providerId: capability.providerId,
+    priority: capability.priority,
+    features: snapshotPullRequestProviderFeatures(
+      pluginId,
+      capability.features
+    ),
+    matchRemote:
+      capability.matchRemote as AidePullRequestProviderCapability['matchRemote'],
+    matchPullRequestUrl:
+      capability.matchPullRequestUrl as AidePullRequestProviderCapability['matchPullRequestUrl'],
+    authStatus:
+      capability.authStatus as AidePullRequestProviderCapability['authStatus'],
+  });
+}
+
 function snapshotPluginCapabilities(
+  pluginId: string,
   capabilities: AidePluginCapabilities | undefined
 ): AidePluginCapabilities | undefined {
   if (capabilities === undefined) return undefined;
+  if (!isRecord(capabilities)) {
+    throw new Error(`Plugin '${pluginId}' capabilities must be an object`);
+  }
 
   return Object.freeze({
     auth:
       capabilities.auth === undefined
         ? undefined
-        : Object.freeze({ ...capabilities.auth }),
+        : snapshotAuthCapability(pluginId, capabilities.auth),
     pullRequestProvider:
       capabilities.pullRequestProvider === undefined
         ? undefined
-        : Object.freeze({
-            ...capabilities.pullRequestProvider,
-            features: Object.freeze({
-              ...capabilities.pullRequestProvider.features,
-            }),
-          }),
+        : snapshotPullRequestProviderCapability(
+            pluginId,
+            capabilities.pullRequestProvider
+          ),
   });
 }
 
@@ -148,7 +276,7 @@ function snapshotPlugin(plugin: AidePluginDescriptor): AidePluginDescriptor {
     id: plugin.id,
     summary: plugin.summary,
     commands: Object.freeze(commands),
-    capabilities: snapshotPluginCapabilities(plugin.capabilities),
+    capabilities: snapshotPluginCapabilities(plugin.id, plugin.capabilities),
   });
 }
 
@@ -182,6 +310,13 @@ export interface OwnedPluginCapability<TCapability> {
   readonly capability: TCapability;
 }
 
+function ownedPluginCapability<TCapability>(
+  pluginId: string,
+  capability: TCapability
+): OwnedPluginCapability<TCapability> {
+  return Object.freeze({ pluginId, capability });
+}
+
 export class CommandRegistry {
   readonly #commands: RegisteredCommand[] = [];
   readonly #childCommands = new Map<string, RegisteredCommand[]>();
@@ -200,20 +335,24 @@ export class CommandRegistry {
 
   readonly capabilities = {
     auth: (): readonly OwnedPluginCapability<AidePluginAuthCapability>[] =>
-      this.#plugins.flatMap((plugin) => {
-        const capability = plugin.capabilities?.auth;
-        return capability === undefined
-          ? []
-          : [{ pluginId: plugin.id, capability }];
-      }),
-    pullRequestProviders:
-      (): readonly OwnedPluginCapability<AidePullRequestProviderCapability>[] =>
+      Object.freeze(
         this.#plugins.flatMap((plugin) => {
-          const capability = plugin.capabilities?.pullRequestProvider;
+          const capability = plugin.capabilities?.auth;
           return capability === undefined
             ? []
-            : [{ pluginId: plugin.id, capability }];
-        }),
+            : [ownedPluginCapability(plugin.id, capability)];
+        })
+      ),
+    pullRequestProviders:
+      (): readonly OwnedPluginCapability<AidePullRequestProviderCapability>[] =>
+        Object.freeze(
+          this.#plugins.flatMap((plugin) => {
+            const capability = plugin.capabilities?.pullRequestProvider;
+            return capability === undefined
+              ? []
+              : [ownedPluginCapability(plugin.id, capability)];
+          })
+        ),
   };
 
   registerModule<TBase extends object, TArgs extends object>(
@@ -259,8 +398,16 @@ export class CommandRegistry {
     return this;
   }
 
+  registerDescriptor<TArgs extends object, E = unknown>(
+    descriptor: ServiceFreeAideCommandDescriptor<TArgs, E>,
+    options?: RegisterCommandOptions
+  ): this;
+  registerDescriptor<TArgs extends object, E = unknown>(
+    descriptor: HostAideCommandDescriptor<TArgs, E>,
+    options?: RegisterCommandOptions
+  ): this;
   registerDescriptor<TArgs extends object>(
-    descriptor: AideCommandDescriptor<TArgs>,
+    descriptor: AideCommandDescriptor<TArgs, unknown, unknown>,
     options: RegisterCommandOptions = {}
   ): this {
     assertId('Command', descriptor.id);
@@ -273,7 +420,9 @@ export class CommandRegistry {
       parentId: options.parentId,
       extension: snapshotExtensionPolicy(options.extension),
       routeKeys: freezeRouteKeys(keys),
-      descriptor: snapshotCommandDescriptor(descriptor),
+      descriptor: snapshotCommandDescriptor(
+        descriptor as HostAideCommandDescriptor<TArgs>
+      ),
     });
 
     const acceptsChildren = routeAcceptsChildCommands(descriptor.route);

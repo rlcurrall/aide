@@ -1,10 +1,8 @@
 import { Effect } from 'effect';
 
-import type { OwnedPluginCapability } from '@cli/host/command-registry.js';
-import type { AidePullRequestProviderCapability } from '@cli/host/plugin-descriptor.js';
+import type { AideHostServices } from '@cli/host/runtime-context.js';
 import { corePullRequestProviderOwner } from '@cli/host/plugin-descriptor.js';
 import type { ResolvedPullRequestProvider } from './provider-resolver.js';
-import { resolvePullRequestProviderForRemote } from './provider-resolver.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import { loadAzureDevOpsConfig } from '@lib/config.js';
 import { GitHubClient } from '@lib/github-client.js';
@@ -34,18 +32,16 @@ function assertTrustedCoreRef(
   if (
     expectedOwner === undefined ||
     provider.pluginId !== expectedOwner ||
-    provider.capability.providerId !== kind
+    provider.providerId !== kind
   ) {
     throw new Error(
-      `Pull request provider '${provider.capability.providerId}' from plugin '${provider.pluginId}' cannot provide '${kind}' repository refs to the legacy platform bridge`
+      `Pull request provider '${provider.providerId}' from plugin '${provider.pluginId}' cannot provide '${kind}' repository refs to the legacy platform bridge`
     );
   }
 }
 
 function isTrustedCoreProvider(provider: ResolvedPullRequestProvider): boolean {
-  const expectedOwner = corePullRequestProviderOwner(
-    provider.capability.providerId
-  );
+  const expectedOwner = corePullRequestProviderOwner(provider.providerId);
   return expectedOwner !== undefined && provider.pluginId === expectedOwner;
 }
 
@@ -91,12 +87,12 @@ export async function platformContextFromPullRequestProvider(
 }
 
 export async function resolvePullRequestPlatformContextForRemote(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  hostServices: Pick<AideHostServices, 'resolvePullRequestProviderForRemote'>,
   remoteUrl: string,
   clients: PullRequestProviderContextClients = defaultClients
 ): Promise<PlatformContext> {
   const provider = await Effect.runPromise(
-    resolvePullRequestProviderForRemote(providers, remoteUrl, {
+    hostServices.resolvePullRequestProviderForRemote(remoteUrl, {
       preferred: isTrustedCoreProvider,
     })
   );

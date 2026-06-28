@@ -4,22 +4,44 @@ import { Effect } from 'effect';
 import {
   renderCommandResult,
   type AideCommandDescriptor,
+  type CommandResult,
+  type HostAideCommandDescriptor,
+  type ServiceFreeAideCommandDescriptor,
 } from './command-descriptor.js';
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js';
 import {
   attachAideHostContext,
   createAideHostServices,
+  AideHostServicesTag,
+  type AideHostServices,
 } from './runtime-context.js';
 
+export function commandModuleFromDescriptor<TArgs extends object, E>(
+  descriptor: ServiceFreeAideCommandDescriptor<TArgs, E>
+): CommandModule<object, TArgs>;
+export function commandModuleFromDescriptor<TArgs extends object, E>(
+  descriptor: HostAideCommandDescriptor<TArgs, E>,
+  services: AideHostServices
+): CommandModule<object, TArgs>;
 export function commandModuleFromDescriptor<TArgs extends object>(
-  descriptor: AideCommandDescriptor<TArgs>
+  descriptor: AideCommandDescriptor<TArgs, unknown, unknown>,
+  services?: AideHostServices
 ): CommandModule<object, TArgs> {
   return {
     command: descriptor.route,
     describe: descriptor.summary,
     builder: descriptor.yargs?.builder,
     handler: async (argv) => {
-      const result = await Effect.runPromise(descriptor.run(argv));
+      const commandEffect = descriptor.run(argv);
+      const runnable =
+        services === undefined
+          ? commandEffect
+          : commandEffect.pipe(
+              Effect.provideService(AideHostServicesTag, services)
+            );
+      const result = await Effect.runPromise(
+        runnable as Effect.Effect<CommandResult, unknown, never>
+      );
       renderCommandResult(result);
     },
   };
@@ -27,12 +49,13 @@ export function commandModuleFromDescriptor<TArgs extends object>(
 
 function commandModuleFromRegistryEntry(
   entry: RegisteredCommand,
-  registry: CommandRegistry
+  registry: CommandRegistry,
+  services: AideHostServices
 ): CommandModule<object, object> {
   const module =
     entry.kind === 'module'
       ? entry.module
-      : commandModuleFromDescriptor(entry.descriptor);
+      : commandModuleFromDescriptor(entry.descriptor, services);
   const children = registry.childCommands(entry.id);
   if (children.length === 0) return module;
 
@@ -50,7 +73,7 @@ function commandModuleFromRegistryEntry(
 
       for (const child of children) {
         configured = configured.command(
-          commandModuleFromRegistryEntry(child, registry)
+          commandModuleFromRegistryEntry(child, registry, services)
         );
       }
 
@@ -67,7 +90,7 @@ export function registerCommands(yargs: Argv, registry: CommandRegistry): Argv {
 
   for (const entry of registry.commands()) {
     configured = configured.command(
-      commandModuleFromRegistryEntry(entry, registry)
+      commandModuleFromRegistryEntry(entry, registry, services)
     );
   }
 

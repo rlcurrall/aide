@@ -82,8 +82,8 @@ export function buildWhoamiCommandEffect(
 
 export function makeWhoamiCommandDescriptor(
   opts: { ghAvailable?: () => boolean } = {}
-): AideCommandDescriptor<Args> {
-  return defineAideCommand<Args>({
+): AideCommandDescriptor<Args, WhoamiError, never> {
+  return defineAideCommand<Args, WhoamiError, never>({
     id: 'whoami',
     route: 'whoami [service]',
     summary: 'Show configured credentials and their source',

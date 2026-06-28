@@ -1,6 +1,8 @@
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 import type { Effect } from 'effect';
 
+import type { AideHostServicesTag } from './runtime-context.js';
+
 export type CommandRoute = string | readonly string[];
 
 export type CommandResult =
@@ -13,7 +15,11 @@ export function textResult(text: string): CommandResult {
 
 export const emptyResult: CommandResult = { _tag: 'Empty' };
 
-export interface AideCommandDescriptor<TArgs extends object = object> {
+export interface AideCommandDescriptor<
+  TArgs extends object = object,
+  E = unknown,
+  R = AideHostServicesTag,
+> {
   readonly id: string;
   readonly route: CommandRoute;
   readonly summary: string;
@@ -22,19 +28,43 @@ export interface AideCommandDescriptor<TArgs extends object = object> {
   };
   readonly run: (
     args: ArgumentsCamelCase<TArgs>
-  ) => Effect.Effect<CommandResult, unknown, never>;
+  ) => Effect.Effect<CommandResult, E, R>;
 }
 
-export type AnyAideCommandDescriptor = AideCommandDescriptor<object>;
+export type AnyAideCommandDescriptor = AideCommandDescriptor<
+  object,
+  unknown,
+  AideHostServicesTag
+>;
 
-export function defineAideCommand<TArgs extends object>(
-  descriptor: AideCommandDescriptor<TArgs>
-): AideCommandDescriptor<TArgs> {
+export type HostAideCommandDescriptor<
+  TArgs extends object = object,
+  E = unknown,
+> = AideCommandDescriptor<TArgs, E, AideHostServicesTag>;
+
+export type ServiceFreeAideCommandDescriptor<
+  TArgs extends object = object,
+  E = unknown,
+> = AideCommandDescriptor<TArgs, E, never>;
+
+export function defineAideCommand<
+  TArgs extends object,
+  E = unknown,
+  R = AideHostServicesTag,
+>(
+  descriptor: AideCommandDescriptor<TArgs, E, R>
+): AideCommandDescriptor<TArgs, E, R> {
   return descriptor;
 }
 
+export function eraseCommandDescriptor<TArgs extends object, E = unknown>(
+  descriptor: ServiceFreeAideCommandDescriptor<TArgs, E>
+): AnyAideCommandDescriptor;
+export function eraseCommandDescriptor<TArgs extends object, E = unknown>(
+  descriptor: HostAideCommandDescriptor<TArgs, E>
+): AnyAideCommandDescriptor;
 export function eraseCommandDescriptor<TArgs extends object>(
-  descriptor: AideCommandDescriptor<TArgs>
+  descriptor: AideCommandDescriptor<TArgs, unknown, unknown>
 ): AnyAideCommandDescriptor {
   return descriptor as unknown as AnyAideCommandDescriptor;
 }

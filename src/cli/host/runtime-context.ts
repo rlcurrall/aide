@@ -1,14 +1,41 @@
+import { Context, type Effect } from 'effect';
+
+import type { CommandRegistry } from './command-registry.js';
 import type {
-  CommandRegistry,
-  OwnedPluginCapability,
-} from './command-registry.js';
-import type { AidePullRequestProviderCapability } from './plugin-descriptor.js';
+  AidePullRequestRemoteMatch,
+  AidePullRequestUrlMatch,
+} from './plugin-descriptor.js';
+import {
+  resolvePullRequestProviderForRemote,
+  resolvePullRequestProviderForUrl,
+  type PullRequestProviderResolutionError,
+  type PullRequestProviderResolutionOptions,
+  type ResolvedPullRequestProvider,
+} from './pull-request-provider-resolver.js';
 
 const aideHostContextSymbol = Symbol.for('aide.hostContext');
 
 export interface AideHostServices {
-  readonly pullRequestProviders: () => readonly OwnedPluginCapability<AidePullRequestProviderCapability>[];
+  readonly resolvePullRequestProviderForRemote: (
+    remoteUrl: string,
+    options?: PullRequestProviderResolutionOptions<AidePullRequestRemoteMatch>
+  ) => Effect.Effect<
+    ResolvedPullRequestProvider<AidePullRequestRemoteMatch>,
+    PullRequestProviderResolutionError
+  >;
+  readonly resolvePullRequestProviderForUrl: (
+    url: string,
+    options?: PullRequestProviderResolutionOptions<AidePullRequestUrlMatch>
+  ) => Effect.Effect<
+    ResolvedPullRequestProvider<AidePullRequestUrlMatch>,
+    PullRequestProviderResolutionError
+  >;
 }
+
+export class AideHostServicesTag extends Context.Tag('AideHostServices')<
+  AideHostServicesTag,
+  AideHostServices
+>() {}
 
 export interface AideHostContext {
   readonly services: AideHostServices;
@@ -42,6 +69,18 @@ export function createAideHostServices(
 ): AideHostServices {
   const pullRequestProviders = registry.capabilities.pullRequestProviders();
   return Object.freeze({
-    pullRequestProviders: () => pullRequestProviders,
+    resolvePullRequestProviderForRemote: (
+      remoteUrl: string,
+      options: PullRequestProviderResolutionOptions<AidePullRequestRemoteMatch> = {}
+    ) =>
+      resolvePullRequestProviderForRemote(
+        pullRequestProviders,
+        remoteUrl,
+        options
+      ),
+    resolvePullRequestProviderForUrl: (
+      url: string,
+      options: PullRequestProviderResolutionOptions<AidePullRequestUrlMatch> = {}
+    ) => resolvePullRequestProviderForUrl(pullRequestProviders, url, options),
   });
 }

@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { Effect } from 'effect';
+import { Context, Effect } from 'effect';
 import yargs from 'yargs';
 
-import { textResult } from './command-descriptor.js';
+import { defineAideCommand, textResult } from './command-descriptor.js';
 import { createCommandRegistry } from './command-registry.js';
 import { createBuiltinCommandRegistry } from '@cli/plugins/builtin.js';
 import {
@@ -10,7 +10,11 @@ import {
   pluginCommandDescriptor,
   pluginCommandModule,
 } from './plugin-descriptor.js';
-import { getAideHostContext } from './runtime-context.js';
+import {
+  AideHostServicesTag,
+  createAideHostServices,
+  getAideHostContext,
+} from './runtime-context.js';
 import {
   commandModuleFromDescriptor,
   registerCommands,
@@ -27,7 +31,33 @@ const expectedPrChildCommandIds = [
   'pr:reply',
 ] as const;
 
+class UnsupportedDescriptorService extends Context.Tag(
+  'aide.test.UnsupportedDescriptorService'
+)<UnsupportedDescriptorService, { readonly value: string }>() {}
+
 describe('CommandRegistry', () => {
+  test('rejects plugin descriptors that require unsupported Effect services at compile time', () => {
+    const descriptor = defineAideCommand<
+      { value?: string },
+      never,
+      UnsupportedDescriptorService
+    >({
+      id: 'unsupported-service',
+      route: 'unsupported-service',
+      summary: 'Descriptor requiring a non-host service',
+      run: () =>
+        Effect.gen(function* () {
+          const service = yield* UnsupportedDescriptorService;
+          return textResult(service.value);
+        }),
+    });
+
+    // @ts-expect-error Plugin descriptors can only require host services, or no services.
+    const command = pluginCommandDescriptor(descriptor);
+
+    expect(command.id).toBe('unsupported-service');
+  });
+
   test('preserves built-in command order for demand messages and help', () => {
     const registry = createBuiltinCommandRegistry();
 
@@ -892,12 +922,15 @@ describe('commandModuleFromDescriptor', () => {
       await yargs(['sample'])
         .scriptName('aide')
         .command(
-          commandModuleFromDescriptor({
-            id: 'sample',
-            route: 'sample',
-            summary: 'Sample descriptor-backed command',
-            run: () => Effect.succeed(textResult('descriptor output')),
-          })
+          commandModuleFromDescriptor(
+            {
+              id: 'sample',
+              route: 'sample',
+              summary: 'Sample descriptor-backed command',
+              run: () => Effect.succeed(textResult('descriptor output')),
+            },
+            createAideHostServices(createCommandRegistry())
+          )
         )
         .strict()
         .exitProcess(false)
@@ -913,7 +946,8 @@ describe('commandModuleFromDescriptor', () => {
 describe('registerCommands', () => {
   test('attaches host context to legacy yargs module handlers', async () => {
     const registry = createCommandRegistry();
-    let observedProviderCount: number | undefined;
+    let observedCanResolvePullRequestProviders: boolean | undefined;
+    let observedRawProviderAccess: boolean | undefined;
     let observedHasRegistryProperty: boolean | undefined;
 
     registry.registerModule('sample', {
@@ -921,7 +955,12 @@ describe('registerCommands', () => {
       describe: 'Sample command',
       handler: (argv) => {
         const context = getAideHostContext(argv);
-        observedProviderCount = context?.services.pullRequestProviders().length;
+        observedCanResolvePullRequestProviders =
+          typeof context?.services.resolvePullRequestProviderForRemote ===
+          'function';
+        observedRawProviderAccess =
+          context !== null &&
+          'pullRequestProviders' in (context.services as object);
         observedHasRegistryProperty =
           context !== null && 'registry' in (context as object);
       },
@@ -934,13 +973,15 @@ describe('registerCommands', () => {
       .strict()
       .parseAsync();
 
-    expect(observedProviderCount).toBe(0);
+    expect(observedCanResolvePullRequestProviders).toBe(true);
+    expect(observedRawProviderAccess).toBe(false);
     expect(observedHasRegistryProperty).toBe(false);
   });
 
   test('attaches host context to nested legacy yargs module handlers', async () => {
     const registry = createCommandRegistry();
-    let observedProviderCount: number | undefined;
+    let observedCanResolvePullRequestProviders: boolean | undefined;
+    let observedRawProviderAccess: boolean | undefined;
 
     registry.registerModule('parent', {
       command: 'parent <command>',
@@ -950,8 +991,13 @@ describe('registerCommands', () => {
           command: 'child',
           describe: 'Child command',
           handler: (argv) => {
-            observedProviderCount =
-              getAideHostContext(argv)?.services.pullRequestProviders().length;
+            const services = getAideHostContext(argv)?.services;
+            observedCanResolvePullRequestProviders =
+              typeof services?.resolvePullRequestProviderForRemote ===
+              'function';
+            observedRawProviderAccess =
+              services !== undefined &&
+              'pullRequestProviders' in (services as object);
           },
         }),
       handler: () => {},
@@ -964,7 +1010,72 @@ describe('registerCommands', () => {
       .strict()
       .parseAsync();
 
-    expect(observedProviderCount).toBe(0);
+    expect(observedCanResolvePullRequestProviders).toBe(true);
+    expect(observedRawProviderAccess).toBe(false);
+  });
+
+  test('provides host services to descriptor commands through Effect context', async () => {
+    const registry = createCommandRegistry();
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.join(' '));
+    };
+
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'effect-provider-plugin',
+        summary: 'Effect provider plugin',
+        commands: [],
+        capabilities: {
+          pullRequestProvider: {
+            providerId: 'effect-provider',
+            priority: 100,
+            features: {},
+            authStatus: () => Effect.succeed({ state: 'configured' }),
+            matchRemote: (remoteUrl) =>
+              remoteUrl === 'effect-remote'
+                ? {
+                    source: 'git-remote',
+                    repository: {
+                      kind: 'external',
+                      providerId: 'effect-provider',
+                      displayName: 'Effect Provider',
+                    },
+                  }
+                : null,
+            matchPullRequestUrl: () => null,
+          },
+        },
+      })
+    );
+    registry.registerDescriptor({
+      id: 'sample',
+      route: 'sample',
+      summary: 'Sample descriptor-backed command',
+      run: () =>
+        Effect.gen(function* () {
+          const services = yield* AideHostServicesTag;
+          const provider =
+            yield* services.resolvePullRequestProviderForRemote(
+              'effect-remote'
+            );
+          return textResult(`${provider.pluginId}/${provider.providerId}`);
+        }),
+    });
+
+    try {
+      await registerCommands(
+        yargs(['sample']).scriptName('aide').exitProcess(false),
+        registry
+      )
+        .strict()
+        .parseAsync();
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(lines).toEqual(['effect-provider-plugin/effect-provider']);
   });
 
   test('composes registry child commands into parent yargs modules', async () => {
