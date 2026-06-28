@@ -12,8 +12,10 @@ import {
 } from './plugin-descriptor.js';
 import {
   AideHostServicesTag,
+  attachAideHostContext,
   createAideHostServices,
   getAideHostContext,
+  type AideHostContext,
 } from './runtime-context.js';
 import {
   commandModuleFromDescriptor,
@@ -941,6 +943,107 @@ describe('commandModuleFromDescriptor', () => {
 
     expect(lines).toEqual(['descriptor output']);
   });
+
+  test('provides host services to descriptors without hidden argv context', async () => {
+    const services = createAideHostServices(createCommandRegistry());
+    const lines: string[] = [];
+    let observedHiddenContext: boolean | undefined;
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.join(' '));
+    };
+
+    try {
+      await yargs(['sample'])
+        .scriptName('aide')
+        .command(
+          commandModuleFromDescriptor(
+            defineAideCommand<object, never, AideHostServicesTag>({
+              id: 'sample',
+              route: 'sample',
+              summary: 'Sample descriptor-backed command',
+              run: (argv) =>
+                Effect.gen(function* () {
+                  observedHiddenContext = getAideHostContext(argv) !== null;
+                  const hostServices = yield* AideHostServicesTag;
+                  return textResult(
+                    hostServices === services
+                      ? 'effect host services'
+                      : 'wrong services'
+                  );
+                }),
+            }),
+            services
+          )
+        )
+        .strict()
+        .exitProcess(false)
+        .parseAsync();
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(observedHiddenContext).toBe(false);
+    expect(lines).toEqual(['effect host services']);
+  });
+});
+
+describe('runtime host context bridge', () => {
+  test('stores legacy host context outside argv properties', () => {
+    const argv = {};
+    const context: AideHostContext = {
+      services: createAideHostServices(createCommandRegistry()),
+    };
+
+    attachAideHostContext(argv, context);
+
+    expect(getAideHostContext(argv)?.services).toBe(context.services);
+    expect(Object.keys(argv)).toEqual([]);
+    expect(Object.getOwnPropertySymbols(argv)).not.toContain(
+      Symbol.for('aide.hostContext')
+    );
+    expect(
+      (argv as Record<PropertyKey, unknown>)[Symbol.for('aide.hostContext')]
+    ).toBeUndefined();
+  });
+
+  test('ignores forged global symbol host context values', () => {
+    const argv = {};
+    const realContext: AideHostContext = {
+      services: createAideHostServices(createCommandRegistry()),
+    };
+    const forgedContext: AideHostContext = {
+      services: createAideHostServices(createCommandRegistry()),
+    };
+
+    Object.defineProperty(argv, Symbol.for('aide.hostContext'), {
+      value: forgedContext,
+      enumerable: true,
+      configurable: true,
+    });
+    attachAideHostContext(argv, realContext);
+
+    expect(
+      (argv as Record<PropertyKey, unknown>)[Symbol.for('aide.hostContext')]
+    ).toBe(forgedContext);
+    expect(getAideHostContext(argv)).not.toBe(forgedContext);
+    expect(getAideHostContext(argv)?.services).toBe(realContext.services);
+  });
+
+  test('does not overwrite an attached host context', () => {
+    const argv = {};
+    const firstContext: AideHostContext = {
+      services: createAideHostServices(createCommandRegistry()),
+    };
+    const secondContext: AideHostContext = {
+      services: createAideHostServices(createCommandRegistry()),
+    };
+
+    attachAideHostContext(argv, firstContext);
+    attachAideHostContext(argv, secondContext);
+
+    expect(getAideHostContext(argv)?.services).toBe(firstContext.services);
+  });
 });
 
 describe('registerCommands', () => {
@@ -976,6 +1079,80 @@ describe('registerCommands', () => {
     expect(observedCanResolvePullRequestProviders).toBe(true);
     expect(observedRawProviderAccess).toBe(false);
     expect(observedHasRegistryProperty).toBe(false);
+  });
+
+  test('does not let legacy handlers forge host context through global symbols', async () => {
+    const registry = createCommandRegistry();
+    const forgedContext: AideHostContext = {
+      services: createAideHostServices(createCommandRegistry()),
+    };
+    let observedGlobalSymbolIsForged: boolean | undefined;
+    let observedContextIsForged: boolean | undefined;
+    let observedCanResolvePullRequestProviders: boolean | undefined;
+
+    registry.registerModule('sample', {
+      command: 'sample',
+      describe: 'Sample command',
+      handler: (argv) => {
+        Object.defineProperty(argv, Symbol.for('aide.hostContext'), {
+          value: forgedContext,
+          enumerable: true,
+          configurable: true,
+        });
+        const context = getAideHostContext(argv);
+        observedGlobalSymbolIsForged =
+          (argv as Record<PropertyKey, unknown>)[
+            Symbol.for('aide.hostContext')
+          ] === forgedContext;
+        observedContextIsForged = context === forgedContext;
+        observedCanResolvePullRequestProviders =
+          typeof context?.services.resolvePullRequestProviderForRemote ===
+          'function';
+      },
+    });
+
+    await registerCommands(
+      yargs(['sample']).scriptName('aide').exitProcess(false),
+      registry
+    )
+      .strict()
+      .parseAsync();
+
+    expect(observedGlobalSymbolIsForged).toBe(true);
+    expect(observedContextIsForged).toBe(false);
+    expect(observedCanResolvePullRequestProviders).toBe(true);
+  });
+
+  test('does not let legacy handlers overwrite attached host context', async () => {
+    const registry = createCommandRegistry();
+    const forgedContext: AideHostContext = {
+      services: createAideHostServices(createCommandRegistry()),
+    };
+    let observedContextIsForged: boolean | undefined;
+    let observedCanResolvePullRequestProviders: boolean | undefined;
+
+    registry.registerModule('sample', {
+      command: 'sample',
+      describe: 'Sample command',
+      handler: (argv) => {
+        attachAideHostContext(argv, forgedContext);
+        const context = getAideHostContext(argv);
+        observedContextIsForged = context === forgedContext;
+        observedCanResolvePullRequestProviders =
+          typeof context?.services.resolvePullRequestProviderForRemote ===
+          'function';
+      },
+    });
+
+    await registerCommands(
+      yargs(['sample']).scriptName('aide').exitProcess(false),
+      registry
+    )
+      .strict()
+      .parseAsync();
+
+    expect(observedContextIsForged).toBe(false);
+    expect(observedCanResolvePullRequestProviders).toBe(true);
   });
 
   test('attaches host context to nested legacy yargs module handlers', async () => {
@@ -1014,9 +1191,67 @@ describe('registerCommands', () => {
     expect(observedRawProviderAccess).toBe(false);
   });
 
+  test('attaches host context to legacy builder string-overload handlers', async () => {
+    const registry = createCommandRegistry();
+    let observedCanResolvePullRequestProviders: boolean | undefined;
+
+    registry.registerModule('parent', {
+      command: 'parent <command>',
+      describe: 'Parent command',
+      builder: (yargs) =>
+        yargs.command('child', 'Child command', {}, (argv) => {
+          const services = getAideHostContext(argv)?.services;
+          observedCanResolvePullRequestProviders =
+            typeof services?.resolvePullRequestProviderForRemote === 'function';
+        }),
+      handler: () => {},
+    });
+
+    await registerCommands(
+      yargs(['parent', 'child']).scriptName('aide').exitProcess(false),
+      registry
+    )
+      .strict()
+      .parseAsync();
+
+    expect(observedCanResolvePullRequestProviders).toBe(true);
+  });
+
+  test('attaches host context to legacy builder route-module overload handlers', async () => {
+    const registry = createCommandRegistry();
+    let observedCanResolvePullRequestProviders: boolean | undefined;
+
+    registry.registerModule('parent', {
+      command: 'parent <command>',
+      describe: 'Parent command',
+      builder: (yargs) =>
+        yargs.command('child', 'Child command', {
+          command: 'child',
+          describe: 'Child command',
+          handler: (argv) => {
+            const services = getAideHostContext(argv)?.services;
+            observedCanResolvePullRequestProviders =
+              typeof services?.resolvePullRequestProviderForRemote ===
+              'function';
+          },
+        }),
+      handler: () => {},
+    });
+
+    await registerCommands(
+      yargs(['parent', 'child']).scriptName('aide').exitProcess(false),
+      registry
+    )
+      .strict()
+      .parseAsync();
+
+    expect(observedCanResolvePullRequestProviders).toBe(true);
+  });
+
   test('provides host services to descriptor commands through Effect context', async () => {
     const registry = createCommandRegistry();
     const lines: string[] = [];
+    let observedHiddenContext: boolean | undefined;
     const originalLog = console.log;
     console.log = (...args: unknown[]) => {
       lines.push(args.join(' '));
@@ -1053,8 +1288,9 @@ describe('registerCommands', () => {
       id: 'sample',
       route: 'sample',
       summary: 'Sample descriptor-backed command',
-      run: () =>
+      run: (argv) =>
         Effect.gen(function* () {
+          observedHiddenContext = getAideHostContext(argv) !== null;
           const services = yield* AideHostServicesTag;
           const provider =
             yield* services.resolvePullRequestProviderForRemote(
@@ -1075,6 +1311,7 @@ describe('registerCommands', () => {
       console.log = originalLog;
     }
 
+    expect(observedHiddenContext).toBe(false);
     expect(lines).toEqual(['effect-provider-plugin/effect-provider']);
   });
 

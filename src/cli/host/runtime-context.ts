@@ -25,7 +25,7 @@ import {
   type ResolvedPullRequestProvider,
 } from './pull-request-provider-resolver.js';
 
-const aideHostContextSymbol = Symbol.for('aide.hostContext');
+const aideHostContexts = new WeakMap<object, AideHostContext>();
 
 export interface AideHostServices {
   readonly resolvePullRequestProviderForRemote: (
@@ -84,19 +84,19 @@ export interface AideHostContext {
   readonly services: AideHostServices;
 }
 
-type AideHostContextCarrier = {
-  [aideHostContextSymbol]?: AideHostContext;
-};
-
+/** @internal Legacy yargs bridge. Descriptor commands should use Effect context. */
 export function attachAideHostContext<TArgv extends object>(
   argv: TArgv,
   context: AideHostContext
 ): TArgv {
-  Object.defineProperty(argv, aideHostContextSymbol, {
-    value: context,
-    enumerable: false,
-    configurable: true,
-  });
+  if (!aideHostContexts.has(argv)) {
+    aideHostContexts.set(
+      argv,
+      Object.freeze({
+        services: context.services,
+      })
+    );
+  }
   return argv;
 }
 
@@ -104,7 +104,7 @@ export function getAideHostContext(argv: unknown): AideHostContext | null {
   if (argv === null || typeof argv !== 'object') {
     return null;
   }
-  return (argv as AideHostContextCarrier)[aideHostContextSymbol] ?? null;
+  return aideHostContexts.get(argv) ?? null;
 }
 
 export function createAideHostServices(
