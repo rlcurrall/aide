@@ -2,6 +2,8 @@ import { Effect } from 'effect';
 
 import {
   defineAidePlugin,
+  type AidePullRequestBranchLookupRequest,
+  type AidePullRequestBranchLookupResult,
   type AidePullRequestListRequest,
   type AidePullRequestListResult,
   type AidePullRequestViewRequest,
@@ -176,6 +178,69 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
       catch: (error) => error,
     });
 
+  const findPullRequestForBranch = (
+    request: AidePullRequestBranchLookupRequest
+  ): Effect.Effect<AidePullRequestBranchLookupResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot find pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient();
+        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
+        if (configuredOrg !== null && configuredOrg !== repository.org) {
+          throw new Error(
+            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
+          );
+        }
+
+        const response = await client.listPullRequests(
+          repository.project,
+          repository.repo,
+          {
+            sourceRefName: `refs/heads/${request.branch}`,
+            status: 'all',
+          }
+        );
+        const selected = selectAzureDevOpsPullRequestForBranch(response.value);
+        if (selected === undefined) {
+          throw new Error(
+            `No pull request found for branch '${request.branch}'.\n\nTo create a PR, push your branch and create one in Azure DevOps, or specify a PR ID directly:\n  aide ado comments <pr-id>`
+          );
+        }
+
+        const [pr, labelsResponse] = await Promise.all([
+          client.getPullRequest(
+            repository.project,
+            repository.repo,
+            selected.pullRequestId
+          ),
+          client.getPullRequestLabels(
+            repository.project,
+            repository.repo,
+            selected.pullRequestId
+          ),
+        ]);
+
+        return {
+          branch: request.branch,
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: azureDevOpsPullRequestToViewItem(
+            pr,
+            labelsResponse.value
+              .filter((label) => label.active)
+              .map((label) => label.name)
+          ),
+        };
+      },
+      catch: (error) => error,
+    });
+
   return defineAidePlugin({
     id: 'azure-devops',
     summary: 'Azure DevOps pull request provider',
@@ -226,6 +291,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
         operations: {
           listPullRequests,
           getPullRequest,
+          findPullRequestForBranch,
         },
       },
     },
@@ -264,6 +330,25 @@ function azureDevOpsPullRequestToListItem(pr: AzureDevOpsPullRequest) {
     ...(pr.description === undefined ? {} : { description: pr.description }),
     draft: pr.isDraft ?? false,
   } as const;
+}
+
+function selectAzureDevOpsPullRequestForBranch(
+  prs: readonly AzureDevOpsPullRequest[]
+): AzureDevOpsPullRequest | undefined {
+  if (prs.length === 1) {
+    return prs[0];
+  }
+
+  const activePRs = prs.filter((pr) => pr.status === 'active');
+  if (activePRs.length === 1) {
+    return activePRs[0];
+  }
+
+  const candidates = activePRs.length > 0 ? activePRs : prs;
+  return [...candidates].sort(
+    (a, b) =>
+      new Date(b.creationDate).getTime() - new Date(a.creationDate).getTime()
+  )[0];
 }
 
 function azureDevOpsPullRequestToViewItem(

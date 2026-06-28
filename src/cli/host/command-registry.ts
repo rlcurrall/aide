@@ -143,6 +143,7 @@ function snapshotPullRequestProviderOperations(
 
   const listPullRequests = operations.listPullRequests;
   const getPullRequest = operations.getPullRequest;
+  const findPullRequestForBranch = operations.findPullRequestForBranch;
   if (
     listPullRequests !== undefined &&
     typeof listPullRequests !== 'function'
@@ -156,8 +157,20 @@ function snapshotPullRequestProviderOperations(
       `Plugin '${pluginId}' pull request provider '${providerId}' operation 'getPullRequest' must be a function`
     );
   }
+  if (
+    findPullRequestForBranch !== undefined &&
+    typeof findPullRequestForBranch !== 'function'
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' pull request provider '${providerId}' operation 'findPullRequestForBranch' must be a function`
+    );
+  }
 
-  if (listPullRequests === undefined && getPullRequest === undefined) {
+  if (
+    listPullRequests === undefined &&
+    getPullRequest === undefined &&
+    findPullRequestForBranch === undefined
+  ) {
     return Object.freeze({});
   }
 
@@ -173,6 +186,12 @@ function snapshotPullRequestProviderOperations(
       : {
           getPullRequest:
             getPullRequest as AidePullRequestProviderOperations['getPullRequest'],
+        }),
+    ...(findPullRequestForBranch === undefined
+      ? {}
+      : {
+          findPullRequestForBranch:
+            findPullRequestForBranch as AidePullRequestProviderOperations['findPullRequestForBranch'],
         }),
   });
 }

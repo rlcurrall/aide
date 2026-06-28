@@ -2,6 +2,8 @@ import { Context, type Effect } from 'effect';
 
 import type { CommandRegistry } from './command-registry.js';
 import type {
+  AidePullRequestBranchLookupRequest,
+  AidePullRequestBranchLookupResult,
   AidePullRequestListRequest,
   AidePullRequestListResult,
   AidePullRequestRemoteMatch,
@@ -10,6 +12,7 @@ import type {
   AidePullRequestViewResult,
 } from './plugin-descriptor.js';
 import {
+  findPullRequestForBranchForRemote,
   getPullRequestForRemote,
   getPullRequestForUrl,
   listPullRequestsForRemote,
@@ -53,6 +56,14 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestViewResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly findPullRequestForBranchForRemote: (
+    remoteUrl: string,
+    request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestBranchLookupResult,
     PullRequestProviderOperationInvocationError
   >;
   readonly getPullRequestForUrl: (
@@ -131,6 +142,17 @@ export function createAideHostServices(
       options: PullRequestProviderOperationOptions = {}
     ) =>
       getPullRequestForRemote(
+        pullRequestProviders,
+        remoteUrl,
+        request,
+        options
+      ),
+    findPullRequestForBranchForRemote: (
+      remoteUrl: string,
+      request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      findPullRequestForBranchForRemote(
         pullRequestProviders,
         remoteUrl,
         request,

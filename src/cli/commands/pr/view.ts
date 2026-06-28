@@ -11,11 +11,21 @@ import type {
   AidePullRequestViewItem,
   AidePullRequestViewResult,
 } from '@cli/host/plugin-descriptor.js';
+import {
+  PullRequestProviderOperationError,
+  PullRequestProviderOperationTimeoutError,
+  UnsupportedPullRequestProviderError,
+  UnsupportedPullRequestProviderOperationError,
+} from '@cli/host/pull-request-provider-resolver.js';
 import { getAideHostContext } from '@cli/host/runtime-context.js';
 import { MissingRepoContextError, validatePRId } from '@lib/ado-utils.js';
 import { logProgress } from '@lib/cli-utils.js';
 import { handleCommandError } from '@lib/errors.js';
-import { extractBranchName, getGitRemoteUrl } from '@lib/git-utils.js';
+import {
+  extractBranchName,
+  getCurrentBranch,
+  getGitRemoteUrl,
+} from '@lib/git-utils.js';
 import type { GitHubPullRequest } from '@lib/github-types.js';
 import {
   DEFAULT_GITHUB_HOST,
@@ -122,7 +132,7 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
 
   try {
     const resolved =
-      (await resolveProviderPullRequestView(argv, args)) ??
+      (await resolveProviderPullRequestView(argv, args, format)) ??
       (await resolveLegacyPullRequestView(args, format));
 
     if (resolved.autoDiscovered) {
@@ -141,14 +151,51 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
 
 async function resolveProviderPullRequestView(
   argv: ArgumentsCamelCase<ViewArgs>,
-  args: ViewArgs
+  args: ViewArgs,
+  format: OutputFormat
 ): Promise<{
   readonly result: AidePullRequestViewResult;
   readonly autoDiscovered: boolean;
 } | null> {
   const hostContext = getAideHostContext(argv);
-  if (hostContext === null || args.pr === undefined) {
+  if (hostContext === null) {
     return null;
+  }
+
+  const hasExplicitRepoContext =
+    args.project !== undefined || args.repo !== undefined;
+
+  if (args.pr === undefined) {
+    if (hasExplicitRepoContext) {
+      return null;
+    }
+
+    const remoteUrl = getGitRemoteUrl();
+    const branch = getCurrentBranch();
+    if (!remoteUrl || !branch) {
+      return null;
+    }
+
+    logProgress(`Searching for PR from branch '${branch}'...`, format);
+    let result: AidePullRequestViewResult;
+    try {
+      result = await Effect.runPromise(
+        hostContext.services.findPullRequestForBranchForRemote(remoteUrl, {
+          branch,
+        })
+      );
+    } catch (error) {
+      if (isProviderBranchLookupFallbackEligible(error)) {
+        return null;
+      }
+      throw error;
+    }
+    logProgress(
+      `Found PR #${result.pullRequest.id}: ${result.pullRequest.title}`,
+      format
+    );
+    logProgress('', format);
+    return { result, autoDiscovered: true };
   }
 
   if (args.pr.startsWith('http')) {
@@ -158,8 +205,6 @@ async function resolveProviderPullRequestView(
     return { result, autoDiscovered: false };
   }
 
-  const hasExplicitRepoContext =
-    args.project !== undefined || args.repo !== undefined;
   if (hasExplicitRepoContext) {
     return null;
   }
@@ -180,6 +225,15 @@ async function resolveProviderPullRequestView(
     })
   );
   return { result, autoDiscovered: true };
+}
+
+function isProviderBranchLookupFallbackEligible(error: unknown): boolean {
+  return (
+    error instanceof UnsupportedPullRequestProviderError ||
+    error instanceof UnsupportedPullRequestProviderOperationError ||
+    error instanceof PullRequestProviderOperationError ||
+    error instanceof PullRequestProviderOperationTimeoutError
+  );
 }
 
 async function resolveLegacyPullRequestView(

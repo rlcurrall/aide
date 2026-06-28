@@ -174,6 +174,15 @@ export interface AidePullRequestViewResult {
   readonly pullRequest: AidePullRequestViewItem;
 }
 
+export interface AidePullRequestBranchLookupRequest {
+  readonly match: AidePullRequestRemoteMatch;
+  readonly branch: string;
+}
+
+export interface AidePullRequestBranchLookupResult extends AidePullRequestViewResult {
+  readonly branch: string;
+}
+
 export interface AidePullRequestProviderOperations {
   readonly listPullRequests?: (
     request: AidePullRequestListRequest
@@ -181,6 +190,9 @@ export interface AidePullRequestProviderOperations {
   readonly getPullRequest?: (
     request: AidePullRequestViewRequest
   ) => Effect.Effect<AidePullRequestViewResult, unknown, never>;
+  readonly findPullRequestForBranch?: (
+    request: AidePullRequestBranchLookupRequest
+  ) => Effect.Effect<AidePullRequestBranchLookupResult, unknown, never>;
 }
 
 export interface AidePullRequestProviderCapability {

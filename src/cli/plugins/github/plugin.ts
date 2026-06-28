@@ -2,6 +2,8 @@ import { Effect } from 'effect';
 
 import {
   defineAidePlugin,
+  type AidePullRequestBranchLookupRequest,
+  type AidePullRequestBranchLookupResult,
   type AidePullRequestListRequest,
   type AidePullRequestListResult,
   type AidePullRequestListItemStatus,
@@ -158,6 +160,50 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
       catch: (error) => error,
     });
 
+  const findPullRequestForBranch = (
+    request: AidePullRequestBranchLookupRequest
+  ): Effect.Effect<AidePullRequestBranchLookupResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'github') {
+          throw new Error(
+            `GitHub provider cannot find pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const client = await createClient({ host: repository.host });
+        const prs = await client.listPullRequests(
+          repository.owner,
+          repository.repo,
+          {
+            head: `${repository.owner}:${request.branch}`,
+            state: 'all',
+          }
+        );
+        const selected = selectGitHubPullRequestForBranch(prs);
+        if (selected === undefined) {
+          throw new Error(
+            `No pull request found for branch '${request.branch}'.\n\nTo create a PR, push your branch and run:\n  aide pr create --title "Your PR title"`
+          );
+        }
+
+        const pr = await client.getPullRequest(
+          repository.owner,
+          repository.repo,
+          selected.number
+        );
+
+        return {
+          branch: request.branch,
+          repository,
+          repositoryLabel: `${repository.host}/${repository.owner}/${repository.repo}`,
+          pullRequest: githubPullRequestToViewItem(pr),
+        };
+      },
+      catch: (error) => error,
+    });
+
   return defineAidePlugin({
     id: 'github',
     summary: 'GitHub pull request provider',
@@ -209,6 +255,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         operations: {
           listPullRequests,
           getPullRequest,
+          findPullRequestForBranch,
         },
       },
     },
@@ -246,6 +293,25 @@ function githubPullRequestToListItem(pr: GitHubPullRequest) {
     url: pr.html_url,
     draft: pr.draft,
   } as const;
+}
+
+function selectGitHubPullRequestForBranch(
+  prs: readonly GitHubPullRequest[]
+): GitHubPullRequest | undefined {
+  if (prs.length === 1) {
+    return prs[0];
+  }
+
+  const openPRs = prs.filter((pr) => pr.state === 'open');
+  if (openPRs.length === 1) {
+    return openPRs[0];
+  }
+
+  const candidates = openPRs.length > 0 ? openPRs : prs;
+  return [...candidates].sort(
+    (a, b) =>
+      new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  )[0];
 }
 
 function githubPullRequestToViewItem(pr: GitHubPullRequest) {
