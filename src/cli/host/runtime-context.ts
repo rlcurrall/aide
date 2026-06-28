@@ -6,8 +6,12 @@ import type {
   AidePullRequestListResult,
   AidePullRequestRemoteMatch,
   AidePullRequestUrlMatch,
+  AidePullRequestViewRequest,
+  AidePullRequestViewResult,
 } from './plugin-descriptor.js';
 import {
+  getPullRequestForRemote,
+  getPullRequestForUrl,
   listPullRequestsForRemote,
   type PullRequestProviderOperationInvocationError,
   resolvePullRequestProviderForRemote,
@@ -41,6 +45,21 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestListResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly getPullRequestForRemote: (
+    remoteUrl: string,
+    request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestViewResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly getPullRequestForUrl: (
+    url: string,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestViewResult,
     PullRequestProviderOperationInvocationError
   >;
 }
@@ -106,5 +125,20 @@ export function createAideHostServices(
         request,
         options
       ),
+    getPullRequestForRemote: (
+      remoteUrl: string,
+      request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      getPullRequestForRemote(
+        pullRequestProviders,
+        remoteUrl,
+        request,
+        options
+      ),
+    getPullRequestForUrl: (
+      url: string,
+      options: PullRequestProviderOperationOptions = {}
+    ) => getPullRequestForUrl(pullRequestProviders, url, options),
   });
 }

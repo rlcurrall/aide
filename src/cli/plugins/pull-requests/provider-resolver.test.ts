@@ -36,6 +36,8 @@ import {
   PullRequestProviderInvocationError,
   UnsupportedPullRequestProviderOperationError,
   UnsupportedPullRequestProviderError,
+  getPullRequestForRemote,
+  getPullRequestForUrl,
   listPullRequestsForRemote,
   resolvePullRequestProviderForRemote,
   resolvePullRequestProviderForUrl,
@@ -43,11 +45,15 @@ import {
   resolvePullRequestProviderFromRegistryForUrl,
 } from './provider-resolver.js';
 
-function externalRepository(providerId: string) {
+function externalRepository(
+  providerId: string,
+  metadata?: Readonly<Record<string, string | number | boolean>>
+) {
   return {
     kind: 'external',
     providerId,
     displayName: providerId,
+    ...(metadata === undefined ? {} : { metadata }),
   } as const;
 }
 
@@ -877,6 +883,8 @@ describe('pull request provider list operations', () => {
               }),
             ];
           },
+          getPullRequest: async () =>
+            fakeGitHubPullRequest({ number: 1, title: 'Unused' }),
         };
       },
     });
@@ -944,6 +952,12 @@ describe('pull request provider list operations', () => {
               ],
             };
           },
+          getPullRequest: async () =>
+            fakeAzureDevOpsPullRequest({
+              pullRequestId: 1,
+              title: 'Unused',
+            }),
+          getPullRequestLabels: async () => ({ value: [] }),
         },
       }),
     });
@@ -1164,6 +1178,58 @@ describe('pull request provider list operations', () => {
     );
   });
 
+  test('rejects listPullRequests results with mismatched external repository metadata', async () => {
+    const provider = fakeProvider(
+      'gitlab-plugin',
+      'gitlab',
+      100,
+      {
+        source: 'git-remote',
+        priority: 100,
+        repository: externalRepository('gitlab', { projectId: 1 }),
+      },
+      undefined
+    );
+    const error = await Effect.runPromise(
+      listPullRequestsForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                listPullRequests: () =>
+                  Effect.succeed({
+                    repository: externalRepository('gitlab', { projectId: 2 }),
+                    pullRequests: [
+                      {
+                        id: 1,
+                        title: 'Wrong repo metadata',
+                        status: 'active',
+                        createdAt: '2026-01-01T00:00:00Z',
+                        author: { displayName: 'Ada Lovelace' },
+                      },
+                    ],
+                  }),
+              },
+            },
+          },
+        ],
+        'matched-remote'
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.reason).toBe(
+      'repository ref does not match selected provider match'
+    );
+  });
+
   test('wraps provider operation failures', async () => {
     const plugin = createAzureDevOpsPlugin({
       createClient: async () => ({
@@ -1174,6 +1240,12 @@ describe('pull request provider list operations', () => {
         },
         client: {
           listPullRequests: async () => ({ value: [] }),
+          getPullRequest: async () =>
+            fakeAzureDevOpsPullRequest({
+              pullRequestId: 1,
+              title: 'Unused',
+            }),
+          getPullRequestLabels: async () => ({ value: [] }),
         },
       }),
     });
@@ -1223,6 +1295,265 @@ describe('pull request provider list operations', () => {
     }
     expect(error._tag).toBe('PullRequestProviderOperationTimeoutError');
     expect(error.providerId).toBe('slow-provider');
+  });
+});
+
+describe('pull request provider view operations', () => {
+  test('gets a GitHub pull request through a provider-owned operation', async () => {
+    const calls: unknown[] = [];
+    const plugin = createGitHubPlugin({
+      createClient: async ({ host }) => {
+        calls.push(host);
+        return {
+          listPullRequests: async () => [],
+          getPullRequest: async (owner, repo, number) => {
+            calls.push({ owner, repo, number });
+            return fakeGitHubPullRequest({
+              number,
+              title: 'GitHub detail',
+              userLogin: 'octo',
+              head: {
+                ref: 'feature/github-detail',
+                sha: 'abc',
+                label: 'octo:feature/github-detail',
+              },
+              base: {
+                ref: 'main',
+                sha: 'def',
+                label: 'acme:main',
+              },
+              labels: [{ id: 1, name: 'feature', color: '0f0' }],
+            });
+          },
+        };
+      },
+    });
+
+    const result = await Effect.runPromise(
+      getPullRequestForRemote(
+        [
+          {
+            pluginId: plugin.id,
+            capability: plugin.capabilities!.pullRequestProvider!,
+          },
+        ],
+        'git@github.com:acme/widgets.git',
+        { pullRequest: { number: 12 } }
+      )
+    );
+
+    expect(calls).toEqual([
+      'github.com',
+      { owner: 'acme', repo: 'widgets', number: 12 },
+    ]);
+    expect(result.repositoryLabel).toBe('github.com/acme/widgets');
+    expect(result.pullRequest).toMatchObject({
+      id: 12,
+      title: 'GitHub detail',
+      status: 'active',
+      author: { displayName: 'octo', username: 'octo' },
+      sourceBranch: 'feature/github-detail',
+      targetBranch: 'main',
+      labels: ['feature'],
+      url: 'https://github.com/acme/widgets/pull/12',
+    });
+  });
+
+  test('gets an Azure DevOps pull request through a URL provider match', async () => {
+    const calls: unknown[] = [];
+    const plugin = createAzureDevOpsPlugin({
+      createClient: async () => ({
+        config: {
+          orgUrl: 'https://dev.azure.com/acme',
+          pat: 'token',
+          authMethod: 'pat',
+        },
+        client: {
+          listPullRequests: async () => ({ value: [] }),
+          getPullRequest: async (project, repo, number) => {
+            calls.push({ project, repo, number });
+            return fakeAzureDevOpsPullRequest({
+              pullRequestId: number,
+              title: 'ADO detail',
+              sourceRefName: 'refs/heads/feature/ado-detail',
+              targetRefName: 'refs/heads/main',
+            });
+          },
+          getPullRequestLabels: async (project, repo, number) => {
+            calls.push({ labelsFor: { project, repo, number } });
+            return {
+              value: [
+                { id: '1', name: 'ready', active: true, url: 'label-url' },
+                { id: '2', name: 'stale', active: false, url: 'label-url' },
+              ],
+            };
+          },
+        },
+      }),
+    });
+
+    const result = await Effect.runPromise(
+      getPullRequestForUrl(
+        [
+          {
+            pluginId: plugin.id,
+            capability: plugin.capabilities!.pullRequestProvider!,
+          },
+        ],
+        'https://dev.azure.com/acme/Platform/_git/widgets/pullrequest/42'
+      )
+    );
+
+    expect(calls).toEqual([
+      { project: 'Platform', repo: 'widgets', number: 42 },
+      { labelsFor: { project: 'Platform', repo: 'widgets', number: 42 } },
+    ]);
+    expect(result.repositoryLabel).toBe('acme/Platform/widgets');
+    expect(result.pullRequest).toMatchObject({
+      id: 42,
+      title: 'ADO detail',
+      sourceBranch: 'feature/ado-detail',
+      targetBranch: 'main',
+      labels: ['ready'],
+    });
+  });
+
+  test('rejects providers that do not implement getPullRequest', async () => {
+    const error = await Effect.runPromise(
+      getPullRequestForRemote(
+        [fakeProvider('gitlab-plugin', 'gitlab', 100)],
+        'matched-remote',
+        { pullRequest: { number: 1 } }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(UnsupportedPullRequestProviderOperationError);
+    if (!(error instanceof UnsupportedPullRequestProviderOperationError)) {
+      throw new Error('Expected unsupported provider operation error');
+    }
+    expect(error.operation).toBe('getPullRequest');
+  });
+
+  test('rejects getPullRequest operations that do not return Effects', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+    const error = await Effect.runPromise(
+      getPullRequestForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                getPullRequest: () => ({}) as never,
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 1 } }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.operation).toBe('getPullRequest');
+    expect(error.reason).toBe('operation must return an Effect');
+  });
+
+  test('rejects getPullRequest results for a different pull request id', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+    const error = await Effect.runPromise(
+      getPullRequestForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                getPullRequest: () =>
+                  Effect.succeed({
+                    repository: externalRepository('gitlab'),
+                    pullRequest: {
+                      id: 2,
+                      title: 'Wrong PR',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Ada Lovelace' },
+                    },
+                  }),
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 1 } }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.reason).toBe(
+      'pull request id does not match selected pull request'
+    );
+  });
+
+  test('rejects getPullRequest results with mismatched external repository metadata', async () => {
+    const provider = fakeProvider(
+      'gitlab-plugin',
+      'gitlab',
+      100,
+      {
+        source: 'git-remote',
+        priority: 100,
+        repository: externalRepository('gitlab', { projectId: 1 }),
+      },
+      undefined
+    );
+    const error = await Effect.runPromise(
+      getPullRequestForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                getPullRequest: () =>
+                  Effect.succeed({
+                    repository: externalRepository('gitlab', { projectId: 2 }),
+                    pullRequest: {
+                      id: 1,
+                      title: 'Wrong repo metadata',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Ada Lovelace' },
+                    },
+                  }),
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 1 } }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.reason).toBe(
+      'repository ref does not match selected provider match'
+    );
   });
 });
 

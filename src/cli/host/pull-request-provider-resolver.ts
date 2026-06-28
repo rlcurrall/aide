@@ -17,6 +17,9 @@ import type {
   AidePullRequestRemoteMatch,
   AidePullRequestRepositoryRef,
   AidePullRequestUrlMatch,
+  AidePullRequestViewItem,
+  AidePullRequestViewRequest,
+  AidePullRequestViewResult,
 } from './plugin-descriptor.js';
 
 export type PullRequestProviderLookupSource =
@@ -331,9 +334,29 @@ function repositoryRefsMatch(
       if (expected.kind !== 'external') return false;
       return (
         actual.providerId === expected.providerId &&
-        actual.displayName === expected.displayName
+        actual.displayName === expected.displayName &&
+        repositoryMetadataMatches(actual.metadata, expected.metadata)
       );
   }
+}
+
+function repositoryMetadataMatches(
+  actual: Extract<
+    AidePullRequestRepositoryRef,
+    { kind: 'external' }
+  >['metadata'],
+  expected: Extract<
+    AidePullRequestRepositoryRef,
+    { kind: 'external' }
+  >['metadata']
+): boolean {
+  const actualEntries = Object.entries(actual ?? {});
+  const expectedEntries = Object.entries(expected ?? {});
+  if (actualEntries.length !== expectedEntries.length) {
+    return false;
+  }
+
+  return actualEntries.every(([key, value]) => expected?.[key] === value);
 }
 
 function snapshotPullRequestRef(value: unknown): AidePullRequestRef | null {
@@ -429,6 +452,40 @@ function snapshotPullRequestListItem(
   });
 }
 
+function snapshotPullRequestViewItem(
+  value: unknown
+): AidePullRequestViewItem | null {
+  const base = snapshotPullRequestListItem(value);
+  if (base === null || !isRecord(value)) {
+    return null;
+  }
+
+  const sourceBranch = value.sourceBranch;
+  const targetBranch = value.targetBranch;
+  const labels = value.labels;
+
+  if (sourceBranch !== undefined && typeof sourceBranch !== 'string') {
+    return null;
+  }
+  if (targetBranch !== undefined && typeof targetBranch !== 'string') {
+    return null;
+  }
+  if (
+    labels !== undefined &&
+    (!Array.isArray(labels) ||
+      labels.some((label) => typeof label !== 'string'))
+  ) {
+    return null;
+  }
+
+  return Object.freeze({
+    ...base,
+    ...(sourceBranch === undefined ? {} : { sourceBranch }),
+    ...(targetBranch === undefined ? {} : { targetBranch }),
+    ...(labels === undefined ? {} : { labels: Object.freeze([...labels]) }),
+  });
+}
+
 function validatePullRequestListResult(
   provider: ResolvedPullRequestProviderCandidate<AidePullRequestRemoteMatch>,
   result: unknown
@@ -480,6 +537,58 @@ function validatePullRequestListResult(
       repository,
       ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
       pullRequests: Object.freeze(pullRequests),
+    })
+  );
+}
+
+function validatePullRequestViewResult(
+  provider: ResolvedPullRequestProviderCandidate,
+  request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
+  result: unknown
+): Effect.Effect<
+  AidePullRequestViewResult,
+  InvalidPullRequestProviderOperationResultError
+> {
+  const invalid = (reason: string) =>
+    Effect.fail(
+      new InvalidPullRequestProviderOperationResultError({
+        pluginId: provider.pluginId,
+        providerId: provider.providerId,
+        operation: 'getPullRequest',
+        reason,
+      })
+    );
+
+  if (!isRecord(result)) {
+    return invalid('result must be an object');
+  }
+
+  const repository = snapshotRepositoryRef(result.repository);
+  if (repository === null) {
+    return invalid('invalid repository ref');
+  }
+  if (!repositoryRefsMatch(repository, provider.match.repository)) {
+    return invalid('repository ref does not match selected provider match');
+  }
+
+  const repositoryLabel = result.repositoryLabel;
+  if (repositoryLabel !== undefined && typeof repositoryLabel !== 'string') {
+    return invalid('repositoryLabel must be a string');
+  }
+
+  const pullRequest = snapshotPullRequestViewItem(result.pullRequest);
+  if (pullRequest === null) {
+    return invalid('invalid pull request item');
+  }
+  if (pullRequest.id !== request.pullRequest.number) {
+    return invalid('pull request id does not match selected pull request');
+  }
+
+  return Effect.succeed(
+    Object.freeze({
+      repository,
+      ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
+      pullRequest,
     })
   );
 }
@@ -846,44 +955,45 @@ export function resolvePullRequestProviderForUrl(
   ).pipe(Effect.map(stripProviderCapability));
 }
 
-export function listPullRequestsWithProvider(
-  provider: ResolvedPullRequestProviderCandidate<AidePullRequestRemoteMatch>,
-  request: Omit<AidePullRequestListRequest, 'match'>,
+function invokePullRequestProviderOperation<A, I>(
+  provider: ResolvedPullRequestProviderCandidate,
+  operationName: string,
+  operation: ((request: I) => Effect.Effect<A, unknown, never>) | undefined,
+  request: I,
   options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
 ): Effect.Effect<
-  AidePullRequestListResult,
+  A,
   | UnsupportedPullRequestProviderOperationError
   | InvalidPullRequestProviderOperationResultError
   | PullRequestProviderOperationError
   | PullRequestProviderOperationTimeoutError
 > {
-  const operation = provider.capability.operations?.listPullRequests;
   if (operation === undefined) {
     return Effect.fail(
       new UnsupportedPullRequestProviderOperationError({
         pluginId: provider.pluginId,
         providerId: provider.providerId,
-        operation: 'listPullRequests',
+        operation: operationName,
       })
     );
   }
 
   return Effect.suspend(
     (): Effect.Effect<
-      AidePullRequestListResult,
+      A,
       | InvalidPullRequestProviderOperationResultError
       | PullRequestProviderOperationError,
       never
     > => {
       let operationResult: unknown;
       try {
-        operationResult = operation({ ...request, match: provider.match });
+        operationResult = operation(request);
       } catch (cause) {
         return Effect.fail(
           new PullRequestProviderOperationError({
             pluginId: provider.pluginId,
             providerId: provider.providerId,
-            operation: 'listPullRequests',
+            operation: operationName,
             cause,
           })
         );
@@ -894,25 +1004,19 @@ export function listPullRequestsWithProvider(
           new InvalidPullRequestProviderOperationResultError({
             pluginId: provider.pluginId,
             providerId: provider.providerId,
-            operation: 'listPullRequests',
+            operation: operationName,
             reason: 'operation must return an Effect',
           })
         );
       }
 
-      return (
-        operationResult as Effect.Effect<
-          AidePullRequestListResult,
-          unknown,
-          never
-        >
-      ).pipe(
+      return (operationResult as Effect.Effect<A, unknown, never>).pipe(
         Effect.mapError(
           (cause) =>
             new PullRequestProviderOperationError({
               pluginId: provider.pluginId,
               providerId: provider.providerId,
-              operation: 'listPullRequests',
+              operation: operationName,
               cause,
             })
         )
@@ -925,10 +1029,56 @@ export function listPullRequestsWithProvider(
         new PullRequestProviderOperationTimeoutError({
           pluginId: provider.pluginId,
           providerId: provider.providerId,
-          operation: 'listPullRequests',
+          operation: operationName,
         }),
-    }),
+    })
+  );
+}
+
+export function listPullRequestsWithProvider(
+  provider: ResolvedPullRequestProviderCandidate<AidePullRequestRemoteMatch>,
+  request: Omit<AidePullRequestListRequest, 'match'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+): Effect.Effect<
+  AidePullRequestListResult,
+  | UnsupportedPullRequestProviderOperationError
+  | InvalidPullRequestProviderOperationResultError
+  | PullRequestProviderOperationError
+  | PullRequestProviderOperationTimeoutError
+> {
+  return invokePullRequestProviderOperation(
+    provider,
+    'listPullRequests',
+    provider.capability.operations?.listPullRequests,
+    { ...request, match: provider.match },
+    options
+  ).pipe(
     Effect.flatMap((result) => validatePullRequestListResult(provider, result))
+  );
+}
+
+export function getPullRequestWithProvider(
+  provider: ResolvedPullRequestProviderCandidate,
+  request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+): Effect.Effect<
+  AidePullRequestViewResult,
+  | UnsupportedPullRequestProviderOperationError
+  | InvalidPullRequestProviderOperationResultError
+  | PullRequestProviderOperationError
+  | PullRequestProviderOperationTimeoutError
+> {
+  const operationRequest = { ...request, match: provider.match };
+  return invokePullRequestProviderOperation(
+    provider,
+    'getPullRequest',
+    provider.capability.operations?.getPullRequest,
+    operationRequest,
+    options
+  ).pipe(
+    Effect.flatMap((result) =>
+      validatePullRequestViewResult(provider, operationRequest, result)
+    )
   );
 }
 
@@ -950,6 +1100,53 @@ export function listPullRequestsForRemote(
   ).pipe(
     Effect.flatMap((provider) =>
       listPullRequestsWithProvider(provider, request, options)
+    )
+  );
+}
+
+export function getPullRequestForRemote(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  remoteUrl: string,
+  request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestViewResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidate(
+    providers,
+    'git-remote',
+    remoteUrl,
+    (provider) => provider.matchRemote(remoteUrl),
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      getPullRequestWithProvider(provider, request, options)
+    )
+  );
+}
+
+export function getPullRequestForUrl(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  url: string,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestViewResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidate(
+    providers,
+    'pull-request-url',
+    url,
+    (provider) => provider.matchPullRequestUrl(url),
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      getPullRequestWithProvider(
+        provider,
+        { pullRequest: provider.match.pullRequest },
+        options
+      )
     )
   );
 }

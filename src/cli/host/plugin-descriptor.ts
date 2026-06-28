@@ -157,10 +157,30 @@ export interface AidePullRequestListResult {
   readonly pullRequests: readonly AidePullRequestListItem[];
 }
 
+export interface AidePullRequestViewRequest {
+  readonly match: AidePullRequestProviderMatch;
+  readonly pullRequest: AidePullRequestRef;
+}
+
+export interface AidePullRequestViewItem extends AidePullRequestListItem {
+  readonly sourceBranch?: string;
+  readonly targetBranch?: string;
+  readonly labels?: readonly string[];
+}
+
+export interface AidePullRequestViewResult {
+  readonly repository: AidePullRequestRepositoryRef;
+  readonly repositoryLabel?: string;
+  readonly pullRequest: AidePullRequestViewItem;
+}
+
 export interface AidePullRequestProviderOperations {
   readonly listPullRequests?: (
     request: AidePullRequestListRequest
   ) => Effect.Effect<AidePullRequestListResult, unknown, never>;
+  readonly getPullRequest?: (
+    request: AidePullRequestViewRequest
+  ) => Effect.Effect<AidePullRequestViewResult, unknown, never>;
 }
 
 export interface AidePullRequestProviderCapability {

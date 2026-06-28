@@ -142,6 +142,7 @@ function snapshotPullRequestProviderOperations(
   }
 
   const listPullRequests = operations.listPullRequests;
+  const getPullRequest = operations.getPullRequest;
   if (
     listPullRequests !== undefined &&
     typeof listPullRequests !== 'function'
@@ -150,14 +151,29 @@ function snapshotPullRequestProviderOperations(
       `Plugin '${pluginId}' pull request provider '${providerId}' operation 'listPullRequests' must be a function`
     );
   }
+  if (getPullRequest !== undefined && typeof getPullRequest !== 'function') {
+    throw new Error(
+      `Plugin '${pluginId}' pull request provider '${providerId}' operation 'getPullRequest' must be a function`
+    );
+  }
 
-  if (listPullRequests === undefined) {
+  if (listPullRequests === undefined && getPullRequest === undefined) {
     return Object.freeze({});
   }
 
   return Object.freeze({
-    listPullRequests:
-      listPullRequests as AidePullRequestProviderOperations['listPullRequests'],
+    ...(listPullRequests === undefined
+      ? {}
+      : {
+          listPullRequests:
+            listPullRequests as AidePullRequestProviderOperations['listPullRequests'],
+        }),
+    ...(getPullRequest === undefined
+      ? {}
+      : {
+          getPullRequest:
+            getPullRequest as AidePullRequestProviderOperations['getPullRequest'],
+        }),
   });
 }
 

@@ -4,6 +4,8 @@ import {
   defineAidePlugin,
   type AidePullRequestListRequest,
   type AidePullRequestListResult,
+  type AidePullRequestViewRequest,
+  type AidePullRequestViewResult,
   type AidePluginAuthStatus,
 } from '@cli/host/plugin-descriptor.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
@@ -13,16 +15,17 @@ import {
   probeAdoConfig,
   type ConfigStatus,
 } from '@lib/config.js';
+import { extractBranchName } from '@lib/git-utils.js';
 import type { AzureDevOpsPullRequest } from '@lib/types.js';
 import type { AzureDevOpsConfig } from '@schemas/config.js';
 
 type ProbeAdoConfig = () => Promise<ConfigStatus<AzureDevOpsConfig>>;
-type AzureDevOpsPullRequestListClient = Pick<
+type AzureDevOpsPullRequestClient = Pick<
   AzureDevOpsClient,
-  'listPullRequests'
+  'listPullRequests' | 'getPullRequest' | 'getPullRequestLabels'
 >;
 type CreateAzureDevOpsClient = () => Promise<{
-  readonly client: AzureDevOpsPullRequestListClient;
+  readonly client: AzureDevOpsPullRequestClient;
   readonly config: AzureDevOpsConfig;
 }>;
 
@@ -126,6 +129,53 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
       catch: (error) => error,
     });
 
+  const getPullRequest = (
+    request: AidePullRequestViewRequest
+  ): Effect.Effect<AidePullRequestViewResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot get pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient();
+        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
+        if (configuredOrg !== null && configuredOrg !== repository.org) {
+          throw new Error(
+            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
+          );
+        }
+
+        const [pr, labelsResponse] = await Promise.all([
+          client.getPullRequest(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number
+          ),
+          client.getPullRequestLabels(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number
+          ),
+        ]);
+
+        return {
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: azureDevOpsPullRequestToViewItem(
+            pr,
+            labelsResponse.value
+              .filter((label) => label.active)
+              .map((label) => label.name)
+          ),
+        };
+      },
+      catch: (error) => error,
+    });
+
   return defineAidePlugin({
     id: 'azure-devops',
     summary: 'Azure DevOps pull request provider',
@@ -175,6 +225,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
         },
         operations: {
           listPullRequests,
+          getPullRequest,
         },
       },
     },
@@ -212,5 +263,21 @@ function azureDevOpsPullRequestToListItem(pr: AzureDevOpsPullRequest) {
     },
     ...(pr.description === undefined ? {} : { description: pr.description }),
     draft: pr.isDraft ?? false,
+  } as const;
+}
+
+function azureDevOpsPullRequestToViewItem(
+  pr: AzureDevOpsPullRequest,
+  labels: readonly string[]
+) {
+  return {
+    ...azureDevOpsPullRequestToListItem(pr),
+    ...(pr.sourceRefName === undefined
+      ? {}
+      : { sourceBranch: extractBranchName(pr.sourceRefName) }),
+    ...(pr.targetRefName === undefined
+      ? {}
+      : { targetBranch: extractBranchName(pr.targetRefName) }),
+    labels,
   } as const;
 }

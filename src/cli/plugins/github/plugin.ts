@@ -5,6 +5,8 @@ import {
   type AidePullRequestListRequest,
   type AidePullRequestListResult,
   type AidePullRequestListItemStatus,
+  type AidePullRequestViewRequest,
+  type AidePullRequestViewResult,
   type AidePluginAuthStatus,
 } from '@cli/host/plugin-descriptor.js';
 import {
@@ -25,10 +27,13 @@ import {
 } from '@lib/github-utils.js';
 
 type ProbeGithubConfig = () => Promise<ConfigStatus<GithubConfigValue>>;
-type GitHubPullRequestListClient = Pick<GitHubClient, 'listPullRequests'>;
+type GitHubPullRequestClient = Pick<
+  GitHubClient,
+  'listPullRequests' | 'getPullRequest'
+>;
 type CreateGitHubClient = (options: {
   readonly host: string;
-}) => Promise<GitHubPullRequestListClient>;
+}) => Promise<GitHubPullRequestClient>;
 
 interface GitHubPluginOptions {
   readonly probeConfig?: ProbeGithubConfig;
@@ -125,6 +130,34 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
       catch: (error) => error,
     });
 
+  const getPullRequest = (
+    request: AidePullRequestViewRequest
+  ): Effect.Effect<AidePullRequestViewResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'github') {
+          throw new Error(
+            `GitHub provider cannot get pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const client = await createClient({ host: repository.host });
+        const pr = await client.getPullRequest(
+          repository.owner,
+          repository.repo,
+          request.pullRequest.number
+        );
+
+        return {
+          repository,
+          repositoryLabel: `${repository.host}/${repository.owner}/${repository.repo}`,
+          pullRequest: githubPullRequestToViewItem(pr),
+        };
+      },
+      catch: (error) => error,
+    });
+
   return defineAidePlugin({
     id: 'github',
     summary: 'GitHub pull request provider',
@@ -175,6 +208,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         },
         operations: {
           listPullRequests,
+          getPullRequest,
         },
       },
     },
@@ -211,5 +245,14 @@ function githubPullRequestToListItem(pr: GitHubPullRequest) {
     ...(pr.body === null ? {} : { description: pr.body }),
     url: pr.html_url,
     draft: pr.draft,
+  } as const;
+}
+
+function githubPullRequestToViewItem(pr: GitHubPullRequest) {
+  return {
+    ...githubPullRequestToListItem(pr),
+    sourceBranch: pr.head.ref,
+    targetBranch: pr.base.ref,
+    labels: pr.labels.map((label) => label.name),
   } as const;
 }
