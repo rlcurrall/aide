@@ -1,10 +1,7 @@
 import { Effect } from 'effect';
 
 import type { OwnedPluginCapability } from '@cli/host/command-registry.js';
-import type {
-  AidePullRequestProviderCapability,
-  AidePullRequestRepositoryRef,
-} from '@cli/host/plugin-descriptor.js';
+import type { AidePullRequestProviderCapability } from '@cli/host/plugin-descriptor.js';
 import { corePullRequestProviderOwner } from '@cli/host/plugin-descriptor.js';
 import type { ResolvedPullRequestProvider } from './provider-resolver.js';
 import { resolvePullRequestProviderForRemote } from './provider-resolver.js';
@@ -28,48 +25,6 @@ const defaultClients: PullRequestProviderContextClients = {
     return new AzureDevOpsClient(config);
   },
 };
-
-function stringContext(
-  provider: ResolvedPullRequestProvider,
-  key: string
-): string {
-  const value = provider.match.context?.[key];
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(
-      `Pull request provider '${provider.capability.providerId}' did not provide required context '${key}'`
-    );
-  }
-  return value;
-}
-
-function legacyRepositoryRef(
-  provider: ResolvedPullRequestProvider
-): AidePullRequestRepositoryRef {
-  if (provider.match.repository !== undefined) {
-    return provider.match.repository;
-  }
-
-  switch (provider.capability.providerId) {
-    case 'github':
-      return {
-        kind: 'github',
-        host: stringContext(provider, 'host'),
-        owner: stringContext(provider, 'owner'),
-        repo: stringContext(provider, 'repo'),
-      };
-    case 'azure-devops':
-      return {
-        kind: 'azure-devops',
-        org: stringContext(provider, 'org'),
-        project: stringContext(provider, 'project'),
-        repo: stringContext(provider, 'repo'),
-      };
-    default:
-      throw new Error(
-        `Pull request provider '${provider.capability.providerId}' cannot create a legacy platform context`
-      );
-  }
-}
 
 function assertTrustedCoreRef(
   provider: ResolvedPullRequestProvider,
@@ -98,7 +53,7 @@ export async function platformContextFromPullRequestProvider(
   provider: ResolvedPullRequestProvider,
   clients: PullRequestProviderContextClients = defaultClients
 ): Promise<PlatformContext> {
-  const repository = legacyRepositoryRef(provider);
+  const { repository } = provider.match;
 
   switch (repository.kind) {
     case 'github': {

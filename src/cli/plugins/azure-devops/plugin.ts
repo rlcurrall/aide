@@ -79,11 +79,6 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
               project: parsed.project,
               repo: parsed.repo,
             },
-            context: {
-              org: parsed.org,
-              project: parsed.project,
-              repo: parsed.repo,
-            },
           };
         },
         matchPullRequestUrl: (url) => {
@@ -100,12 +95,6 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
               repo: parsed.repo,
             },
             pullRequest: {
-              number: parsed.prId,
-            },
-            context: {
-              org: parsed.org,
-              project: parsed.project,
-              repo: parsed.repo,
               number: parsed.prId,
             },
           };

@@ -85,11 +85,6 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
               owner: parsed.owner,
               repo: parsed.repo,
             },
-            context: {
-              host: parsed.host,
-              owner: parsed.owner,
-              repo: parsed.repo,
-            },
           };
         },
         matchPullRequestUrl: (url) => {
@@ -106,12 +101,6 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
               repo: parsed.repo,
             },
             pullRequest: {
-              number: parsed.number,
-            },
-            context: {
-              host: parsed.host,
-              owner: parsed.owner,
-              repo: parsed.repo,
               number: parsed.number,
             },
           };

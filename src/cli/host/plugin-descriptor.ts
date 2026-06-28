@@ -85,18 +85,26 @@ export interface AidePullRequestRef {
   readonly number: number;
 }
 
-export interface AidePullRequestProviderMatch {
-  readonly source: AidePullRequestProviderMatchSource;
+interface AidePullRequestProviderMatchBase {
   readonly priority?: number;
   readonly detail?: string;
-  readonly repository?: AidePullRequestRepositoryRef;
-  readonly pullRequest?: AidePullRequestRef;
-  /**
-   * Transitional metadata for legacy command bridges. New provider-facing code
-   * should prefer typed refs above.
-   */
-  readonly context?: Readonly<Record<string, string | number | boolean>>;
 }
+
+export interface AidePullRequestRemoteMatch extends AidePullRequestProviderMatchBase {
+  readonly source: 'git-remote';
+  readonly repository: AidePullRequestRepositoryRef;
+  readonly pullRequest?: never;
+}
+
+export interface AidePullRequestUrlMatch extends AidePullRequestProviderMatchBase {
+  readonly source: 'pull-request-url';
+  readonly repository: AidePullRequestRepositoryRef;
+  readonly pullRequest: AidePullRequestRef;
+}
+
+export type AidePullRequestProviderMatch =
+  | AidePullRequestRemoteMatch
+  | AidePullRequestUrlMatch;
 
 export interface AidePullRequestProviderFeatures {
   readonly draftPullRequests?: boolean;
@@ -111,10 +119,8 @@ export interface AidePullRequestProviderCapability {
   readonly features: AidePullRequestProviderFeatures;
   readonly matchRemote: (
     remoteUrl: string
-  ) => AidePullRequestProviderMatch | null;
-  readonly matchPullRequestUrl: (
-    url: string
-  ) => AidePullRequestProviderMatch | null;
+  ) => AidePullRequestRemoteMatch | null;
+  readonly matchPullRequestUrl: (url: string) => AidePullRequestUrlMatch | null;
   readonly authStatus: () => Effect.Effect<
     AidePluginAuthStatus,
     unknown,

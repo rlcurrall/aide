@@ -8,7 +8,8 @@ import {
 import {
   defineAidePlugin,
   type AidePullRequestProviderCapability,
-  type AidePullRequestProviderMatch,
+  type AidePullRequestRemoteMatch,
+  type AidePullRequestUrlMatch,
 } from '@cli/host/plugin-descriptor.js';
 import { createAzureDevOpsPlugin } from '@cli/plugins/azure-devops/plugin.js';
 import { createBuiltinCommandRegistry } from '@cli/plugins/builtin.js';
@@ -22,18 +23,28 @@ import {
 } from './provider-context.js';
 import {
   AmbiguousPullRequestProviderError,
+  InvalidPullRequestProviderMatchError,
   UnsupportedPullRequestProviderError,
   resolvePullRequestProviderForRemote,
+  resolvePullRequestProviderForUrl,
   resolvePullRequestProviderFromRegistryForRemote,
   resolvePullRequestProviderFromRegistryForUrl,
 } from './provider-resolver.js';
+
+function externalRepository(providerId: string) {
+  return {
+    kind: 'external',
+    providerId,
+    displayName: providerId,
+  } as const;
+}
 
 function fakeProvider(
   pluginId: string,
   providerId: string,
   priority: number,
-  remoteMatch?: AidePullRequestProviderMatch,
-  pullRequestUrlMatch?: AidePullRequestProviderMatch
+  remoteMatch?: AidePullRequestRemoteMatch,
+  pullRequestUrlMatch?: AidePullRequestUrlMatch
 ): OwnedPluginCapability<AidePullRequestProviderCapability> {
   return {
     pluginId,
@@ -49,17 +60,55 @@ function fakeProvider(
 function fakeProviderCapability(
   providerId: string,
   priority: number,
-  remoteMatch?: AidePullRequestProviderMatch,
-  pullRequestUrlMatch?: AidePullRequestProviderMatch
+  remoteMatch?: AidePullRequestRemoteMatch,
+  pullRequestUrlMatch?: AidePullRequestUrlMatch
 ): AidePullRequestProviderCapability {
   return {
     providerId,
     priority,
     features: {},
     authStatus: () => Effect.succeed({ state: 'configured' }),
-    matchRemote: () => remoteMatch ?? { source: 'git-remote', priority },
+    matchRemote: () =>
+      remoteMatch ?? {
+        source: 'git-remote',
+        priority,
+        repository: externalRepository(providerId),
+      },
     matchPullRequestUrl: () =>
-      pullRequestUrlMatch ?? { source: 'pull-request-url', priority },
+      pullRequestUrlMatch ?? {
+        source: 'pull-request-url',
+        priority,
+        repository: externalRepository(providerId),
+        pullRequest: { number: 1 },
+      },
+  };
+}
+
+function malformedProvider(
+  pluginId: string,
+  providerId: string,
+  priority: number,
+  matches: {
+    readonly remote?: () => unknown;
+    readonly pullRequestUrl?: () => unknown;
+  }
+): OwnedPluginCapability<AidePullRequestProviderCapability> {
+  return {
+    pluginId,
+    capability: {
+      providerId,
+      priority,
+      features: {},
+      authStatus: () => Effect.succeed({ state: 'configured' }),
+      matchRemote: () =>
+        (matches.remote === undefined
+          ? null
+          : matches.remote()) as AidePullRequestRemoteMatch | null,
+      matchPullRequestUrl: () =>
+        (matches.pullRequestUrl === undefined
+          ? null
+          : matches.pullRequestUrl()) as AidePullRequestUrlMatch | null,
+    },
   };
 }
 
@@ -87,11 +136,6 @@ describe('pull request provider resolution', () => {
 
     expect(resolved.pluginId).toBe('github');
     expect(resolved.capability.providerId).toBe('github');
-    expect(resolved.match.context).toEqual({
-      host: 'github.com',
-      owner: 'acme',
-      repo: 'widgets',
-    });
     expect(resolved.match.repository).toEqual({
       kind: 'github',
       host: 'github.com',
@@ -111,11 +155,6 @@ describe('pull request provider resolution', () => {
     );
 
     expect(resolved.pluginId).toBe('github');
-    expect(resolved.match.context).toEqual({
-      host: 'acme.ghe.com',
-      owner: 'acme',
-      repo: 'widgets',
-    });
     expect(resolved.match.repository).toEqual({
       kind: 'github',
       host: 'acme.ghe.com',
@@ -136,11 +175,6 @@ describe('pull request provider resolution', () => {
 
     expect(resolved.pluginId).toBe('azure-devops');
     expect(resolved.capability.providerId).toBe('azure-devops');
-    expect(resolved.match.context).toEqual({
-      org: 'acme',
-      project: 'Platform',
-      repo: 'widgets',
-    });
     expect(resolved.match.repository).toEqual({
       kind: 'azure-devops',
       org: 'acme',
@@ -166,10 +200,16 @@ describe('pull request provider resolution', () => {
     );
 
     expect(github.pluginId).toBe('github');
-    expect(github.match.context?.number).toBe(42);
+    expect(github.match.source).toBe('pull-request-url');
+    if (github.match.source !== 'pull-request-url') {
+      throw new Error('Expected GitHub pull request URL match');
+    }
     expect(github.match.pullRequest).toEqual({ number: 42 });
     expect(ado.pluginId).toBe('azure-devops');
-    expect(ado.match.context?.number).toBe(42);
+    expect(ado.match.source).toBe('pull-request-url');
+    if (ado.match.source !== 'pull-request-url') {
+      throw new Error('Expected Azure DevOps pull request URL match');
+    }
     expect(ado.match.pullRequest).toEqual({ number: 42 });
   });
 
@@ -223,6 +263,276 @@ describe('pull request provider resolution', () => {
 
     expect(resolved.pluginId).toBe('specific-plugin');
     expect(resolved.priority).toBe(100);
+  });
+
+  test('rejects remote matches that omit repository refs', async () => {
+    const providers = [
+      fakeProvider('broken-plugin', 'broken-provider', 100, {
+        source: 'git-remote',
+        priority: 100,
+      } as unknown as AidePullRequestRemoteMatch),
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, 'matched-remote').pipe(
+        Effect.flip
+      )
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error._tag).toBe('InvalidPullRequestProviderMatchError');
+    expect(error.pluginId).toBe('broken-plugin');
+    expect(error.providerId).toBe('broken-provider');
+    expect(error.reason).toBe('missing repository ref');
+  });
+
+  test('rejects non-object provider matches as typed invalid matches', async () => {
+    const providers = [
+      malformedProvider('broken-plugin', 'broken-provider', 100, {
+        remote: () => undefined,
+      }),
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, 'matched-remote').pipe(
+        Effect.flip
+      )
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error.reason).toBe('match must be an object or null');
+  });
+
+  test('rejects provider matches with the wrong source for the lookup', async () => {
+    const providers = [
+      malformedProvider('broken-plugin', 'broken-provider', 100, {
+        remote: () => ({
+          source: 'pull-request-url',
+          priority: 100,
+          repository: externalRepository('broken-provider'),
+          pullRequest: { number: 1 },
+        }),
+      }),
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, 'matched-remote').pipe(
+        Effect.flip
+      )
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error.reason).toBe(
+      "expected source 'git-remote' but got 'pull-request-url'"
+    );
+  });
+
+  test('rejects pull request URL matches that omit pull request refs', async () => {
+    const providers = [
+      fakeProvider('broken-plugin', 'broken-provider', 100, undefined, {
+        source: 'pull-request-url',
+        priority: 100,
+        repository: externalRepository('broken-provider'),
+      } as unknown as AidePullRequestUrlMatch),
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForUrl(
+        providers,
+        'https://example.test/pr/1'
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error.source).toBe('pull-request-url');
+    expect(error.reason).toBe('missing pull request ref');
+  });
+
+  test('rejects remote matches that include pull request refs', async () => {
+    const providers = [
+      fakeProvider('broken-plugin', 'broken-provider', 100, {
+        source: 'git-remote',
+        priority: 100,
+        repository: externalRepository('broken-provider'),
+        pullRequest: { number: 1 },
+      } as unknown as AidePullRequestRemoteMatch),
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, 'matched-remote').pipe(
+        Effect.flip
+      )
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error.reason).toBe(
+      'git-remote match must not include pull request ref'
+    );
+  });
+
+  test('rejects invalid pull request refs from URL matches', async () => {
+    const providers = [
+      malformedProvider('broken-plugin', 'broken-provider', 100, {
+        pullRequestUrl: () => ({
+          source: 'pull-request-url',
+          priority: 100,
+          repository: externalRepository('broken-provider'),
+          pullRequest: { number: 0 },
+        }),
+      }),
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForUrl(
+        providers,
+        'https://example.test/pr/0'
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error.reason).toBe('invalid pull request ref');
+  });
+
+  test('rejects invalid match priorities before provider selection', async () => {
+    const providers = [
+      malformedProvider('broken-plugin', 'broken-provider', 100, {
+        remote: () => ({
+          source: 'git-remote',
+          priority: Number.NaN,
+          repository: externalRepository('broken-provider'),
+        }),
+      }),
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, 'matched-remote').pipe(
+        Effect.flip
+      )
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error.reason).toBe('invalid match priority');
+  });
+
+  test('rejects invalid capability priorities used as fallbacks', async () => {
+    const providers = [
+      malformedProvider('broken-plugin', 'broken-provider', Number.NaN, {
+        remote: () => ({
+          source: 'git-remote',
+          repository: externalRepository('broken-provider'),
+        }),
+      }),
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, 'matched-remote').pipe(
+        Effect.flip
+      )
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error.reason).toBe('invalid capability priority');
+  });
+
+  test('rejects invalid capability priorities even when matches override priority', async () => {
+    const providers = [
+      malformedProvider('broken-plugin', 'broken-provider', Number.NaN, {
+        remote: () => ({
+          source: 'git-remote',
+          priority: 100,
+          repository: externalRepository('broken-provider'),
+        }),
+      }),
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, 'matched-remote').pipe(
+        Effect.flip
+      )
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error.reason).toBe('invalid capability priority');
+  });
+
+  test('rejects external repository refs with mismatched provider ids', async () => {
+    const providers = [
+      malformedProvider('broken-plugin', 'broken-provider', 100, {
+        remote: () => ({
+          source: 'git-remote',
+          priority: 100,
+          repository: externalRepository('other-provider'),
+        }),
+      }),
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, 'matched-remote').pipe(
+        Effect.flip
+      )
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error.reason).toBe(
+      'external repository providerId must match provider id'
+    );
+  });
+
+  test('rejects external repository refs with non-primitive metadata', async () => {
+    const providers = [
+      malformedProvider('broken-plugin', 'broken-provider', 100, {
+        remote: () => ({
+          source: 'git-remote',
+          priority: 100,
+          repository: {
+            ...externalRepository('broken-provider'),
+            metadata: { nested: { unsupported: true } },
+          },
+        }),
+      }),
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, 'matched-remote').pipe(
+        Effect.flip
+      )
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error.reason).toBe('invalid repository ref');
   });
 });
 
