@@ -18,6 +18,15 @@ import type {
   AnyYargsCommandModule,
 } from './plugin-descriptor.js';
 import { corePullRequestProviderOwner } from './plugin-descriptor.js';
+import {
+  AIDE_PLUGIN_API_VERSION,
+  aidePluginCapabilityKinds,
+  isReservedAidePluginId,
+  isReservedAidePullRequestProviderId,
+  type AidePluginCapabilityKind,
+  type AidePluginManifest,
+  type AidePublicPluginDescriptor,
+} from '../plugin-api.js';
 
 const defaultExtensionPolicy: AideCommandExtensionPolicy = Object.freeze({
   kind: 'same-plugin',
@@ -413,6 +422,10 @@ export interface RegisterCommandOptions {
   readonly extension?: AideCommandExtensionPolicy;
 }
 
+export interface RegisterExternalPluginOptions {
+  readonly manifest: AidePluginManifest;
+}
+
 export interface OwnedPluginCapability<TCapability> {
   readonly pluginId: string;
   readonly capability: TCapability;
@@ -505,6 +518,288 @@ function pluginCommandAcceptsChildCommands(
     command.acceptsChildren,
     pluginCommandRoute(command)
   );
+}
+
+function externalPluginCapabilityKinds(
+  plugin: AidePublicPluginDescriptor
+): readonly AidePluginCapabilityKind[] {
+  const capabilities: AidePluginCapabilityKind[] = [];
+  if (plugin.commands.length > 0) capabilities.push('commands');
+  if (plugin.capabilities?.auth !== undefined) capabilities.push('auth');
+  if (plugin.capabilities?.pullRequestProvider !== undefined) {
+    capabilities.push('pull-request-provider');
+  }
+
+  return capabilities;
+}
+
+function isKnownPluginCapabilityKind(
+  value: unknown
+): value is AidePluginCapabilityKind {
+  return (
+    typeof value === 'string' &&
+    aidePluginCapabilityKinds.includes(value as AidePluginCapabilityKind)
+  );
+}
+
+function publicPluginToTrustedDescriptor(
+  plugin: AidePublicPluginDescriptor
+): AidePluginDescriptor {
+  return {
+    id: plugin.id,
+    summary: plugin.summary,
+    commands: plugin.commands.map((command) => ({
+      kind: 'descriptor',
+      id: command.id,
+      parentId: command.parentId,
+      acceptsChildren: command.acceptsChildren,
+      extension: command.extension,
+      descriptor: command.descriptor as unknown as AnyAideCommandDescriptor,
+    })),
+    capabilities: plugin.capabilities,
+  };
+}
+
+function assertOptionalManifestString(
+  pluginId: string,
+  field: string,
+  value: unknown
+): void {
+  if (value === undefined) return;
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(
+      `Plugin '${pluginId}' manifest ${field} must be a non-empty string`
+    );
+  }
+}
+
+function assertManifestDependencyList(
+  pluginId: string,
+  manifest: string,
+  field: string,
+  value: unknown
+): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `Plugin '${pluginId}' manifest ${manifest}.${field} must be an array of plugin ids`
+    );
+  }
+
+  for (const pluginIdValue of value) {
+    if (typeof pluginIdValue !== 'string') {
+      throw new Error(
+        `Plugin '${pluginId}' manifest ${manifest}.${field} entries must be plugin ids`
+      );
+    }
+    assertId('Plugin', pluginIdValue);
+  }
+}
+
+function assertExternalPluginManifest(
+  plugin: AidePublicPluginDescriptor,
+  manifest: AidePluginManifest
+): void {
+  if (!isRecord(manifest)) {
+    throw new Error(`Plugin '${plugin.id}' manifest must be an object`);
+  }
+  if (manifest.id !== plugin.id) {
+    throw new Error(
+      `Plugin '${plugin.id}' manifest id '${String(manifest.id)}' does not match descriptor id`
+    );
+  }
+  if (manifest.aidePluginApiVersion !== AIDE_PLUGIN_API_VERSION) {
+    throw new Error(
+      `Plugin '${plugin.id}' manifest aidePluginApiVersion must be ${AIDE_PLUGIN_API_VERSION}`
+    );
+  }
+  if (typeof manifest.version !== 'string' || manifest.version.trim() === '') {
+    throw new Error(
+      `Plugin '${plugin.id}' manifest version must be a non-empty string`
+    );
+  }
+  if (
+    manifest.trust !== undefined &&
+    manifest.trust !== 'external' &&
+    manifest.trust !== 'trusted-local'
+  ) {
+    throw new Error(
+      `Plugin '${plugin.id}' manifest trust must be 'external' or 'trusted-local'`
+    );
+  }
+
+  assertOptionalManifestString(plugin.id, 'main', manifest.main);
+  assertOptionalManifestString(plugin.id, 'summary', manifest.summary);
+
+  const declaredCapabilities = new Set<AidePluginCapabilityKind>();
+  if (manifest.capabilities !== undefined) {
+    if (!Array.isArray(manifest.capabilities)) {
+      throw new Error(
+        `Plugin '${plugin.id}' manifest capabilities must be an array`
+      );
+    }
+    for (const capability of manifest.capabilities) {
+      if (!isKnownPluginCapabilityKind(capability)) {
+        throw new Error(
+          `Plugin '${plugin.id}' manifest declares unknown capability '${String(capability)}'`
+        );
+      }
+      if (declaredCapabilities.has(capability)) {
+        throw new Error(
+          `Plugin '${plugin.id}' manifest declares capability '${capability}' more than once`
+        );
+      }
+      declaredCapabilities.add(capability);
+    }
+  }
+
+  const providedCapabilities = new Set(externalPluginCapabilityKinds(plugin));
+  for (const capability of providedCapabilities) {
+    if (!declaredCapabilities.has(capability)) {
+      throw new Error(
+        `Plugin '${plugin.id}' manifest does not declare provided capability '${capability}'`
+      );
+    }
+  }
+  for (const capability of declaredCapabilities) {
+    if (!providedCapabilities.has(capability)) {
+      throw new Error(
+        `Plugin '${plugin.id}' manifest declares capability '${capability}' but descriptor does not provide it`
+      );
+    }
+  }
+
+  if (manifest.loading !== undefined) {
+    if (!isRecord(manifest.loading)) {
+      throw new Error(
+        `Plugin '${plugin.id}' manifest loading must be an object`
+      );
+    }
+    if (
+      manifest.loading.order !== undefined &&
+      !isFiniteNumber(manifest.loading.order)
+    ) {
+      throw new Error(
+        `Plugin '${plugin.id}' manifest loading.order must be a finite number`
+      );
+    }
+    assertManifestDependencyList(
+      plugin.id,
+      'loading',
+      'after',
+      manifest.loading.after
+    );
+    assertManifestDependencyList(
+      plugin.id,
+      'loading',
+      'before',
+      manifest.loading.before
+    );
+  }
+
+  if (manifest.conflicts !== undefined) {
+    if (!isRecord(manifest.conflicts)) {
+      throw new Error(
+        `Plugin '${plugin.id}' manifest conflicts must be an object`
+      );
+    }
+    for (const field of ['commands', 'pullRequestProviders'] as const) {
+      const policy = manifest.conflicts[field];
+      if (policy !== undefined && policy !== 'reject') {
+        throw new Error(
+          `Plugin '${plugin.id}' manifest conflicts.${field} must be 'reject'`
+        );
+      }
+    }
+  }
+}
+
+function assertExternalPluginCommandIdNamespace(
+  pluginId: string,
+  commandId: string
+): void {
+  if (commandId === pluginId || commandId.startsWith(`${pluginId}:`)) return;
+
+  throw new Error(
+    `External plugin '${pluginId}' command '${commandId}' must use the plugin id namespace`
+  );
+}
+
+function assertExternalPluginBoundary(
+  plugin: AidePublicPluginDescriptor,
+  manifest: AidePluginManifest | undefined
+): void {
+  if (!isRecord(plugin)) {
+    throw new Error('External plugin descriptor must be an object');
+  }
+  if (typeof plugin.id !== 'string') {
+    throw new Error('External plugin id must be a string');
+  }
+
+  assertId('Plugin', plugin.id);
+  if (isReservedAidePluginId(plugin.id)) {
+    throw new Error(
+      `External plugin '${plugin.id}' cannot use a reserved aide plugin id`
+    );
+  }
+  if (typeof plugin.summary !== 'string' || plugin.summary.trim() === '') {
+    throw new Error(
+      `External plugin '${plugin.id}' summary must be a non-empty string`
+    );
+  }
+  if (!Array.isArray(plugin.commands)) {
+    throw new Error(`External plugin '${plugin.id}' commands must be an array`);
+  }
+
+  for (const command of plugin.commands) {
+    if (!isRecord(command)) {
+      throw new Error(
+        `External plugin '${plugin.id}' commands must be descriptor objects`
+      );
+    }
+    if (command.kind !== 'descriptor') {
+      const commandId =
+        typeof command.id === 'string' ? command.id : '<unknown>';
+      throw new Error(
+        `External plugin '${plugin.id}' command '${commandId}' must be descriptor-backed; raw yargs modules are trusted internal only`
+      );
+    }
+    if (typeof command.id !== 'string') {
+      throw new Error(
+        `External plugin '${plugin.id}' command id must be a string`
+      );
+    }
+
+    assertId('Command', command.id);
+    assertExternalPluginCommandIdNamespace(plugin.id, command.id);
+    if (!isRecord(command.descriptor)) {
+      throw new Error(
+        `External plugin '${plugin.id}' command '${command.id}' descriptor must be an object`
+      );
+    }
+
+    const yargs = command.descriptor.yargs;
+    if (isRecord(yargs) && yargs.builder !== undefined) {
+      throw new Error(
+        `External plugin '${plugin.id}' command '${command.id}' cannot use yargs builders yet`
+      );
+    }
+  }
+
+  const providerId = plugin.capabilities?.pullRequestProvider?.providerId;
+  if (
+    typeof providerId === 'string' &&
+    isReservedAidePullRequestProviderId(providerId)
+  ) {
+    throw new Error(
+      `External plugin '${plugin.id}' cannot declare reserved pull request provider '${providerId}'`
+    );
+  }
+
+  if (manifest === undefined) {
+    throw new Error(`External plugin '${plugin.id}' requires a manifest`);
+  }
+  assertExternalPluginManifest(plugin, manifest);
 }
 
 export class CommandRegistry {
@@ -649,6 +944,15 @@ export class CommandRegistry {
     return this;
   }
 
+  registerExternalPlugin(
+    plugin: AidePublicPluginDescriptor,
+    options?: RegisterExternalPluginOptions
+  ): this {
+    assertExternalPluginBoundary(plugin, options?.manifest);
+    return this.registerPlugin(publicPluginToTrustedDescriptor(plugin));
+  }
+
+  /** Trusted in-process registration for built-in and local internal plugins. */
   registerPlugin(plugin: AidePluginDescriptor): this {
     assertId('Plugin', plugin.id);
     const snapshot = snapshotPlugin(plugin);

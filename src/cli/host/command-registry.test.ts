@@ -2,6 +2,14 @@ import { describe, expect, test } from 'bun:test';
 import { Context, Effect } from 'effect';
 import yargs from 'yargs';
 
+import {
+  AIDE_PLUGIN_API_VERSION,
+  defineAideCommand as definePublicAideCommand,
+  defineAidePlugin as definePublicAidePlugin,
+  pluginCommandDescriptor as publicPluginCommandDescriptor,
+  type AidePublicPluginDescriptor,
+} from '@aide/plugin-api';
+import * as publicPluginApi from '@aide/plugin-api';
 import { defineAideCommand, textResult } from './command-descriptor.js';
 import { createCommandRegistry } from './command-registry.js';
 import { createBuiltinCommandRegistry } from '@cli/plugins/builtin.js';
@@ -36,6 +44,18 @@ const expectedPrChildCommandIds = [
 class UnsupportedDescriptorService extends Context.Tag(
   'aide.test.UnsupportedDescriptorService'
 )<UnsupportedDescriptorService, { readonly value: string }>() {}
+
+function externalManifest(
+  id: string,
+  capabilities: readonly ('commands' | 'auth' | 'pull-request-provider')[] = []
+) {
+  return {
+    id,
+    version: '1.0.0',
+    aidePluginApiVersion: AIDE_PLUGIN_API_VERSION,
+    capabilities,
+  } as const;
+}
 
 describe('CommandRegistry', () => {
   test('rejects plugin descriptors that require unsupported Effect services at compile time', () => {
@@ -179,6 +199,258 @@ describe('CommandRegistry', () => {
     expect(() => registry.registerPlugin(plugin)).toThrow(
       "Plugin 'sample-plugin' is already registered"
     );
+  });
+
+  test('registers descriptor-only external plugins through the public API boundary', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerExternalPlugin(
+      definePublicAidePlugin({
+        id: 'external-tool',
+        summary: 'External tool plugin',
+        commands: [
+          publicPluginCommandDescriptor(
+            definePublicAideCommand({
+              id: 'external-tool:hello',
+              route: 'hello',
+              summary: 'Say hello',
+              run: () => Effect.succeed(textResult('hello')),
+            })
+          ),
+        ],
+      }),
+      {
+        manifest: {
+          id: 'external-tool',
+          version: '1.0.0',
+          aidePluginApiVersion: AIDE_PLUGIN_API_VERSION,
+          trust: 'external',
+          capabilities: ['commands'],
+          loading: {
+            order: 100,
+            after: [],
+            before: [],
+          },
+          conflicts: {
+            commands: 'reject',
+            pullRequestProviders: 'reject',
+          },
+        },
+      }
+    );
+
+    expect(registry.pluginIds()).toEqual(['external-tool']);
+    expect(registry.commandIds()).toEqual(['external-tool:hello']);
+    expect(registry.commandOwner('external-tool:hello')).toBe('external-tool');
+  });
+
+  test('keeps yargs builders out of the public plugin command API at compile time', () => {
+    const descriptor = definePublicAideCommand({
+      id: 'external-tool:compile-only',
+      route: 'compile-only',
+      summary: 'Compile-only descriptor',
+      // @ts-expect-error External plugin commands must not expose yargs builders.
+      yargs: {
+        builder: () => undefined,
+      },
+      run: () => Effect.succeed(textResult('compile-only')),
+    });
+
+    expect(descriptor.id).toBe('external-tool:compile-only');
+  });
+
+  test('keeps trusted descriptor conversion out of the public plugin API at compile time', () => {
+    // @ts-expect-error Trusted descriptor conversion is host-internal.
+    expect(publicPluginApi.publicPluginToTrustedDescriptor).toBeUndefined();
+  });
+
+  test('rejects raw yargs modules from external plugins before mutating the registry', () => {
+    const registry = createCommandRegistry();
+
+    expect(() =>
+      registry.registerExternalPlugin(
+        {
+          id: 'external-tool',
+          summary: 'External tool plugin',
+          commands: [
+            {
+              kind: 'module',
+              id: 'external-tool:raw',
+              module: {
+                command: 'raw',
+                describe: 'Raw yargs command',
+                handler: () => {},
+              },
+            },
+          ],
+        } as unknown as AidePublicPluginDescriptor,
+        { manifest: externalManifest('external-tool', ['commands']) }
+      )
+    ).toThrow(
+      "External plugin 'external-tool' command 'external-tool:raw' must be descriptor-backed; raw yargs modules are trusted internal only"
+    );
+    expect(registry.pluginIds()).toEqual([]);
+    expect(registry.allCommandIds()).toEqual([]);
+  });
+
+  test('rejects reserved plugin and provider ids for external plugins', () => {
+    const registry = createCommandRegistry();
+
+    expect(() =>
+      registry.registerExternalPlugin(
+        definePublicAidePlugin({
+          id: 'github',
+          summary: 'Reserved plugin',
+          commands: [],
+        }),
+        { manifest: externalManifest('github') }
+      )
+    ).toThrow("External plugin 'github' cannot use a reserved aide plugin id");
+
+    expect(() =>
+      registry.registerExternalPlugin(
+        definePublicAidePlugin({
+          id: 'external-github',
+          summary: 'External GitHub provider',
+          commands: [],
+          capabilities: {
+            pullRequestProvider: {
+              providerId: 'github',
+              priority: 1,
+              features: {},
+              matchRemote: () => null,
+              matchPullRequestUrl: () => null,
+              authStatus: () => Effect.succeed({ state: 'configured' }),
+            },
+          },
+        }),
+        {
+          manifest: externalManifest('external-github', [
+            'pull-request-provider',
+          ]),
+        }
+      )
+    ).toThrow(
+      "External plugin 'external-github' cannot declare reserved pull request provider 'github'"
+    );
+    expect(registry.pluginIds()).toEqual([]);
+  });
+
+  test('rejects external plugin commands outside the plugin id namespace', () => {
+    const registry = createCommandRegistry();
+
+    expect(() =>
+      registry.registerExternalPlugin(
+        definePublicAidePlugin({
+          id: 'external-tool',
+          summary: 'External tool plugin',
+          commands: [
+            publicPluginCommandDescriptor(
+              definePublicAideCommand({
+                id: 'other-tool:hello',
+                route: 'hello',
+                summary: 'Say hello',
+                run: () => Effect.succeed(textResult('hello')),
+              })
+            ),
+          ],
+        }),
+        { manifest: externalManifest('external-tool', ['commands']) }
+      )
+    ).toThrow(
+      "External plugin 'external-tool' command 'other-tool:hello' must use the plugin id namespace"
+    );
+    expect(registry.pluginIds()).toEqual([]);
+  });
+
+  test('rejects yargs builders from external plugin descriptors until public argument metadata exists', () => {
+    const registry = createCommandRegistry();
+
+    expect(() =>
+      registry.registerExternalPlugin(
+        {
+          id: 'external-tool',
+          summary: 'External tool plugin',
+          commands: [
+            {
+              kind: 'descriptor',
+              id: 'external-tool:hello',
+              descriptor: {
+                id: 'external-tool:hello',
+                route: 'hello',
+                summary: 'Say hello',
+                yargs: {
+                  builder: () => undefined,
+                },
+                run: () => Effect.succeed(textResult('hello')),
+              },
+            },
+          ],
+        } as unknown as AidePublicPluginDescriptor,
+        { manifest: externalManifest('external-tool', ['commands']) }
+      )
+    ).toThrow(
+      "External plugin 'external-tool' command 'external-tool:hello' cannot use yargs builders yet"
+    );
+    expect(registry.pluginIds()).toEqual([]);
+  });
+
+  test('rejects external plugin manifest mismatches before mutating the registry', () => {
+    const registry = createCommandRegistry();
+    const plugin = definePublicAidePlugin({
+      id: 'external-tool',
+      summary: 'External tool plugin',
+      commands: [
+        publicPluginCommandDescriptor(
+          definePublicAideCommand({
+            id: 'external-tool:hello',
+            route: 'hello',
+            summary: 'Say hello',
+            run: () => Effect.succeed(textResult('hello')),
+          })
+        ),
+      ],
+    });
+
+    expect(() =>
+      registry.registerExternalPlugin(plugin, {
+        manifest: {
+          id: 'external-tool',
+          version: '1.0.0',
+          aidePluginApiVersion: 0 as typeof AIDE_PLUGIN_API_VERSION,
+          capabilities: ['commands'],
+        },
+      })
+    ).toThrow("Plugin 'external-tool' manifest aidePluginApiVersion must be 1");
+
+    expect(() =>
+      registry.registerExternalPlugin(plugin, {
+        manifest: {
+          id: 'external-tool',
+          version: '1.0.0',
+          aidePluginApiVersion: AIDE_PLUGIN_API_VERSION,
+          capabilities: [],
+        },
+      })
+    ).toThrow(
+      "Plugin 'external-tool' manifest does not declare provided capability 'commands'"
+    );
+    expect(registry.pluginIds()).toEqual([]);
+  });
+
+  test('requires a manifest when registering external plugins', () => {
+    const registry = createCommandRegistry();
+
+    expect(() =>
+      registry.registerExternalPlugin(
+        definePublicAidePlugin({
+          id: 'external-tool',
+          summary: 'External tool plugin',
+          commands: [],
+        })
+      )
+    ).toThrow("External plugin 'external-tool' requires a manifest");
+    expect(registry.pluginIds()).toEqual([]);
   });
 
   test('rejects duplicate command ids declared by a plugin', () => {
