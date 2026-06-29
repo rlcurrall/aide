@@ -7,8 +7,7 @@
  * Design considerations:
  * - Outputs minimal context (~80 tokens) to preserve context budget
  * - Uses generic "Pull Requests" language to support both Azure DevOps and GitHub
- * - Silent exit (code 0) on any error to not disrupt sessions
- * - Shows configuration status warnings when env vars are missing
+ * - Shows configuration status warnings for missing or malformed credentials
  */
 
 import { Effect } from 'effect';
@@ -23,6 +22,10 @@ import {
 import { isGhCliAvailable } from '@lib/gh-utils.js';
 import type { AzureDevOpsConfig, JiraConfig } from '@schemas/config.js';
 import { defineAideCommand, textResult } from '@cli/host/command-descriptor.js';
+import type {
+  AideCommandDescriptor,
+  CommandResult,
+} from '@cli/host/command-descriptor.js';
 
 type ConfigState = 'configured' | 'not-configured' | 'misconfigured';
 interface PrimeConfigStatuses {
@@ -108,7 +111,7 @@ function buildConfigStatusSectionEffect(
       adoStatus: probeConfig(() => probeAdoConfig()),
       ghStatus: probeConfig(() => probeGithubConfig({ ghAvailable })),
     },
-    { concurrency: 'unbounded' }
+    { concurrency: 3 }
   ).pipe(Effect.map(buildConfigStatusSection));
 }
 
@@ -233,9 +236,21 @@ export async function buildPrimeOutput(
   return Effect.runPromise(buildPrimeOutputEffect(opts));
 }
 
-export const primeCommandDescriptor = defineAideCommand({
-  id: 'prime',
-  route: 'prime',
-  summary: 'Output aide context for session start hook',
-  run: () => buildPrimeOutputEffect().pipe(Effect.map(textResult)),
-});
+export function buildPrimeCommandEffect(
+  opts: { ghAvailable?: () => boolean } = {}
+): Effect.Effect<CommandResult, unknown, never> {
+  return buildPrimeOutputEffect(opts).pipe(Effect.map(textResult));
+}
+
+export function makePrimeCommandDescriptor(
+  opts: { ghAvailable?: () => boolean } = {}
+): AideCommandDescriptor<object, unknown, never> {
+  return defineAideCommand<object, unknown, never>({
+    id: 'prime',
+    route: 'prime',
+    summary: 'Output aide context for session start hook',
+    run: () => buildPrimeCommandEffect(opts),
+  });
+}
+
+export const primeCommandDescriptor = makePrimeCommandDescriptor();

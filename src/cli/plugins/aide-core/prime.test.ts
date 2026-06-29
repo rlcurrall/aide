@@ -9,7 +9,11 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { Effect } from 'effect';
 
-import { buildPrimeOutput, buildPrimeOutputEffect } from './prime.js';
+import {
+  buildPrimeOutput,
+  buildPrimeOutputEffect,
+  makePrimeCommandDescriptor,
+} from './prime.js';
 import {
   installMockSecrets,
   saveEnv,
@@ -49,12 +53,25 @@ describe('buildPrimeOutput', () => {
     expect(output).toMatch(/Jira: Not configured/i);
   });
 
-  test('buildPrimeOutputEffect exposes the same output as an Effect program', async () => {
-    const output = await Effect.runPromise(
-      buildPrimeOutputEffect({ ghAvailable: () => true })
+  test('buildPrimeOutputEffect matches the compatibility wrapper output', async () => {
+    const opts = { ghAvailable: () => true };
+    const effectOutput = await Effect.runPromise(buildPrimeOutputEffect(opts));
+    const wrapperOutput = await buildPrimeOutput(opts);
+
+    expect(effectOutput).toBe(wrapperOutput);
+    expect(effectOutput).toContain('# aide - Jira & Git Hosting Integration');
+    expect(effectOutput).toMatch(/Pull Requests: Configured/i);
+  });
+
+  test('primeCommandDescriptor returns the Effect-backed text result', async () => {
+    const descriptor = makePrimeCommandDescriptor({ ghAvailable: () => true });
+    const result = await Effect.runPromise(
+      descriptor.run({ $0: 'aide', _: [] })
     );
-    expect(output).toContain('# aide - Jira & Git Hosting Integration');
-    expect(output).toMatch(/Pull Requests: Configured/i);
+    expect(result).toMatchObject({
+      _tag: 'Text',
+      text: expect.stringContaining('# aide - Jira & Git Hosting Integration'),
+    });
   });
 
   test('reports Jira configured when env vars are set', async () => {
