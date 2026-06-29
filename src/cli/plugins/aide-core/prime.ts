@@ -17,24 +17,35 @@ import {
   probeJiraConfig,
   probeAdoConfig,
   probeGithubConfig,
+  type ConfigStatus,
+  type GithubConfigValue,
 } from '@lib/config.js';
 import { isGhCliAvailable } from '@lib/gh-utils.js';
+import type { AzureDevOpsConfig, JiraConfig } from '@schemas/config.js';
 import { defineAideCommand, textResult } from '@cli/host/command-descriptor.js';
 
 type ConfigState = 'configured' | 'not-configured' | 'misconfigured';
+interface PrimeConfigStatuses {
+  readonly jiraStatus: ConfigStatus<JiraConfig>;
+  readonly adoStatus: ConfigStatus<AzureDevOpsConfig>;
+  readonly ghStatus: ConfigStatus<GithubConfigValue>;
+}
+
+function probeConfig<A>(run: () => Promise<A>): Effect.Effect<A, unknown> {
+  return Effect.tryPromise({
+    try: run,
+    catch: (error) => error,
+  });
+}
 
 /**
  * Build configuration status section if any service is not configured
  */
-async function buildConfigStatusSection(
-  ghAvailable: () => boolean
-): Promise<string> {
-  const [jiraStatus, adoStatus, ghStatus] = await Promise.all([
-    probeJiraConfig(),
-    probeAdoConfig(),
-    probeGithubConfig({ ghAvailable }),
-  ]);
-
+function buildConfigStatusSection({
+  jiraStatus,
+  adoStatus,
+  ghStatus,
+}: PrimeConfigStatuses): string {
   function toState(kind: string): ConfigState {
     if (kind === 'env' || kind === 'keyring') return 'configured';
     if (kind === 'malformed') return 'misconfigured';
@@ -86,6 +97,19 @@ async function buildConfigStatusSection(
 
   lines.push('');
   return lines.join('\n');
+}
+
+function buildConfigStatusSectionEffect(
+  ghAvailable: () => boolean
+): Effect.Effect<string, unknown, never> {
+  return Effect.all(
+    {
+      jiraStatus: probeConfig(() => probeJiraConfig()),
+      adoStatus: probeConfig(() => probeAdoConfig()),
+      ghStatus: probeConfig(() => probeGithubConfig({ ghAvailable })),
+    },
+    { concurrency: 'unbounded' }
+  ).pipe(Effect.map(buildConfigStatusSection));
 }
 
 const JIRA_COMMANDS = `## Jira Commands
@@ -176,12 +200,7 @@ aide pr comment "Needs work"  # auto-detect from branch
 aide pr reply 456 "Fixed the issue" --pr 123
 \`\`\``;
 
-export async function buildPrimeOutput(
-  opts: { ghAvailable?: () => boolean } = {}
-): Promise<string> {
-  const ghAvailable = opts.ghAvailable ?? isGhCliAvailable;
-  const configStatus = await buildConfigStatusSection(ghAvailable);
-
+function formatPrimeOutput(configStatus: string): string {
   const parts = ['# aide - Jira & Git Hosting Integration', ''];
 
   if (configStatus) {
@@ -199,10 +218,24 @@ export async function buildPrimeOutput(
   return parts.join('\n').trim();
 }
 
+export function buildPrimeOutputEffect(
+  opts: { ghAvailable?: () => boolean } = {}
+): Effect.Effect<string, unknown, never> {
+  const ghAvailable = opts.ghAvailable ?? isGhCliAvailable;
+  return buildConfigStatusSectionEffect(ghAvailable).pipe(
+    Effect.map(formatPrimeOutput)
+  );
+}
+
+export async function buildPrimeOutput(
+  opts: { ghAvailable?: () => boolean } = {}
+): Promise<string> {
+  return Effect.runPromise(buildPrimeOutputEffect(opts));
+}
+
 export const primeCommandDescriptor = defineAideCommand({
   id: 'prime',
   route: 'prime',
   summary: 'Output aide context for session start hook',
-  run: () =>
-    Effect.promise(() => buildPrimeOutput()).pipe(Effect.map(textResult)),
+  run: () => buildPrimeOutputEffect().pipe(Effect.map(textResult)),
 });

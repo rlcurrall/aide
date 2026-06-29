@@ -7,8 +7,9 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { Effect } from 'effect';
 
-import { buildPrimeOutput } from './prime.js';
+import { buildPrimeOutput, buildPrimeOutputEffect } from './prime.js';
 import {
   installMockSecrets,
   saveEnv,
@@ -46,6 +47,14 @@ describe('buildPrimeOutput', () => {
   test('reports Jira not configured when neither env nor keyring has credentials', async () => {
     const output = await buildPrimeOutput({ ghAvailable: () => false });
     expect(output).toMatch(/Jira: Not configured/i);
+  });
+
+  test('buildPrimeOutputEffect exposes the same output as an Effect program', async () => {
+    const output = await Effect.runPromise(
+      buildPrimeOutputEffect({ ghAvailable: () => true })
+    );
+    expect(output).toContain('# aide - Jira & Git Hosting Integration');
+    expect(output).toMatch(/Pull Requests: Configured/i);
   });
 
   test('reports Jira configured when env vars are set', async () => {
