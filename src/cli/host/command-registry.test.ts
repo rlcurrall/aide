@@ -125,6 +125,11 @@ describe('CommandRegistry', () => {
     expect(registry.commandOwner('pr:reply')).toBe('pull-requests');
     expect(registry.commandOwner('whoami')).toBe('legacy-auth');
     expect(registry.commandOwner('missing')).toBeNull();
+    expect(
+      registry.commands().find((command) => command.id === 'prime')
+    ).toMatchObject({
+      kind: 'descriptor',
+    });
     expect(registry.childCommandIds('pr')).toEqual(expectedPrChildCommandIds);
     expect(registry.allCommandIds()).toEqual([
       'jira',

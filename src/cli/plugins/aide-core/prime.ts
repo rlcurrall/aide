@@ -11,7 +11,7 @@
  * - Shows configuration status warnings when env vars are missing
  */
 
-import type { CommandModule } from 'yargs';
+import { Effect } from 'effect';
 
 import {
   probeJiraConfig,
@@ -19,6 +19,7 @@ import {
   probeGithubConfig,
 } from '@lib/config.js';
 import { isGhCliAvailable } from '@lib/gh-utils.js';
+import { defineAideCommand, textResult } from '@cli/host/command-descriptor.js';
 
 type ConfigState = 'configured' | 'not-configured' | 'misconfigured';
 
@@ -198,12 +199,10 @@ export async function buildPrimeOutput(
   return parts.join('\n').trim();
 }
 
-const command: CommandModule = {
-  command: 'prime',
-  describe: 'Output aide context for session start hook',
-  async handler() {
-    console.log(await buildPrimeOutput());
-  },
-};
-
-export default command;
+export const primeCommandDescriptor = defineAideCommand({
+  id: 'prime',
+  route: 'prime',
+  summary: 'Output aide context for session start hook',
+  run: () =>
+    Effect.promise(() => buildPrimeOutput()).pipe(Effect.map(textResult)),
+});
