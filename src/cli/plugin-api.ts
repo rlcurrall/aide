@@ -17,11 +17,19 @@ export {
   type AideHostServices,
 } from './host/runtime-context.js';
 export type {
+  AideAuthAccount,
+  AideAuthProviderCapability,
+  AideAuthScope,
+  AideAuthStatusRequest,
   AideCommandExtensionPolicy,
   AidePluginAuthCapability,
   AidePluginAuthState,
   AidePluginAuthStatus,
   AidePluginCapabilities,
+  AidePrimeContributionCapability,
+  AidePrimeSection,
+  AidePrimeStatusMessages,
+  AidePrimeStatusContribution,
   AidePullRequestAuthor,
   AidePullRequestBranchLookupRequest,
   AidePullRequestBranchLookupResult,
@@ -57,6 +65,8 @@ export type AidePluginTrustLevel = (typeof aidePluginTrustLevels)[number];
 export const aidePluginCapabilityKinds = Object.freeze([
   'commands',
   'auth',
+  'auth-provider',
+  'prime-contribution',
   'pull-request-provider',
 ] as const);
 export type AidePluginCapabilityKind =
@@ -96,6 +106,7 @@ export interface AidePluginManifest {
   };
   readonly conflicts?: {
     readonly commands?: AidePluginConflictPolicy;
+    readonly authProviders?: AidePluginConflictPolicy;
     readonly pullRequestProviders?: AidePluginConflictPolicy;
   };
 }

@@ -3,207 +3,324 @@
  *
  * This command is designed to be called by Claude Code's SessionStart hook
  * to inject awareness of aide tooling into the agent's context.
- *
- * Design considerations:
- * - Outputs minimal context (~80 tokens) to preserve context budget
- * - Uses generic "Pull Requests" language to support both Azure DevOps and GitHub
- * - Shows configuration status warnings for missing or malformed credentials
  */
 
 import { Effect } from 'effect';
 
-import {
-  probeJiraConfig,
-  probeAdoConfig,
-  probeGithubConfig,
-  type ConfigStatus,
-  type GithubConfigValue,
-} from '@lib/config.js';
-import { isGhCliAvailable } from '@lib/gh-utils.js';
-import type { AzureDevOpsConfig, JiraConfig } from '@schemas/config.js';
 import { defineAideCommand, textResult } from '@cli/host/command-descriptor.js';
 import type {
   AideCommandDescriptor,
   CommandResult,
 } from '@cli/host/command-descriptor.js';
+import {
+  AideHostServicesTag,
+  type AideHostServices,
+} from '@cli/host/runtime-context.js';
+import type {
+  AidePluginAuthState,
+  AidePluginAuthStatus,
+  AidePrimeSection,
+  AidePrimeStatusContribution,
+  AidePrimeStatusMessages,
+} from '@cli/host/plugin-descriptor.js';
 
 type ConfigState = 'configured' | 'not-configured' | 'misconfigured';
-interface PrimeConfigStatuses {
-  readonly jiraStatus: ConfigStatus<JiraConfig>;
-  readonly adoStatus: ConfigStatus<AzureDevOpsConfig>;
-  readonly ghStatus: ConfigStatus<GithubConfigValue>;
+
+interface ResolvedPrimeStatus {
+  readonly index: number;
+  readonly contribution: AidePrimeStatusContribution;
+  readonly status: AidePluginAuthStatus;
 }
 
-function probeConfig<A>(run: () => Promise<A>): Effect.Effect<A, unknown> {
-  return Effect.tryPromise({
-    try: run,
-    catch: (error) => error,
+interface PrimeStatusGroup {
+  readonly id: string;
+  readonly label: string;
+  readonly state: ConfigState;
+  readonly detail?: string;
+}
+
+function authStateToConfigState(state: AidePluginAuthState): ConfigState {
+  if (state === 'configured') return 'configured';
+  if (state === 'misconfigured') return 'misconfigured';
+  return 'not-configured';
+}
+
+function aggregateConfigState(states: readonly ConfigState[]): ConfigState {
+  if (states.includes('configured')) return 'configured';
+  if (states.includes('misconfigured')) return 'misconfigured';
+  return 'not-configured';
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null;
+}
+
+function formatUnknownError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function fallbackPluginStatus(
+  pluginId: string,
+  label: string,
+  reason: string
+): AidePluginAuthStatus {
+  return {
+    state: 'misconfigured',
+    detail: `Plugin '${pluginId}' ${label} status is unavailable: ${reason}`,
+  };
+}
+
+function validatePrimeStatus(
+  pluginId: string,
+  contribution: AidePrimeStatusContribution,
+  status: unknown
+): AidePluginAuthStatus {
+  if (!isRecord(status)) {
+    return fallbackPluginStatus(
+      pluginId,
+      contribution.label,
+      'returned a non-object status'
+    );
+  }
+
+  const state = status.state;
+  if (
+    state !== 'configured' &&
+    state !== 'not-configured' &&
+    state !== 'misconfigured' &&
+    state !== 'unavailable'
+  ) {
+    return fallbackPluginStatus(
+      pluginId,
+      contribution.label,
+      'returned an invalid status state'
+    );
+  }
+
+  if (status.detail !== undefined && typeof status.detail !== 'string') {
+    return fallbackPluginStatus(
+      pluginId,
+      contribution.label,
+      'returned a non-string status detail'
+    );
+  }
+
+  return Object.freeze({
+    state,
+    detail: status.detail,
   });
 }
 
+function validatePrimeSection(section: unknown): AidePrimeSection | null {
+  if (!isRecord(section)) return null;
+  if (typeof section.id !== 'string' || section.id.trim() === '') return null;
+  if (typeof section.body !== 'string') return null;
+  if (
+    section.order !== undefined &&
+    (typeof section.order !== 'number' || !Number.isFinite(section.order))
+  ) {
+    return null;
+  }
+
+  return Object.freeze({
+    id: section.id,
+    body: section.body,
+    ...(section.order === undefined ? {} : { order: section.order }),
+  });
+}
+
+function validatePrimeSections(sections: unknown): readonly AidePrimeSection[] {
+  if (!Array.isArray(sections)) {
+    return [];
+  }
+
+  return Object.freeze(
+    sections.flatMap((section) => {
+      const validated = validatePrimeSection(section);
+      return validated === null ? [] : [validated];
+    })
+  );
+}
+
 /**
- * Build configuration status section if any service is not configured
+ * Build configuration status section if any service is not configured.
  */
-function buildConfigStatusSection({
-  jiraStatus,
-  adoStatus,
-  ghStatus,
-}: PrimeConfigStatuses): string {
-  function toState(kind: string): ConfigState {
-    if (kind === 'env' || kind === 'keyring') return 'configured';
-    if (kind === 'malformed') return 'misconfigured';
-    return 'not-configured';
+function buildConfigStatusSection(
+  resolvedStatuses: readonly ResolvedPrimeStatus[]
+): string {
+  const statusesByGroup = new Map<
+    string,
+    {
+      readonly label: string;
+      readonly firstIndex: number;
+      readonly states: ConfigState[];
+      readonly messages: Partial<Record<ConfigState, string>>;
+      readonly statusDetails: Partial<Record<ConfigState, string[]>>;
+    }
+  >();
+
+  for (const { index, contribution, status } of resolvedStatuses) {
+    const state = authStateToConfigState(status.state);
+    const existing = statusesByGroup.get(contribution.groupId);
+    if (existing === undefined) {
+      statusesByGroup.set(contribution.groupId, {
+        label: contribution.groupLabel,
+        firstIndex: index,
+        states: [state],
+        messages: primeMessagesByState(contribution.messages),
+        statusDetails:
+          status.detail === undefined ? {} : { [state]: [status.detail] },
+      });
+      continue;
+    }
+    existing.states.push(state);
+    mergePrimeMessages(existing.messages, contribution.messages);
+    if (status.detail !== undefined) {
+      const details = existing.statusDetails[state] ?? [];
+      details.push(status.detail);
+      existing.statusDetails[state] = details;
+    }
   }
 
-  const jiraState = toState(jiraStatus.kind);
+  const groups: PrimeStatusGroup[] = Array.from(statusesByGroup.entries())
+    .sort(([, left], [, right]) => left.firstIndex - right.firstIndex)
+    .map(([id, statusGroup]) => {
+      const state = aggregateConfigState(statusGroup.states);
+      return {
+        id,
+        label: statusGroup.label,
+        state,
+        detail:
+          statusGroup.messages[state] ??
+          (state === 'configured'
+            ? undefined
+            : statusGroup.statusDetails[state]?.find(
+                (detail) => detail.trim() !== ''
+              )),
+      };
+    });
 
-  // PR platform is configured if either ADO or GitHub is available
-  let prState: ConfigState;
-  const adoState = toState(adoStatus.kind);
-  const ghState = toState(ghStatus.kind);
-  if (adoState === 'configured' || ghState === 'configured') {
-    prState = 'configured';
-  } else if (adoState === 'misconfigured' || ghState === 'misconfigured') {
-    prState = 'misconfigured';
-  } else {
-    prState = 'not-configured';
-  }
-
-  // If everything is configured, return empty string (no status section needed)
-  if (jiraState === 'configured' && prState === 'configured') {
+  if (groups.every((group) => group.state === 'configured')) {
     return '';
   }
 
   const lines: string[] = ['## Configuration Status', ''];
 
-  if (jiraState === 'configured') {
-    lines.push('- Jira: Configured');
-  } else if (jiraState === 'misconfigured') {
-    lines.push('- Jira: Misconfigured (run `aide login jira` to reconfigure)');
-  } else {
-    lines.push(
-      '- Jira: Not configured (run `aide login jira`, or set JIRA_URL, JIRA_EMAIL/JIRA_USERNAME, JIRA_API_TOKEN/JIRA_TOKEN)'
-    );
-  }
-
-  if (prState === 'configured') {
-    lines.push('- Pull Requests: Configured');
-  } else if (prState === 'misconfigured') {
-    lines.push(
-      '- Pull Requests: Misconfigured (run `aide login github` or `aide login ado` to reconfigure)'
-    );
-  } else {
-    lines.push(
-      '- Pull Requests: Not configured (run `gh auth login`, `aide login github`, or `aide login ado`)'
-    );
+  for (const group of groups) {
+    lines.push(formatConfigStatusLine(group));
   }
 
   lines.push('');
   return lines.join('\n');
 }
 
-function buildConfigStatusSectionEffect(
-  ghAvailable: () => boolean
-): Effect.Effect<string, unknown, never> {
-  return Effect.all(
-    {
-      jiraStatus: probeConfig(() => probeJiraConfig()),
-      adoStatus: probeConfig(() => probeAdoConfig()),
-      ghStatus: probeConfig(() => probeGithubConfig({ ghAvailable })),
-    },
-    { concurrency: 3 }
-  ).pipe(Effect.map(buildConfigStatusSection));
+function primeMessagesByState(
+  messages: AidePrimeStatusMessages | undefined
+): Partial<Record<ConfigState, string>> {
+  if (messages === undefined) return {};
+  return {
+    configured: messages.configured,
+    'not-configured': messages.notConfigured,
+    misconfigured: messages.misconfigured,
+  };
 }
 
-const JIRA_COMMANDS = `## Jira Commands
+function mergePrimeMessages(
+  target: Partial<Record<ConfigState, string>>,
+  source: AidePrimeStatusMessages | undefined
+): void {
+  const sourceByState = primeMessagesByState(source);
+  for (const state of [
+    'configured',
+    'not-configured',
+    'misconfigured',
+  ] as const) {
+    target[state] ??= sourceByState[state];
+  }
+}
 
-\`\`\`bash
-# Search tickets
-aide jira search "assignee = currentUser() AND status = 'In Progress'"
+function formatConfigStatusLine(group: PrimeStatusGroup): string {
+  const detail = group.detail === undefined ? '' : ` (${group.detail})`;
+  return `- ${group.label}: ${formatConfigState(group.state)}${detail}`;
+}
 
-# Get ticket details
-aide jira view PROJ-123
+function formatConfigState(state: ConfigState): string {
+  if (state === 'configured') return 'Configured';
+  if (state === 'misconfigured') return 'Misconfigured';
+  return 'Not configured';
+}
 
-# Create ticket
-aide jira create -p PROJ -t Task -s "Summary" --assignee me
+function collectPrimeStatuses(
+  services: AideHostServices
+): Effect.Effect<readonly ResolvedPrimeStatus[], unknown, never> {
+  const contributions = services.primeContributions().flatMap((entry) =>
+    (entry.capability.status ?? []).map((contribution) => ({
+      pluginId: entry.pluginId,
+      contribution,
+    }))
+  );
 
-# Update ticket fields
-aide jira update PROJ-123 --assignee me --priority High
-aide jira update PROJ-123 --description "New description"
+  return Effect.all(
+    contributions.map(({ pluginId, contribution }, index) =>
+      contribution.status().pipe(
+        Effect.map((status) => ({
+          index,
+          contribution,
+          status: validatePrimeStatus(pluginId, contribution, status),
+        })),
+        Effect.catchAll((error) =>
+          Effect.succeed({
+            index,
+            contribution,
+            status: fallbackPluginStatus(
+              pluginId,
+              contribution.label,
+              formatUnknownError(error)
+            ),
+          })
+        )
+      )
+    ),
+    { concurrency: contributions.length || 1 }
+  );
+}
 
-# Set custom fields (use field name or ID - auto-formats by type)
-aide jira update PROJ-123 --field "Severity=Critical"
-aide jira create -p PROJ -t Bug -s "Bug" --field "Severity=High"
+function sortPrimeSections(
+  left: AidePrimeSection,
+  right: AidePrimeSection
+): number {
+  const order = (left.order ?? 0) - (right.order ?? 0);
+  if (order !== 0) return order;
+  return left.id.localeCompare(right.id);
+}
 
-# Discover available fields for a project/issue type
-aide jira fields PROJ -t Bug --show-values
+function collectPrimeSections(
+  services: AideHostServices
+): Effect.Effect<readonly AidePrimeSection[], unknown, never> {
+  const sectionProviders = services
+    .primeContributions()
+    .flatMap((entry) =>
+      entry.capability.sections === undefined ? [] : [entry.capability.sections]
+    );
 
-# List boards and get active sprint
-aide jira boards PROJ
-aide jira sprint 123                    # active sprint for board
-aide jira sprint 123 --state future     # future sprints
+  return Effect.all(
+    sectionProviders.map((sections) =>
+      sections().pipe(
+        Effect.map(validatePrimeSections),
+        Effect.catchAll(() => Effect.succeed([]))
+      )
+    ),
+    { concurrency: sectionProviders.length || 1 }
+  ).pipe(
+    Effect.map((sections) => sections.flat()),
+    Effect.map((sections) => [...sections].sort(sortPrimeSections))
+  );
+}
 
-# Search within active sprint
-aide jira search "assignee = currentUser()" --sprint-board 123
-
-# Change workflow status
-aide jira transition PROJ-123 "In Progress"
-aide jira transition PROJ-123 --list  # show available transitions
-
-# Add comment
-aide jira comment PROJ-123 "Work completed, ready for review"
-
-# Get recent comments
-aide jira comments PROJ-123 --latest 5
-
-# Edit or delete a comment
-aide jira edit-comment PROJ-123 <comment-id> "Updated text"
-aide jira delete-comment PROJ-123 <comment-id>
-
-# Manage attachments
-aide jira attach PROJ-123 --list
-aide jira attach PROJ-123 --upload ./file.pdf
-\`\`\``;
-
-const PR_COMMANDS = `## Pull Request Commands
-
-Note: \`--pr\` flag is optional - auto-discovers from current branch if omitted.
-
-\`\`\`bash
-# List active PRs
-aide pr list --status active
-
-# View PR details
-aide pr view --pr 123
-aide pr view  # auto-detect from branch
-
-# View PR diff
-aide pr diff --pr 123
-aide pr diff --stat  # summary with line counts
-aide pr diff --files  # list changed files only
-aide pr diff --file src/app.ts  # diff for specific file only
-aide pr diff --no-fetch  # skip auto-fetching branches
-
-# Get PR comments (with explicit PR ID)
-aide pr comments --pr 24094 --latest 10
-aide pr comments --latest 10  # auto-detect from branch
-
-# Create PR
-aide pr create --title "feat: add new feature" --base main
-
-# Update PR
-aide pr update --pr 123 --title "Updated title"
-aide pr update --publish  # auto-detect, publish draft
-
-# Post comment
-aide pr comment "LGTM, approved" --pr 123
-aide pr comment "Needs work"  # auto-detect from branch
-
-# Reply to thread
-aide pr reply 456 "Fixed the issue" --pr 123
-\`\`\``;
-
-function formatPrimeOutput(configStatus: string): string {
+function formatPrimeOutput(
+  configStatus: string,
+  sections: readonly AidePrimeSection[]
+): string {
   const parts = ['# aide - Jira & Git Hosting Integration', ''];
 
   if (configStatus) {
@@ -213,43 +330,56 @@ function formatPrimeOutput(configStatus: string): string {
   parts.push(
     'Use aide instead of az/gh/jira CLI tools. Auto-discovers org/project/repo from git remote.',
     '',
-    JIRA_COMMANDS,
-    '',
-    PR_COMMANDS
+    ...sections.flatMap((section) => [section.body, ''])
   );
 
   return parts.join('\n').trim();
 }
 
-export function buildPrimeOutputEffect(
-  opts: { ghAvailable?: () => boolean } = {}
-): Effect.Effect<string, unknown, never> {
-  const ghAvailable = opts.ghAvailable ?? isGhCliAvailable;
-  return buildConfigStatusSectionEffect(ghAvailable).pipe(
-    Effect.map(formatPrimeOutput)
+export function buildPrimeOutputEffect(): Effect.Effect<
+  string,
+  unknown,
+  AideHostServicesTag
+> {
+  return Effect.gen(function* () {
+    const services = yield* AideHostServicesTag;
+    const [statuses, sections] = yield* Effect.all(
+      [collectPrimeStatuses(services), collectPrimeSections(services)],
+      { concurrency: 2 }
+    );
+
+    return formatPrimeOutput(buildConfigStatusSection(statuses), sections);
+  });
+}
+
+export async function buildPrimeOutput(opts: {
+  readonly services: AideHostServices;
+}): Promise<string> {
+  return Effect.runPromise(
+    buildPrimeOutputEffect().pipe(
+      Effect.provideService(AideHostServicesTag, opts.services)
+    )
   );
 }
 
-export async function buildPrimeOutput(
-  opts: { ghAvailable?: () => boolean } = {}
-): Promise<string> {
-  return Effect.runPromise(buildPrimeOutputEffect(opts));
+export function buildPrimeCommandEffect(): Effect.Effect<
+  CommandResult,
+  unknown,
+  AideHostServicesTag
+> {
+  return buildPrimeOutputEffect().pipe(Effect.map(textResult));
 }
 
-export function buildPrimeCommandEffect(
-  opts: { ghAvailable?: () => boolean } = {}
-): Effect.Effect<CommandResult, unknown, never> {
-  return buildPrimeOutputEffect(opts).pipe(Effect.map(textResult));
-}
-
-export function makePrimeCommandDescriptor(
-  opts: { ghAvailable?: () => boolean } = {}
-): AideCommandDescriptor<object, unknown, never> {
-  return defineAideCommand<object, unknown, never>({
+export function makePrimeCommandDescriptor(): AideCommandDescriptor<
+  object,
+  unknown,
+  AideHostServicesTag
+> {
+  return defineAideCommand<object, unknown, AideHostServicesTag>({
     id: 'prime',
     route: 'prime',
     summary: 'Output aide context for session start hook',
-    run: () => buildPrimeCommandEffect(opts),
+    run: () => buildPrimeCommandEffect(),
   });
 }
 

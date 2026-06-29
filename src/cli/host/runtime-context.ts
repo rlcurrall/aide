@@ -1,7 +1,13 @@
 import { Context, type Effect } from 'effect';
 
-import type { CommandRegistry } from './command-registry.js';
 import type {
+  CommandRegistry,
+  OwnedPluginCapability,
+} from './command-registry.js';
+import type {
+  AideAuthProviderCapability,
+  AideDiscoveredCapability,
+  AidePrimeContributionCapability,
   AidePullRequestBranchLookupRequest,
   AidePullRequestBranchLookupResult,
   AidePullRequestListRequest,
@@ -28,6 +34,8 @@ import {
 const aideHostContexts = new WeakMap<object, AideHostContext>();
 
 export interface AideHostServices {
+  readonly authProviders: () => readonly AideDiscoveredCapability<AideAuthProviderCapability>[];
+  readonly primeContributions: () => readonly AideDiscoveredCapability<AidePrimeContributionCapability>[];
   readonly resolvePullRequestProviderForRemote: (
     remoteUrl: string,
     options?: PullRequestProviderResolutionOptions<AidePullRequestRemoteMatch>
@@ -84,6 +92,19 @@ export interface AideHostContext {
   readonly services: AideHostServices;
 }
 
+function discoveredCapabilities<TCapability>(
+  capabilities: readonly OwnedPluginCapability<TCapability>[]
+): readonly AideDiscoveredCapability<TCapability>[] {
+  return Object.freeze(
+    capabilities.map((entry) =>
+      Object.freeze({
+        pluginId: entry.pluginId,
+        capability: entry.capability,
+      })
+    )
+  );
+}
+
 /** @internal Legacy yargs bridge. Descriptor commands should use Effect context. */
 export function attachAideHostContext<TArgv extends object>(
   argv: TArgv,
@@ -110,8 +131,16 @@ export function getAideHostContext(argv: unknown): AideHostContext | null {
 export function createAideHostServices(
   registry: CommandRegistry
 ): AideHostServices {
+  const authProviders = discoveredCapabilities(
+    registry.capabilities.authProviders()
+  );
+  const primeContributions = discoveredCapabilities(
+    registry.capabilities.primeContributions()
+  );
   const pullRequestProviders = registry.capabilities.pullRequestProviders();
   return Object.freeze({
+    authProviders: () => authProviders,
+    primeContributions: () => primeContributions,
     resolvePullRequestProviderForRemote: (
       remoteUrl: string,
       options: PullRequestProviderResolutionOptions<AidePullRequestRemoteMatch> = {}

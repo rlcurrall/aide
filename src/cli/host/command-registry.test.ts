@@ -47,7 +47,13 @@ class UnsupportedDescriptorService extends Context.Tag(
 
 function externalManifest(
   id: string,
-  capabilities: readonly ('commands' | 'auth' | 'pull-request-provider')[] = []
+  capabilities: readonly (
+    | 'commands'
+    | 'auth'
+    | 'auth-provider'
+    | 'prime-contribution'
+    | 'pull-request-provider'
+  )[] = []
 ) {
   return {
     id,
@@ -439,6 +445,22 @@ describe('CommandRegistry', () => {
       })
     ).toThrow(
       "Plugin 'external-tool' manifest does not declare provided capability 'commands'"
+    );
+
+    expect(() =>
+      registry.registerExternalPlugin(plugin, {
+        manifest: {
+          id: 'external-tool',
+          version: '1.0.0',
+          aidePluginApiVersion: AIDE_PLUGIN_API_VERSION,
+          capabilities: ['commands'],
+          conflicts: {
+            authProviders: 'replace' as 'reject',
+          },
+        },
+      })
+    ).toThrow(
+      "Plugin 'external-tool' manifest conflicts.authProviders must be 'reject'"
     );
     expect(registry.pluginIds()).toEqual([]);
   });
@@ -1436,6 +1458,236 @@ describe('CommandRegistry', () => {
 
     expect(statusCalls).toBe(1);
     expect(status).toEqual({ state: 'configured', detail: 'ready' });
+  });
+
+  test('discovers auth providers and prime contributions without invoking them', async () => {
+    const registry = createCommandRegistry();
+    let statusCalls = 0;
+    let sectionCalls = 0;
+    const status = () =>
+      Effect.sync(() => {
+        statusCalls += 1;
+        return {
+          state: 'configured' as const,
+          detail: 'ready',
+        };
+      });
+
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'dynamic-auth-plugin',
+        summary: 'Plugin with dynamic auth',
+        commands: [],
+        capabilities: {
+          authProvider: {
+            providerId: 'dynamic-auth',
+            label: 'Dynamic Auth',
+            status,
+          },
+          primeContribution: {
+            status: [
+              {
+                groupId: 'dynamic-auth',
+                groupLabel: 'Dynamic Auth',
+                label: 'Dynamic Auth',
+                status,
+              },
+            ],
+            sections: () =>
+              Effect.sync(() => {
+                sectionCalls += 1;
+                return [
+                  {
+                    id: 'dynamic-auth-help',
+                    order: 500,
+                    body: '## Dynamic Auth',
+                  },
+                ];
+              }),
+          },
+        },
+      })
+    );
+
+    const authProviders = registry.capabilities.authProviders();
+    const primeContributions = registry.capabilities.primeContributions();
+
+    expect(statusCalls).toBe(0);
+    expect(sectionCalls).toBe(0);
+    expect(authProviders).toHaveLength(1);
+    expect(authProviders[0]).toMatchObject({
+      pluginId: 'dynamic-auth-plugin',
+      capability: {
+        providerId: 'dynamic-auth',
+        label: 'Dynamic Auth',
+      },
+    });
+    expect(primeContributions).toHaveLength(1);
+    expect(primeContributions[0]?.pluginId).toBe('dynamic-auth-plugin');
+
+    const providerStatus = await Effect.runPromise(
+      authProviders[0]!.capability.status()
+    );
+    const primeStatus = await Effect.runPromise(
+      primeContributions[0]!.capability.status![0]!.status()
+    );
+    const sections = await Effect.runPromise(
+      primeContributions[0]!.capability.sections!()
+    );
+
+    expect(providerStatus).toEqual({ state: 'configured', detail: 'ready' });
+    expect(primeStatus).toEqual({ state: 'configured', detail: 'ready' });
+    expect(sections).toEqual([
+      { id: 'dynamic-auth-help', order: 500, body: '## Dynamic Auth' },
+    ]);
+    expect(statusCalls).toBe(2);
+    expect(sectionCalls).toBe(1);
+  });
+
+  test('rejects duplicate dynamic auth provider ids', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerPlugin(
+      defineAidePlugin({
+        id: 'first-auth-plugin',
+        summary: 'First auth plugin',
+        commands: [],
+        capabilities: {
+          authProvider: {
+            providerId: 'shared-auth',
+            label: 'Shared Auth',
+            status: () => Effect.succeed({ state: 'configured' }),
+          },
+        },
+      })
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'second-auth-plugin',
+          summary: 'Second auth plugin',
+          commands: [],
+          capabilities: {
+            authProvider: {
+              providerId: 'shared-auth',
+              label: 'Shared Auth',
+              status: () => Effect.succeed({ state: 'configured' }),
+            },
+          },
+        })
+      )
+    ).toThrow(
+      "Auth provider 'shared-auth' is already registered by plugin 'first-auth-plugin'"
+    );
+  });
+
+  test('validates auth provider and prime contribution capability shape', () => {
+    const registry = createCommandRegistry();
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'bad-auth-plugin',
+          summary: 'Bad auth plugin',
+          commands: [],
+          capabilities: {
+            authProvider: {
+              providerId: 'bad-auth',
+              label: 'Bad Auth',
+              status: 'ready',
+            },
+          },
+        } as unknown as Parameters<typeof defineAidePlugin>[0])
+      )
+    ).toThrow(
+      "Plugin 'bad-auth-plugin' auth provider capability field 'status' must be a function"
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'bad-prime-plugin',
+          summary: 'Bad prime plugin',
+          commands: [],
+          capabilities: {
+            primeContribution: {
+              status: 'ready',
+            },
+          },
+        } as unknown as Parameters<typeof defineAidePlugin>[0])
+      )
+    ).toThrow(
+      "Plugin 'bad-prime-plugin' prime contribution status must be an array"
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'bad-prime-message-plugin',
+          summary: 'Bad prime message plugin',
+          commands: [],
+          capabilities: {
+            primeContribution: {
+              status: [
+                {
+                  groupId: 'bad-prime',
+                  groupLabel: 'Bad Prime',
+                  label: 'Bad Prime',
+                  messages: {
+                    notConfigured: '',
+                  },
+                  status: () => Effect.succeed({ state: 'not-configured' }),
+                },
+              ],
+            },
+          },
+        } as unknown as Parameters<typeof defineAidePlugin>[0])
+      )
+    ).toThrow(
+      "Plugin 'bad-prime-message-plugin' prime contribution message 'notConfigured' must be a non-empty string"
+    );
+  });
+
+  test('registers external auth provider and prime contribution capabilities dynamically', () => {
+    const registry = createCommandRegistry();
+
+    registry.registerExternalPlugin(
+      definePublicAidePlugin({
+        id: 'external-tool',
+        summary: 'External tool plugin',
+        commands: [],
+        capabilities: {
+          authProvider: {
+            providerId: 'external-tool-auth',
+            label: 'External Tool',
+            status: () => Effect.succeed({ state: 'configured' }),
+          },
+          primeContribution: {
+            sections: () =>
+              Effect.succeed([
+                {
+                  id: 'external-tool-help',
+                  body: '## External Tool',
+                },
+              ]),
+          },
+        },
+      }),
+      {
+        manifest: externalManifest('external-tool', [
+          'auth-provider',
+          'prime-contribution',
+        ]),
+      }
+    );
+
+    expect(
+      registry.capabilities
+        .authProviders()
+        .map((provider) => provider.capability.providerId)
+    ).toEqual(['external-tool-auth']);
+    expect(registry.capabilities.primeContributions()).toHaveLength(1);
   });
 
   test('discovers pull request provider capabilities with plugin ownership', () => {

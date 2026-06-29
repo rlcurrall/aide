@@ -247,6 +247,27 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
     commands: [],
     capabilities: {
       auth: { status: authStatus },
+      authProvider: {
+        providerId: 'azure-devops',
+        label: 'Azure DevOps',
+        status: authStatus,
+      },
+      primeContribution: {
+        status: [
+          {
+            groupId: 'pull-requests',
+            groupLabel: 'Pull Requests',
+            label: 'Azure DevOps',
+            messages: {
+              misconfigured:
+                'run `aide login github` or `aide login ado` to reconfigure',
+              notConfigured:
+                'run `gh auth login`, `aide login github`, or `aide login ado`',
+            },
+            status: authStatus,
+          },
+        ],
+      },
       pullRequestProvider: {
         providerId: 'azure-devops',
         priority: 100,

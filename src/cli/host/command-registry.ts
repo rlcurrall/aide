@@ -16,6 +16,10 @@ import type {
   AidePullRequestProviderCapability,
   AidePullRequestProviderOperations,
   AnyYargsCommandModule,
+  AideAuthProviderCapability,
+  AidePrimeContributionCapability,
+  AidePrimeStatusContribution,
+  AidePrimeStatusMessages,
 } from './plugin-descriptor.js';
 import { corePullRequestProviderOwner } from './plugin-descriptor.js';
 import {
@@ -108,6 +112,19 @@ function assertFunction(
   }
 }
 
+function assertNonEmptyString(
+  pluginId: string,
+  capability: string,
+  field: string,
+  value: unknown
+): asserts value is string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(
+      `Plugin '${pluginId}' ${capability} capability field '${field}' must be a non-empty string`
+    );
+  }
+}
+
 function snapshotAuthCapability(
   pluginId: string,
   capability: unknown
@@ -120,6 +137,153 @@ function snapshotAuthCapability(
 
   return Object.freeze({
     status: capability.status as AidePluginAuthCapability['status'],
+  });
+}
+
+function snapshotAuthProviderCapability(
+  pluginId: string,
+  capability: unknown
+): AideAuthProviderCapability {
+  if (!isRecord(capability)) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider capability must be an object`
+    );
+  }
+
+  if (typeof capability.providerId !== 'string') {
+    throw new Error(`Plugin '${pluginId}' auth provider id must be a string`);
+  }
+  assertId('Auth provider', capability.providerId);
+  assertNonEmptyString(pluginId, 'auth provider', 'label', capability.label);
+  assertFunction(pluginId, 'auth provider', 'status', capability.status);
+  if (
+    capability.accounts !== undefined &&
+    typeof capability.accounts !== 'function'
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider capability field 'accounts' must be a function`
+    );
+  }
+
+  return Object.freeze({
+    providerId: capability.providerId,
+    label: capability.label,
+    status: capability.status as AideAuthProviderCapability['status'],
+    accounts:
+      capability.accounts === undefined
+        ? undefined
+        : (capability.accounts as AideAuthProviderCapability['accounts']),
+  });
+}
+
+function snapshotPrimeStatusContribution(
+  pluginId: string,
+  contribution: unknown
+): AidePrimeStatusContribution {
+  if (!isRecord(contribution)) {
+    throw new Error(
+      `Plugin '${pluginId}' prime contribution status entries must be objects`
+    );
+  }
+
+  if (typeof contribution.groupId !== 'string') {
+    throw new Error(
+      `Plugin '${pluginId}' prime contribution status group id must be a string`
+    );
+  }
+  assertId('Prime status group', contribution.groupId);
+  assertNonEmptyString(
+    pluginId,
+    'prime contribution',
+    'groupLabel',
+    contribution.groupLabel
+  );
+  assertNonEmptyString(
+    pluginId,
+    'prime contribution',
+    'label',
+    contribution.label
+  );
+  assertFunction(pluginId, 'prime contribution', 'status', contribution.status);
+
+  return Object.freeze({
+    groupId: contribution.groupId,
+    groupLabel: contribution.groupLabel,
+    label: contribution.label,
+    messages: snapshotPrimeStatusMessages(pluginId, contribution.messages),
+    status: contribution.status as AidePrimeStatusContribution['status'],
+  });
+}
+
+function snapshotPrimeStatusMessages(
+  pluginId: string,
+  messages: unknown
+): AidePrimeStatusMessages | undefined {
+  if (messages === undefined) return undefined;
+  if (!isRecord(messages)) {
+    throw new Error(
+      `Plugin '${pluginId}' prime contribution messages must be an object`
+    );
+  }
+
+  const snapshot: Record<string, string> = {};
+  for (const key of ['configured', 'notConfigured', 'misconfigured'] as const) {
+    const value = messages[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || value.trim() === '') {
+      throw new Error(
+        `Plugin '${pluginId}' prime contribution message '${key}' must be a non-empty string`
+      );
+    }
+    snapshot[key] = value;
+  }
+
+  return Object.freeze(snapshot);
+}
+
+function snapshotPrimeContributionCapability(
+  pluginId: string,
+  capability: unknown
+): AidePrimeContributionCapability {
+  if (!isRecord(capability)) {
+    throw new Error(
+      `Plugin '${pluginId}' prime contribution capability must be an object`
+    );
+  }
+
+  if (capability.status === undefined && capability.sections === undefined) {
+    throw new Error(
+      `Plugin '${pluginId}' prime contribution capability must provide status or sections`
+    );
+  }
+
+  if (capability.status !== undefined && !Array.isArray(capability.status)) {
+    throw new Error(
+      `Plugin '${pluginId}' prime contribution status must be an array`
+    );
+  }
+  if (
+    capability.sections !== undefined &&
+    typeof capability.sections !== 'function'
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' prime contribution capability field 'sections' must be a function`
+    );
+  }
+
+  return Object.freeze({
+    status:
+      capability.status === undefined
+        ? undefined
+        : Object.freeze(
+            capability.status.map((entry) =>
+              snapshotPrimeStatusContribution(pluginId, entry)
+            )
+          ),
+    sections:
+      capability.sections === undefined
+        ? undefined
+        : (capability.sections as AidePrimeContributionCapability['sections']),
   });
 }
 
@@ -297,6 +461,17 @@ function snapshotPluginCapabilities(
       capabilities.auth === undefined
         ? undefined
         : snapshotAuthCapability(pluginId, capabilities.auth),
+    authProvider:
+      capabilities.authProvider === undefined
+        ? undefined
+        : snapshotAuthProviderCapability(pluginId, capabilities.authProvider),
+    primeContribution:
+      capabilities.primeContribution === undefined
+        ? undefined
+        : snapshotPrimeContributionCapability(
+            pluginId,
+            capabilities.primeContribution
+          ),
     pullRequestProvider:
       capabilities.pullRequestProvider === undefined
         ? undefined
@@ -308,7 +483,12 @@ function snapshotPluginCapabilities(
 }
 
 function assertId(
-  kind: 'Command' | 'Plugin' | 'Pull request provider',
+  kind:
+    | 'Auth provider'
+    | 'Command'
+    | 'Plugin'
+    | 'Prime status group'
+    | 'Pull request provider',
   id: string
 ): void {
   if (id.trim() === '') {
@@ -526,6 +706,12 @@ function externalPluginCapabilityKinds(
   const capabilities: AidePluginCapabilityKind[] = [];
   if (plugin.commands.length > 0) capabilities.push('commands');
   if (plugin.capabilities?.auth !== undefined) capabilities.push('auth');
+  if (plugin.capabilities?.authProvider !== undefined) {
+    capabilities.push('auth-provider');
+  }
+  if (plugin.capabilities?.primeContribution !== undefined) {
+    capabilities.push('prime-contribution');
+  }
   if (plugin.capabilities?.pullRequestProvider !== undefined) {
     capabilities.push('pull-request-provider');
   }
@@ -703,7 +889,11 @@ function assertExternalPluginManifest(
         `Plugin '${plugin.id}' manifest conflicts must be an object`
       );
     }
-    for (const field of ['commands', 'pullRequestProviders'] as const) {
+    for (const field of [
+      'authProviders',
+      'commands',
+      'pullRequestProviders',
+    ] as const) {
       const policy = manifest.conflicts[field];
       if (policy !== undefined && policy !== 'reject') {
         throw new Error(
@@ -816,6 +1006,7 @@ export class CommandRegistry {
     AideCommandExtensionPolicy
   >();
   readonly #commandOwners = new Map<string, string>();
+  readonly #authProviderOwners = new Map<string, string>();
   readonly #pullRequestProviderOwners = new Map<string, string>();
 
   readonly capabilities = {
@@ -828,6 +1019,26 @@ export class CommandRegistry {
             : [ownedPluginCapability(plugin.id, capability)];
         })
       ),
+    authProviders:
+      (): readonly OwnedPluginCapability<AideAuthProviderCapability>[] =>
+        Object.freeze(
+          this.#plugins.flatMap((plugin) => {
+            const capability = plugin.capabilities?.authProvider;
+            return capability === undefined
+              ? []
+              : [ownedPluginCapability(plugin.id, capability)];
+          })
+        ),
+    primeContributions:
+      (): readonly OwnedPluginCapability<AidePrimeContributionCapability>[] =>
+        Object.freeze(
+          this.#plugins.flatMap((plugin) => {
+            const capability = plugin.capabilities?.primeContribution;
+            return capability === undefined
+              ? []
+              : [ownedPluginCapability(plugin.id, capability)];
+          })
+        ),
     pullRequestProviders:
       (): readonly OwnedPluginCapability<AidePullRequestProviderCapability>[] =>
         Object.freeze(
@@ -957,6 +1168,10 @@ export class CommandRegistry {
     assertId('Plugin', plugin.id);
     const snapshot = snapshotPlugin(plugin);
     this.#assertPluginAvailable(snapshot.id);
+    const authProvider = snapshot.capabilities?.authProvider;
+    if (authProvider !== undefined) {
+      this.#assertAuthProviderAvailable(snapshot.id, authProvider.providerId);
+    }
     const pullRequestProvider = snapshot.capabilities?.pullRequestProvider;
     if (pullRequestProvider !== undefined) {
       this.#assertPullRequestProviderAvailable(
@@ -1168,6 +1383,9 @@ export class CommandRegistry {
     }
 
     this.#pluginIds.add(snapshot.id);
+    if (authProvider !== undefined) {
+      this.#authProviderOwners.set(authProvider.providerId, snapshot.id);
+    }
     if (pullRequestProvider !== undefined) {
       this.#pullRequestProviderOwners.set(
         pullRequestProvider.providerId,
@@ -1233,6 +1451,17 @@ export class CommandRegistry {
   #assertPluginAvailable(id: string): void {
     if (this.#pluginIds.has(id)) {
       throw new Error(`Plugin '${id}' is already registered`);
+    }
+  }
+
+  #assertAuthProviderAvailable(pluginId: string, providerId: string): void {
+    assertId('Auth provider', providerId);
+
+    const existingOwner = this.#authProviderOwners.get(providerId);
+    if (existingOwner !== undefined) {
+      throw new Error(
+        `Auth provider '${providerId}' is already registered by plugin '${existingOwner}'`
+      );
     }
   }
 

@@ -40,6 +40,7 @@ type CreateGitHubClient = (options: {
 interface GitHubPluginOptions {
   readonly probeConfig?: ProbeGithubConfig;
   readonly createClient?: CreateGitHubClient;
+  readonly ghAvailable?: () => boolean;
 }
 
 function mapGithubAuthStatus(
@@ -75,7 +76,9 @@ function mapGithubAuthStatus(
 }
 
 export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
-  const probeConfig = opts.probeConfig ?? (() => probeGithubConfig());
+  const probeConfig =
+    opts.probeConfig ??
+    (() => probeGithubConfig({ ghAvailable: opts.ghAvailable }));
   const createClient =
     opts.createClient ?? ((options) => GitHubClient.create(options));
   const authStatus = () =>
@@ -210,6 +213,27 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
     commands: [],
     capabilities: {
       auth: { status: authStatus },
+      authProvider: {
+        providerId: 'github',
+        label: 'GitHub',
+        status: authStatus,
+      },
+      primeContribution: {
+        status: [
+          {
+            groupId: 'pull-requests',
+            groupLabel: 'Pull Requests',
+            label: 'GitHub',
+            messages: {
+              misconfigured:
+                'run `aide login github` or `aide login ado` to reconfigure',
+              notConfigured:
+                'run `gh auth login`, `aide login github`, or `aide login ado`',
+            },
+            status: authStatus,
+          },
+        ],
+      },
       pullRequestProvider: {
         providerId: 'github',
         priority: 100,

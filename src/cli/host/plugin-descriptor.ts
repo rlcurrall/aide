@@ -29,6 +29,11 @@ export interface AidePluginCommandPlacement {
   readonly extension?: AideCommandExtensionPolicy;
 }
 
+export interface AideDiscoveredCapability<TCapability> {
+  readonly pluginId: string;
+  readonly capability: TCapability;
+}
+
 export type AidePluginCommand =
   | {
       readonly kind: 'module';
@@ -60,6 +65,65 @@ export interface AidePluginAuthStatus {
 
 export interface AidePluginAuthCapability {
   readonly status: () => Effect.Effect<AidePluginAuthStatus, unknown, never>;
+}
+
+export interface AideAuthScope {
+  readonly id: string;
+  readonly label?: string;
+  readonly metadata?: Readonly<Record<string, string | number | boolean>>;
+}
+
+export interface AideAuthStatusRequest {
+  readonly scope?: AideAuthScope;
+}
+
+export interface AideAuthAccount {
+  readonly id: string;
+  readonly label: string;
+  readonly detail?: string;
+  readonly scope?: AideAuthScope;
+}
+
+export interface AideAuthProviderCapability {
+  readonly providerId: string;
+  readonly label: string;
+  readonly status: (
+    request?: AideAuthStatusRequest
+  ) => Effect.Effect<AidePluginAuthStatus, unknown, never>;
+  readonly accounts?: () => Effect.Effect<
+    readonly AideAuthAccount[],
+    unknown,
+    never
+  >;
+}
+
+export interface AidePrimeStatusMessages {
+  readonly configured?: string;
+  readonly notConfigured?: string;
+  readonly misconfigured?: string;
+}
+
+export interface AidePrimeStatusContribution {
+  readonly groupId: string;
+  readonly groupLabel: string;
+  readonly label: string;
+  readonly messages?: AidePrimeStatusMessages;
+  readonly status: () => Effect.Effect<AidePluginAuthStatus, unknown, never>;
+}
+
+export interface AidePrimeSection {
+  readonly id: string;
+  readonly order?: number;
+  readonly body: string;
+}
+
+export interface AidePrimeContributionCapability {
+  readonly status?: readonly AidePrimeStatusContribution[];
+  readonly sections?: () => Effect.Effect<
+    readonly AidePrimeSection[],
+    unknown,
+    never
+  >;
 }
 
 export type AidePullRequestProviderMatchSource =
@@ -238,6 +302,8 @@ export function corePullRequestProviderOwner(
 
 export interface AidePluginCapabilities {
   readonly auth?: AidePluginAuthCapability;
+  readonly authProvider?: AideAuthProviderCapability;
+  readonly primeContribution?: AidePrimeContributionCapability;
   readonly pullRequestProvider?: AidePullRequestProviderCapability;
 }
 
