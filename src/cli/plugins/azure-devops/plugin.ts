@@ -7,6 +7,9 @@ import {
   type AideAuthLoginRequest,
   type AidePullRequestBranchLookupRequest,
   type AidePullRequestBranchLookupResult,
+  type AidePullRequestDiffFileStatus,
+  type AidePullRequestDiffRequest,
+  type AidePullRequestDiffResult,
   type AidePullRequestListRequest,
   type AidePullRequestListResult,
   type AidePullRequestViewRequest,
@@ -23,7 +26,11 @@ import {
 } from '@lib/config.js';
 import { extractBranchName } from '@lib/git-utils.js';
 import { deleteSecret, setSecret } from '@lib/secrets.js';
-import type { AzureDevOpsPullRequest } from '@lib/types.js';
+import type {
+  AzureDevOpsChangeType,
+  AzureDevOpsPRChange,
+  AzureDevOpsPullRequest,
+} from '@lib/types.js';
 import {
   StoredAdoSchema,
   type AuthMethod,
@@ -41,7 +48,10 @@ import {
 type ProbeAdoConfig = () => Promise<ConfigStatus<AzureDevOpsConfig>>;
 type AzureDevOpsPullRequestClient = Pick<
   AzureDevOpsClient,
-  'listPullRequests' | 'getPullRequest' | 'getPullRequestLabels'
+  | 'listPullRequests'
+  | 'getPullRequest'
+  | 'getPullRequestLabels'
+  | 'getAllPullRequestChanges'
 >;
 type CreateAzureDevOpsClient = () => Promise<{
   readonly client: AzureDevOpsPullRequestClient;
@@ -296,6 +306,59 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
       catch: (error) => error,
     });
 
+  const getPullRequestDiff = (
+    request: AidePullRequestDiffRequest
+  ): Effect.Effect<AidePullRequestDiffResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot get pull request diffs for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient();
+        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
+        if (configuredOrg !== null && configuredOrg !== repository.org) {
+          throw new Error(
+            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
+          );
+        }
+
+        const [pr, labelsResponse, changes] = await Promise.all([
+          client.getPullRequest(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number
+          ),
+          client.getPullRequestLabels(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number
+          ),
+          client.getAllPullRequestChanges(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number
+          ),
+        ]);
+
+        return {
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: azureDevOpsPullRequestToViewItem(
+            pr,
+            labelsResponse.value
+              .filter((label) => label.active)
+              .map((label) => label.name)
+          ),
+          files: changes.map(azureDevOpsPullRequestChangeToDiffFile),
+        };
+      },
+      catch: (error) => error,
+    });
+
   const findPullRequestForBranch = (
     request: AidePullRequestBranchLookupRequest
   ): Effect.Effect<AidePullRequestBranchLookupResult, unknown, never> =>
@@ -456,6 +519,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
         operations: {
           listPullRequests,
           getPullRequest,
+          getPullRequestDiff,
           findPullRequestForBranch,
         },
       },
@@ -530,4 +594,35 @@ function azureDevOpsPullRequestToViewItem(
       : { targetBranch: extractBranchName(pr.targetRefName) }),
     labels,
   } as const;
+}
+
+function azureDevOpsPullRequestChangeToDiffFile(entry: AzureDevOpsPRChange) {
+  const previousPath = entry.originalPath ?? entry.sourceServerItem;
+  return {
+    path: entry.item?.path ?? entry.sourceServerItem ?? 'unknown',
+    status: azureDevOpsDiffFileStatus(entry.changeType),
+    providerStatus: entry.changeType,
+    ...(previousPath === undefined ? {} : { previousPath }),
+  } as const;
+}
+
+function azureDevOpsDiffFileStatus(
+  changeType: AzureDevOpsChangeType
+): AidePullRequestDiffFileStatus {
+  switch (changeType) {
+    case 'add':
+      return 'added';
+    case 'edit':
+      return 'modified';
+    case 'delete':
+      return 'deleted';
+    case 'rename':
+    case 'sourceRename':
+    case 'targetRename':
+      return 'renamed';
+    case 'none':
+      return 'unchanged';
+    default:
+      return 'unknown';
+  }
 }

@@ -781,6 +781,7 @@ function snapshotPullRequestProviderOperations(
 
   const listPullRequests = operations.listPullRequests;
   const getPullRequest = operations.getPullRequest;
+  const getPullRequestDiff = operations.getPullRequestDiff;
   const findPullRequestForBranch = operations.findPullRequestForBranch;
   if (
     listPullRequests !== undefined &&
@@ -796,6 +797,14 @@ function snapshotPullRequestProviderOperations(
     );
   }
   if (
+    getPullRequestDiff !== undefined &&
+    typeof getPullRequestDiff !== 'function'
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' pull request provider '${providerId}' operation 'getPullRequestDiff' must be a function`
+    );
+  }
+  if (
     findPullRequestForBranch !== undefined &&
     typeof findPullRequestForBranch !== 'function'
   ) {
@@ -807,6 +816,7 @@ function snapshotPullRequestProviderOperations(
   if (
     listPullRequests === undefined &&
     getPullRequest === undefined &&
+    getPullRequestDiff === undefined &&
     findPullRequestForBranch === undefined
   ) {
     return Object.freeze({});
@@ -824,6 +834,12 @@ function snapshotPullRequestProviderOperations(
       : {
           getPullRequest:
             getPullRequest as AidePullRequestProviderOperations['getPullRequest'],
+        }),
+    ...(getPullRequestDiff === undefined
+      ? {}
+      : {
+          getPullRequestDiff:
+            getPullRequestDiff as AidePullRequestProviderOperations['getPullRequestDiff'],
         }),
     ...(findPullRequestForBranch === undefined
       ? {}

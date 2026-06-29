@@ -10,6 +10,8 @@ import type {
   AidePrimeContributionCapability,
   AidePullRequestBranchLookupRequest,
   AidePullRequestBranchLookupResult,
+  AidePullRequestDiffRequest,
+  AidePullRequestDiffResult,
   AidePullRequestListRequest,
   AidePullRequestListResult,
   AidePullRequestRemoteMatch,
@@ -20,14 +22,23 @@ import type {
   AidePullRequestViewResult,
 } from './plugin-descriptor.js';
 import {
+  findPullRequestForBranchContextForRemote,
+  findPullRequestForBranchContextForRepository,
   findPullRequestForBranchForRemote,
   findPullRequestForBranchForRepository,
+  getPullRequestContextForRemote,
+  getPullRequestContextForRepository,
+  getPullRequestContextForUrl,
+  getPullRequestDiffForRemote,
+  getPullRequestDiffForRepository,
+  getPullRequestDiffForUrl,
   getPullRequestForRemote,
   getPullRequestForRepository,
   getPullRequestForUrl,
   listPullRequestsForRemote,
   listPullRequestsForRepository,
   type PullRequestProviderOperationInvocationError,
+  type PullRequestProviderOperationContext,
   resolvePullRequestProviderForRemote,
   resolvePullRequestProviderForRepository,
   resolvePullRequestProviderForUrl,
@@ -95,6 +106,61 @@ export interface AideHostServices {
     AidePullRequestViewResult,
     PullRequestProviderOperationInvocationError
   >;
+  readonly getPullRequestContextForRemote: (
+    remoteUrl: string,
+    request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    PullRequestProviderOperationContext<
+      AidePullRequestRemoteMatch,
+      AidePullRequestViewResult
+    >,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly getPullRequestContextForRepository: (
+    repository: AidePullRequestRepositoryRef,
+    request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    PullRequestProviderOperationContext<
+      AidePullRequestRepositoryMatch,
+      AidePullRequestViewResult
+    >,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly getPullRequestContextForUrl: (
+    url: string,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    PullRequestProviderOperationContext<
+      AidePullRequestUrlMatch,
+      AidePullRequestViewResult
+    >,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly getPullRequestDiffForRemote: (
+    remoteUrl: string,
+    request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestDiffResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly getPullRequestDiffForRepository: (
+    repository: AidePullRequestRepositoryRef,
+    request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestDiffResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly getPullRequestDiffForUrl: (
+    url: string,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestDiffResult,
+    PullRequestProviderOperationInvocationError
+  >;
   readonly findPullRequestForBranchForRemote: (
     remoteUrl: string,
     request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
@@ -109,6 +175,28 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestBranchLookupResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly findPullRequestForBranchContextForRemote: (
+    remoteUrl: string,
+    request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    PullRequestProviderOperationContext<
+      AidePullRequestRemoteMatch,
+      AidePullRequestBranchLookupResult
+    >,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly findPullRequestForBranchContextForRepository: (
+    repository: AidePullRequestRepositoryRef,
+    request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    PullRequestProviderOperationContext<
+      AidePullRequestRepositoryMatch,
+      AidePullRequestBranchLookupResult
+    >,
     PullRequestProviderOperationInvocationError
   >;
   readonly getPullRequestForUrl: (
@@ -244,6 +332,58 @@ export function createAideHostServices(
         request,
         options
       ),
+    getPullRequestContextForRemote: (
+      remoteUrl: string,
+      request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      getPullRequestContextForRemote(
+        pullRequestProviders,
+        remoteUrl,
+        request,
+        options
+      ),
+    getPullRequestContextForRepository: (
+      repository: AidePullRequestRepositoryRef,
+      request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      getPullRequestContextForRepository(
+        pullRequestProviders,
+        repository,
+        request,
+        options
+      ),
+    getPullRequestContextForUrl: (
+      url: string,
+      options: PullRequestProviderOperationOptions = {}
+    ) => getPullRequestContextForUrl(pullRequestProviders, url, options),
+    getPullRequestDiffForRemote: (
+      remoteUrl: string,
+      request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      getPullRequestDiffForRemote(
+        pullRequestProviders,
+        remoteUrl,
+        request,
+        options
+      ),
+    getPullRequestDiffForRepository: (
+      repository: AidePullRequestRepositoryRef,
+      request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      getPullRequestDiffForRepository(
+        pullRequestProviders,
+        repository,
+        request,
+        options
+      ),
+    getPullRequestDiffForUrl: (
+      url: string,
+      options: PullRequestProviderOperationOptions = {}
+    ) => getPullRequestDiffForUrl(pullRequestProviders, url, options),
     findPullRequestForBranchForRemote: (
       remoteUrl: string,
       request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
@@ -261,6 +401,28 @@ export function createAideHostServices(
       options: PullRequestProviderOperationOptions = {}
     ) =>
       findPullRequestForBranchForRepository(
+        pullRequestProviders,
+        repository,
+        request,
+        options
+      ),
+    findPullRequestForBranchContextForRemote: (
+      remoteUrl: string,
+      request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      findPullRequestForBranchContextForRemote(
+        pullRequestProviders,
+        remoteUrl,
+        request,
+        options
+      ),
+    findPullRequestForBranchContextForRepository: (
+      repository: AidePullRequestRepositoryRef,
+      request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      findPullRequestForBranchContextForRepository(
         pullRequestProviders,
         repository,
         request,

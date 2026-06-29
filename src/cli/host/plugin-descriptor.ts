@@ -336,6 +336,35 @@ export interface AidePullRequestViewResult {
   readonly pullRequest: AidePullRequestViewItem;
 }
 
+export type AidePullRequestDiffFileStatus =
+  | 'added'
+  | 'modified'
+  | 'deleted'
+  | 'renamed'
+  | 'copied'
+  | 'unchanged'
+  | 'unknown';
+
+export interface AidePullRequestDiffFile {
+  readonly path: string;
+  readonly status: AidePullRequestDiffFileStatus;
+  readonly providerStatus?: string;
+  readonly previousPath?: string;
+  readonly additions?: number;
+  readonly deletions?: number;
+  readonly changes?: number;
+  readonly patch?: string;
+}
+
+export interface AidePullRequestDiffRequest {
+  readonly match: AidePullRequestProviderMatch;
+  readonly pullRequest: AidePullRequestRef;
+}
+
+export interface AidePullRequestDiffResult extends AidePullRequestViewResult {
+  readonly files: readonly AidePullRequestDiffFile[];
+}
+
 export interface AidePullRequestBranchLookupRequest {
   readonly match: AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch;
   readonly branch: string;
@@ -352,6 +381,9 @@ export interface AidePullRequestProviderOperations {
   readonly getPullRequest?: (
     request: AidePullRequestViewRequest
   ) => Effect.Effect<AidePullRequestViewResult, unknown, never>;
+  readonly getPullRequestDiff?: (
+    request: AidePullRequestDiffRequest
+  ) => Effect.Effect<AidePullRequestDiffResult, unknown, never>;
   readonly findPullRequestForBranch?: (
     request: AidePullRequestBranchLookupRequest
   ) => Effect.Effect<AidePullRequestBranchLookupResult, unknown, never>;

@@ -7,6 +7,9 @@ import {
   type AideAuthLoginRequest,
   type AidePullRequestBranchLookupRequest,
   type AidePullRequestBranchLookupResult,
+  type AidePullRequestDiffFileStatus,
+  type AidePullRequestDiffRequest,
+  type AidePullRequestDiffResult,
   type AidePullRequestListRequest,
   type AidePullRequestListResult,
   type AidePullRequestListItemStatus,
@@ -24,6 +27,7 @@ import { isGhCliAvailable } from '@lib/gh-utils.js';
 import { GitHubClient } from '@lib/github-client.js';
 import type {
   GitHubListPROptions,
+  GitHubPRFile,
   GitHubPullRequest,
 } from '@lib/github-types.js';
 import {
@@ -44,7 +48,7 @@ import {
 type ProbeGithubConfig = () => Promise<ConfigStatus<GithubConfigValue>>;
 type GitHubPullRequestClient = Pick<
   GitHubClient,
-  'listPullRequests' | 'getPullRequest'
+  'listPullRequests' | 'getPullRequest' | 'getPullRequestFiles'
 >;
 type CreateGitHubClient = (options: {
   readonly host: string;
@@ -254,6 +258,42 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
       catch: (error) => error,
     });
 
+  const getPullRequestDiff = (
+    request: AidePullRequestDiffRequest
+  ): Effect.Effect<AidePullRequestDiffResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'github') {
+          throw new Error(
+            `GitHub provider cannot get pull request diffs for '${repository.kind}' repository refs`
+          );
+        }
+
+        const client = await createClient({ host: repository.host });
+        const [pr, files] = await Promise.all([
+          client.getPullRequest(
+            repository.owner,
+            repository.repo,
+            request.pullRequest.number
+          ),
+          client.getPullRequestFiles(
+            repository.owner,
+            repository.repo,
+            request.pullRequest.number
+          ),
+        ]);
+
+        return {
+          repository,
+          repositoryLabel: `${repository.host}/${repository.owner}/${repository.repo}`,
+          pullRequest: githubPullRequestToViewItem(pr),
+          files: files.map(githubPullRequestFileToDiffFile),
+        };
+      },
+      catch: (error) => error,
+    });
+
   const findPullRequestForBranch = (
     request: AidePullRequestBranchLookupRequest
   ): Effect.Effect<AidePullRequestBranchLookupResult, unknown, never> =>
@@ -385,6 +425,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         operations: {
           listPullRequests,
           getPullRequest,
+          getPullRequestDiff,
           findPullRequestForBranch,
         },
       },
@@ -451,4 +492,39 @@ function githubPullRequestToViewItem(pr: GitHubPullRequest) {
     targetBranch: pr.base.ref,
     labels: pr.labels.map((label) => label.name),
   } as const;
+}
+
+function githubPullRequestFileToDiffFile(file: GitHubPRFile) {
+  return {
+    path: file.filename,
+    status: githubDiffFileStatus(file.status),
+    providerStatus: file.status,
+    additions: file.additions,
+    deletions: file.deletions,
+    changes: file.changes,
+    ...(file.previous_filename === undefined
+      ? {}
+      : { previousPath: file.previous_filename }),
+    ...(file.patch === undefined ? {} : { patch: file.patch }),
+  } as const;
+}
+
+function githubDiffFileStatus(
+  status: GitHubPRFile['status']
+): AidePullRequestDiffFileStatus {
+  switch (status) {
+    case 'added':
+      return 'added';
+    case 'modified':
+    case 'changed':
+      return 'modified';
+    case 'removed':
+      return 'deleted';
+    case 'renamed':
+      return 'renamed';
+    case 'copied':
+      return 'copied';
+    case 'unchanged':
+      return 'unchanged';
+  }
 }

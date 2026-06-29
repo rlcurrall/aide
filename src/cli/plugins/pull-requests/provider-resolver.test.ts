@@ -38,6 +38,10 @@ import {
   UnsupportedPullRequestProviderError,
   findPullRequestForBranchForRemote,
   findPullRequestForBranchForRepository,
+  getPullRequestContextForRemote,
+  getPullRequestDiffForRemote,
+  getPullRequestDiffForRepository,
+  getPullRequestDiffForUrl,
   getPullRequestForRemote,
   getPullRequestForRepository,
   getPullRequestForUrl,
@@ -1004,6 +1008,7 @@ describe('pull request provider list operations', () => {
           },
           getPullRequest: async () =>
             fakeGitHubPullRequest({ number: 1, title: 'Unused' }),
+          getPullRequestFiles: async () => [],
         };
       },
     });
@@ -1077,6 +1082,7 @@ describe('pull request provider list operations', () => {
               title: 'Unused',
             }),
           getPullRequestLabels: async () => ({ value: [] }),
+          getAllPullRequestChanges: async () => [],
         },
       }),
     });
@@ -1365,6 +1371,7 @@ describe('pull request provider list operations', () => {
               title: 'Unused',
             }),
           getPullRequestLabels: async () => ({ value: [] }),
+          getAllPullRequestChanges: async () => [],
         },
       }),
     });
@@ -1497,6 +1504,7 @@ describe('pull request provider view operations', () => {
               labels: [{ id: 1, name: 'feature', color: '0f0' }],
             });
           },
+          getPullRequestFiles: async () => [],
         };
       },
     });
@@ -1560,6 +1568,7 @@ describe('pull request provider view operations', () => {
               ],
             };
           },
+          getAllPullRequestChanges: async () => [],
         },
       }),
     });
@@ -1779,6 +1788,443 @@ describe('pull request provider view operations', () => {
   });
 });
 
+describe('pull request provider diff operations', () => {
+  test('binds diff fallback to the provider selected for pull request metadata', async () => {
+    const calls: string[] = [];
+    const primaryProvider = fakeProvider('primary-plugin', 'primary', 200);
+    const fallbackProvider = fakeProvider('fallback-plugin', 'fallback', 100);
+
+    const context = await Effect.runPromise(
+      getPullRequestContextForRemote(
+        [
+          {
+            ...primaryProvider,
+            capability: {
+              ...primaryProvider.capability,
+              operations: {
+                getPullRequest: () => {
+                  calls.push('primary:getPullRequest');
+                  return Effect.succeed({
+                    repository: externalRepository('primary'),
+                    pullRequest: {
+                      id: 3,
+                      title: 'Primary provider PR',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Ada Lovelace' },
+                    },
+                  });
+                },
+              },
+            },
+          },
+          {
+            ...fallbackProvider,
+            capability: {
+              ...fallbackProvider.capability,
+              operations: {
+                getPullRequestDiff: () => {
+                  calls.push('fallback:getPullRequestDiff');
+                  return Effect.succeed({
+                    repository: externalRepository('fallback'),
+                    pullRequest: {
+                      id: 3,
+                      title: 'Fallback provider PR',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Grace Hopper' },
+                    },
+                    files: [{ path: 'src/index.ts', status: 'modified' }],
+                  });
+                },
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 3 } }
+      )
+    );
+
+    const error = await Effect.runPromise(
+      context
+        .getPullRequestDiff({ pullRequest: { number: 3 } })
+        .pipe(Effect.flip)
+    );
+
+    expect(context.provider.providerId).toBe('primary');
+    expect(error).toBeInstanceOf(UnsupportedPullRequestProviderOperationError);
+    if (!(error instanceof UnsupportedPullRequestProviderOperationError)) {
+      throw new Error('Expected unsupported provider operation error');
+    }
+    expect(error.providerId).toBe('primary');
+    expect(error.operation).toBe('getPullRequestDiff');
+    expect(calls).toEqual(['primary:getPullRequest']);
+  });
+
+  test('gets a pull request diff for a repository ref through a fake provider', async () => {
+    const calls: unknown[] = [];
+    const repository = externalRepository('gitlab', { projectId: 10 });
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+
+    const result = await Effect.runPromise(
+      getPullRequestDiffForRepository(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                getPullRequestDiff: (request) => {
+                  calls.push(request);
+                  return Effect.succeed({
+                    repository,
+                    repositoryLabel: 'gitlab/acme/widgets',
+                    pullRequest: {
+                      id: 4,
+                      title: 'Repository-ref diff',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Ada Lovelace' },
+                      sourceBranch: 'feature/provider-diff',
+                      targetBranch: 'main',
+                    },
+                    files: [
+                      {
+                        path: 'src/index.ts',
+                        status: 'modified',
+                        additions: 2,
+                        deletions: 1,
+                        changes: 3,
+                      },
+                    ],
+                  });
+                },
+              },
+            },
+          },
+        ],
+        repository,
+        { pullRequest: { number: 4 } }
+      )
+    );
+
+    expect(calls).toEqual([
+      {
+        match: {
+          source: 'repository-ref',
+          repository,
+        },
+        pullRequest: { number: 4 },
+      },
+    ]);
+    expect(result.repositoryLabel).toBe('gitlab/acme/widgets');
+    expect(result.pullRequest).toMatchObject({
+      id: 4,
+      sourceBranch: 'feature/provider-diff',
+      targetBranch: 'main',
+    });
+    expect(result.files).toEqual([
+      {
+        path: 'src/index.ts',
+        status: 'modified',
+        additions: 2,
+        deletions: 1,
+        changes: 3,
+      },
+    ]);
+  });
+
+  test('gets a GitHub pull request diff through a provider-owned operation', async () => {
+    const calls: unknown[] = [];
+    const plugin = createGitHubPlugin({
+      createClient: async ({ host }) => {
+        calls.push(host);
+        return {
+          listPullRequests: async () => [],
+          getPullRequest: async (owner, repo, number) => {
+            calls.push({ detail: { owner, repo, number } });
+            return fakeGitHubPullRequest({
+              number,
+              title: 'GitHub diff',
+              userLogin: 'octo',
+              head: {
+                ref: 'feature/github-diff',
+                sha: 'abc',
+                label: 'octo:feature/github-diff',
+              },
+              base: {
+                ref: 'main',
+                sha: 'def',
+                label: 'acme:main',
+              },
+            });
+          },
+          getPullRequestFiles: async (owner, repo, number) => {
+            calls.push({ files: { owner, repo, number } });
+            return [
+              {
+                sha: 'sha',
+                filename: 'src/index.ts',
+                status: 'removed' as const,
+                additions: 0,
+                deletions: 3,
+                changes: 3,
+                patch: '@@ -1,3 +0,0 @@',
+              },
+            ];
+          },
+        };
+      },
+    });
+
+    const result = await Effect.runPromise(
+      getPullRequestDiffForRemote(
+        [
+          {
+            pluginId: plugin.id,
+            capability: plugin.capabilities!.pullRequestProvider!,
+          },
+        ],
+        'git@github.com:acme/widgets.git',
+        { pullRequest: { number: 12 } }
+      )
+    );
+
+    expect(calls).toEqual([
+      'github.com',
+      { detail: { owner: 'acme', repo: 'widgets', number: 12 } },
+      { files: { owner: 'acme', repo: 'widgets', number: 12 } },
+    ]);
+    expect(result.repositoryLabel).toBe('github.com/acme/widgets');
+    expect(result.pullRequest).toMatchObject({
+      id: 12,
+      title: 'GitHub diff',
+      sourceBranch: 'feature/github-diff',
+      targetBranch: 'main',
+    });
+    expect(result.files).toEqual([
+      {
+        path: 'src/index.ts',
+        status: 'deleted',
+        providerStatus: 'removed',
+        additions: 0,
+        deletions: 3,
+        changes: 3,
+        patch: '@@ -1,3 +0,0 @@',
+      },
+    ]);
+  });
+
+  test('gets an Azure DevOps pull request diff through a URL provider match', async () => {
+    const calls: unknown[] = [];
+    const plugin = createAzureDevOpsPlugin({
+      createClient: async () => ({
+        config: {
+          orgUrl: 'https://dev.azure.com/acme',
+          pat: 'token',
+          authMethod: 'pat',
+        },
+        client: {
+          listPullRequests: async () => ({ value: [] }),
+          getPullRequest: async (project, repo, number) => {
+            calls.push({ detail: { project, repo, number } });
+            return fakeAzureDevOpsPullRequest({
+              pullRequestId: number,
+              title: 'ADO diff',
+              sourceRefName: 'refs/heads/feature/ado-diff',
+              targetRefName: 'refs/heads/main',
+            });
+          },
+          getPullRequestLabels: async (project, repo, number) => {
+            calls.push({ labelsFor: { project, repo, number } });
+            return {
+              value: [
+                { id: '1', name: 'ready', active: true, url: 'label-url' },
+              ],
+            };
+          },
+          getAllPullRequestChanges: async (project, repo, number) => {
+            calls.push({ changesFor: { project, repo, number } });
+            return [
+              {
+                changeId: 1,
+                changeTrackingId: 1,
+                changeType: 'rename' as const,
+                item: { path: '/src/new.ts' },
+                originalPath: '/src/old.ts',
+              },
+            ];
+          },
+        },
+      }),
+    });
+
+    const result = await Effect.runPromise(
+      getPullRequestDiffForUrl(
+        [
+          {
+            pluginId: plugin.id,
+            capability: plugin.capabilities!.pullRequestProvider!,
+          },
+        ],
+        'https://dev.azure.com/acme/Platform/_git/widgets/pullrequest/42'
+      )
+    );
+
+    expect(calls).toEqual([
+      { detail: { project: 'Platform', repo: 'widgets', number: 42 } },
+      { labelsFor: { project: 'Platform', repo: 'widgets', number: 42 } },
+      { changesFor: { project: 'Platform', repo: 'widgets', number: 42 } },
+    ]);
+    expect(result.repositoryLabel).toBe('acme/Platform/widgets');
+    expect(result.pullRequest).toMatchObject({
+      id: 42,
+      title: 'ADO diff',
+      sourceBranch: 'feature/ado-diff',
+      targetBranch: 'main',
+      labels: ['ready'],
+    });
+    expect(result.files).toEqual([
+      {
+        path: '/src/new.ts',
+        status: 'renamed',
+        providerStatus: 'rename',
+        previousPath: '/src/old.ts',
+      },
+    ]);
+  });
+
+  test('rejects providers that do not implement getPullRequestDiff', async () => {
+    const error = await Effect.runPromise(
+      getPullRequestDiffForRemote(
+        [fakeProvider('gitlab-plugin', 'gitlab', 100)],
+        'matched-remote',
+        { pullRequest: { number: 1 } }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(UnsupportedPullRequestProviderOperationError);
+    if (!(error instanceof UnsupportedPullRequestProviderOperationError)) {
+      throw new Error('Expected unsupported provider operation error');
+    }
+    expect(error.operation).toBe('getPullRequestDiff');
+  });
+
+  test('rejects getPullRequestDiff operations that do not return Effects', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+    const error = await Effect.runPromise(
+      getPullRequestDiffForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                getPullRequestDiff: () => ({}) as never,
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 1 } }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.operation).toBe('getPullRequestDiff');
+    expect(error.reason).toBe('operation must return an Effect');
+  });
+
+  test('rejects malformed getPullRequestDiff files', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+    const error = await Effect.runPromise(
+      getPullRequestDiffForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                getPullRequestDiff: () =>
+                  Effect.succeed({
+                    repository: externalRepository('gitlab'),
+                    pullRequest: {
+                      id: 1,
+                      title: 'Malformed diff',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Ada Lovelace' },
+                    },
+                    files: [{ path: 'src/index.ts', status: 'bad' }],
+                  }) as never,
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 1 } }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.operation).toBe('getPullRequestDiff');
+    expect(error.reason).toBe('invalid diff file');
+  });
+
+  test('rejects getPullRequestDiff results for a different pull request id', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+    const error = await Effect.runPromise(
+      getPullRequestDiffForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                getPullRequestDiff: () =>
+                  Effect.succeed({
+                    repository: externalRepository('gitlab'),
+                    pullRequest: {
+                      id: 2,
+                      title: 'Wrong PR',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Ada Lovelace' },
+                    },
+                    files: [{ path: 'src/index.ts', status: 'modified' }],
+                  }),
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 1 } }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.reason).toBe(
+      'pull request id does not match selected pull request'
+    );
+  });
+});
+
 describe('pull request provider branch lookup operations', () => {
   test('finds a pull request for a branch with a repository ref through a fake provider', async () => {
     const calls: unknown[] = [];
@@ -1888,6 +2334,7 @@ describe('pull request provider branch lookup operations', () => {
               labels: [{ id: 1, name: 'feature', color: '0f0' }],
             });
           },
+          getPullRequestFiles: async () => [],
         };
       },
     });
@@ -1977,6 +2424,7 @@ describe('pull request provider branch lookup operations', () => {
               ],
             };
           },
+          getAllPullRequestChanges: async () => [],
         },
       }),
     });

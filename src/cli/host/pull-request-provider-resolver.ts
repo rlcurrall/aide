@@ -8,6 +8,10 @@ import type {
   AidePullRequestProviderCapability,
   AidePullRequestBranchLookupRequest,
   AidePullRequestBranchLookupResult,
+  AidePullRequestDiffFile,
+  AidePullRequestDiffFileStatus,
+  AidePullRequestDiffRequest,
+  AidePullRequestDiffResult,
   AidePullRequestListItem,
   AidePullRequestListItemStatus,
   AidePullRequestListRequest,
@@ -66,6 +70,24 @@ export interface PullRequestProviderResolutionOptions<
 export interface PullRequestProviderOperationOptions {
   readonly operationTimeout?: Duration.DurationInput;
   readonly matcherTimeout?: Duration.DurationInput;
+}
+
+export interface PullRequestProviderOperationContext<
+  TMatch extends AidePullRequestProviderMatch,
+  TResult,
+> {
+  readonly provider: ResolvedPullRequestProvider<TMatch>;
+  readonly result: TResult;
+  readonly getPullRequestDiff: (
+    request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
+    options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
+  ) => Effect.Effect<
+    AidePullRequestDiffResult,
+    | UnsupportedPullRequestProviderOperationError
+    | InvalidPullRequestProviderOperationResultError
+    | PullRequestProviderOperationError
+    | PullRequestProviderOperationTimeoutError
+  >;
 }
 
 export class UnsupportedPullRequestProviderError extends Data.TaggedError(
@@ -513,6 +535,73 @@ function snapshotPullRequestViewItem(
   });
 }
 
+function isPullRequestDiffFileStatus(
+  value: unknown
+): value is AidePullRequestDiffFileStatus {
+  return (
+    value === 'added' ||
+    value === 'modified' ||
+    value === 'deleted' ||
+    value === 'renamed' ||
+    value === 'copied' ||
+    value === 'unchanged' ||
+    value === 'unknown'
+  );
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function snapshotPullRequestDiffFile(
+  value: unknown
+): AidePullRequestDiffFile | null {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value.path) ||
+    !isPullRequestDiffFileStatus(value.status)
+  ) {
+    return null;
+  }
+
+  const providerStatus = value.providerStatus;
+  const previousPath = value.previousPath;
+  const additions = value.additions;
+  const deletions = value.deletions;
+  const changes = value.changes;
+  const patch = value.patch;
+
+  if (providerStatus !== undefined && typeof providerStatus !== 'string') {
+    return null;
+  }
+  if (previousPath !== undefined && typeof previousPath !== 'string') {
+    return null;
+  }
+  if (additions !== undefined && !isNonNegativeSafeInteger(additions)) {
+    return null;
+  }
+  if (deletions !== undefined && !isNonNegativeSafeInteger(deletions)) {
+    return null;
+  }
+  if (changes !== undefined && !isNonNegativeSafeInteger(changes)) {
+    return null;
+  }
+  if (patch !== undefined && typeof patch !== 'string') {
+    return null;
+  }
+
+  return Object.freeze({
+    path: value.path,
+    status: value.status,
+    ...(providerStatus === undefined ? {} : { providerStatus }),
+    ...(previousPath === undefined ? {} : { previousPath }),
+    ...(additions === undefined ? {} : { additions }),
+    ...(deletions === undefined ? {} : { deletions }),
+    ...(changes === undefined ? {} : { changes }),
+    ...(patch === undefined ? {} : { patch }),
+  });
+}
+
 function validatePullRequestListResult(
   provider: ResolvedPullRequestProviderCandidate<
     AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
@@ -618,6 +707,72 @@ function validatePullRequestViewResult(
       repository,
       ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
       pullRequest,
+    })
+  );
+}
+
+function validatePullRequestDiffResult(
+  provider: ResolvedPullRequestProviderCandidate,
+  request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
+  result: unknown
+): Effect.Effect<
+  AidePullRequestDiffResult,
+  InvalidPullRequestProviderOperationResultError
+> {
+  const invalid = (reason: string) =>
+    Effect.fail(
+      new InvalidPullRequestProviderOperationResultError({
+        pluginId: provider.pluginId,
+        providerId: provider.providerId,
+        operation: 'getPullRequestDiff',
+        reason,
+      })
+    );
+
+  if (!isRecord(result)) {
+    return invalid('result must be an object');
+  }
+
+  const repository = snapshotRepositoryRef(result.repository);
+  if (repository === null) {
+    return invalid('invalid repository ref');
+  }
+  if (!repositoryRefsMatch(repository, provider.match.repository)) {
+    return invalid('repository ref does not match selected provider match');
+  }
+
+  const repositoryLabel = result.repositoryLabel;
+  if (repositoryLabel !== undefined && typeof repositoryLabel !== 'string') {
+    return invalid('repositoryLabel must be a string');
+  }
+
+  const pullRequest = snapshotPullRequestViewItem(result.pullRequest);
+  if (pullRequest === null) {
+    return invalid('invalid pull request item');
+  }
+  if (pullRequest.id !== request.pullRequest.number) {
+    return invalid('pull request id does not match selected pull request');
+  }
+
+  if (!Array.isArray(result.files)) {
+    return invalid('files must be an array');
+  }
+
+  const files: AidePullRequestDiffFile[] = [];
+  for (const file of result.files) {
+    const snapshot = snapshotPullRequestDiffFile(file);
+    if (snapshot === null) {
+      return invalid('invalid diff file');
+    }
+    files.push(snapshot);
+  }
+
+  return Effect.succeed(
+    Object.freeze({
+      repository,
+      ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
+      pullRequest,
+      files: Object.freeze(files),
     })
   );
 }
@@ -995,6 +1150,26 @@ function stripProviderCapability<TMatch extends AidePullRequestProviderMatch>(
   });
 }
 
+function bindProviderOperationContext<
+  TMatch extends AidePullRequestProviderMatch,
+  TResult,
+>(
+  provider: ResolvedPullRequestProviderCandidate<TMatch>,
+  result: TResult
+): PullRequestProviderOperationContext<TMatch, TResult> {
+  return Object.freeze({
+    provider: stripProviderCapability(provider),
+    result,
+    getPullRequestDiff: (
+      request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
+      options: Pick<
+        PullRequestProviderOperationOptions,
+        'operationTimeout'
+      > = {}
+    ) => getPullRequestDiffWithProvider(provider, request, options),
+  });
+}
+
 function selectProviderCandidate<TMatch extends AidePullRequestProviderMatch>(
   providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
   source: PullRequestProviderLookupSource,
@@ -1324,6 +1499,36 @@ export function getPullRequestWithProvider(
   );
 }
 
+export function getPullRequestDiffWithProvider(
+  provider: ResolvedPullRequestProviderCandidate,
+  request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+): Effect.Effect<
+  AidePullRequestDiffResult,
+  | UnsupportedPullRequestProviderOperationError
+  | InvalidPullRequestProviderOperationResultError
+  | PullRequestProviderOperationError
+  | PullRequestProviderOperationTimeoutError
+> {
+  const operationRequest = Object.freeze({
+    match: provider.match,
+    pullRequest: Object.freeze({
+      number: request.pullRequest.number,
+    }),
+  });
+  return invokePullRequestProviderOperation(
+    provider,
+    'getPullRequestDiff',
+    provider.capability.operations?.getPullRequestDiff,
+    operationRequest,
+    options
+  ).pipe(
+    Effect.flatMap((result) =>
+      validatePullRequestDiffResult(provider, operationRequest, result)
+    )
+  );
+}
+
 export function findPullRequestForBranchWithProvider(
   provider: ResolvedPullRequestProviderCandidate<
     AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
@@ -1446,6 +1651,62 @@ export function findPullRequestForBranchForRepository(
   );
 }
 
+export function findPullRequestForBranchContextForRemote(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  remoteUrl: string,
+  request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  PullRequestProviderOperationContext<
+    AidePullRequestRemoteMatch,
+    AidePullRequestBranchLookupResult
+  >,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'git-remote',
+    remoteUrl,
+    (provider) => provider.matchRemote(remoteUrl),
+    (provider) =>
+      provider.capability.operations?.findPullRequestForBranch !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      findPullRequestForBranchWithProvider(provider, request, options).pipe(
+        Effect.map((result) => bindProviderOperationContext(provider, result))
+      )
+    )
+  );
+}
+
+export function findPullRequestForBranchContextForRepository(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  PullRequestProviderOperationContext<
+    AidePullRequestRepositoryMatch,
+    AidePullRequestBranchLookupResult
+  >,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForRepositoryOperation(
+    providers,
+    repository,
+    (provider) =>
+      provider.capability.operations?.findPullRequestForBranch !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      findPullRequestForBranchWithProvider(provider, request, options).pipe(
+        Effect.map((result) => bindProviderOperationContext(provider, result))
+      )
+    )
+  );
+}
+
 export function getPullRequestForRemote(
   providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
@@ -1490,6 +1751,106 @@ export function getPullRequestForRepository(
   );
 }
 
+export function getPullRequestContextForRemote(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  remoteUrl: string,
+  request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  PullRequestProviderOperationContext<
+    AidePullRequestRemoteMatch,
+    AidePullRequestViewResult
+  >,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'git-remote',
+    remoteUrl,
+    (provider) => provider.matchRemote(remoteUrl),
+    (provider) => provider.capability.operations?.getPullRequest !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      getPullRequestWithProvider(provider, request, options).pipe(
+        Effect.map((result) => bindProviderOperationContext(provider, result))
+      )
+    )
+  );
+}
+
+export function getPullRequestContextForRepository(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  PullRequestProviderOperationContext<
+    AidePullRequestRepositoryMatch,
+    AidePullRequestViewResult
+  >,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForRepositoryOperation(
+    providers,
+    repository,
+    (provider) => provider.capability.operations?.getPullRequest !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      getPullRequestWithProvider(provider, request, options).pipe(
+        Effect.map((result) => bindProviderOperationContext(provider, result))
+      )
+    )
+  );
+}
+
+export function getPullRequestDiffForRemote(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  remoteUrl: string,
+  request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestDiffResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'git-remote',
+    remoteUrl,
+    (provider) => provider.matchRemote(remoteUrl),
+    (provider) =>
+      provider.capability.operations?.getPullRequestDiff !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      getPullRequestDiffWithProvider(provider, request, options)
+    )
+  );
+}
+
+export function getPullRequestDiffForRepository(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestDiffResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForRepositoryOperation(
+    providers,
+    repository,
+    (provider) =>
+      provider.capability.operations?.getPullRequestDiff !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      getPullRequestDiffWithProvider(provider, request, options)
+    )
+  );
+}
+
 export function getPullRequestForUrl(
   providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
   url: string,
@@ -1508,6 +1869,64 @@ export function getPullRequestForUrl(
   ).pipe(
     Effect.flatMap((provider) =>
       getPullRequestWithProvider(
+        provider,
+        { pullRequest: provider.match.pullRequest },
+        options
+      )
+    )
+  );
+}
+
+export function getPullRequestContextForUrl(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  url: string,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  PullRequestProviderOperationContext<
+    AidePullRequestUrlMatch,
+    AidePullRequestViewResult
+  >,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'pull-request-url',
+    url,
+    (provider) => provider.matchPullRequestUrl(url),
+    (provider) => provider.capability.operations?.getPullRequest !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      getPullRequestWithProvider(
+        provider,
+        { pullRequest: provider.match.pullRequest },
+        options
+      ).pipe(
+        Effect.map((result) => bindProviderOperationContext(provider, result))
+      )
+    )
+  );
+}
+
+export function getPullRequestDiffForUrl(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  url: string,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestDiffResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'pull-request-url',
+    url,
+    (provider) => provider.matchPullRequestUrl(url),
+    (provider) =>
+      provider.capability.operations?.getPullRequestDiff !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      getPullRequestDiffWithProvider(
         provider,
         { pullRequest: provider.match.pullRequest },
         options
