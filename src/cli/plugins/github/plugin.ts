@@ -3,6 +3,7 @@ import * as v from 'valibot';
 
 import {
   defineAidePlugin,
+  type AideAuthInputField,
   type AideAuthLoginRequest,
   type AidePullRequestBranchLookupRequest,
   type AidePullRequestBranchLookupResult,
@@ -37,7 +38,7 @@ import {
   formatMigrationError,
   formatUnsetHint,
   messages,
-  promptAuthString,
+  promptAuthField,
 } from '../auth-operation-utils.js';
 
 type ProbeGithubConfig = () => Promise<ConfigStatus<GithubConfigValue>>;
@@ -54,6 +55,17 @@ interface GitHubPluginOptions {
   readonly createClient?: CreateGitHubClient;
   readonly ghAvailable?: () => boolean;
 }
+
+const githubTokenField = {
+  kind: 'secret',
+  key: 'token',
+  label: 'GitHub token',
+  description: 'GitHub token',
+  required: true,
+  stdin: true,
+} as const satisfies AideAuthInputField;
+
+const githubLoginFields = Object.freeze([githubTokenField] as const);
 
 function mapGithubAuthStatus(
   status: ConfigStatus<GithubConfigValue>
@@ -120,10 +132,7 @@ function loginGitHubAuth(
       };
     }
 
-    const token = yield* promptAuthString(request, 'token', {
-      label: 'GitHub token',
-      secret: true,
-    });
+    const token = yield* promptAuthField(request, githubTokenField);
     const validated = yield* Effect.try({
       try: () => v.parse(StoredGithubSchema, { token }),
       catch: (error) => error,
@@ -298,6 +307,17 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
       authProvider: {
         providerId: 'github',
         label: 'GitHub',
+        login: {
+          summary: 'Save GitHub token (only if gh CLI is unavailable)',
+          fields: githubLoginFields,
+          envMigration: {
+            description: 'Migrate GITHUB_TOKEN / GH_TOKEN into the keyring',
+            variables: ['GITHUB_TOKEN', 'GH_TOKEN'],
+          },
+        },
+        logout: {
+          summary: 'Remove GitHub credentials',
+        },
         status: authStatus,
         operations: {
           login: (request) => loginGitHubAuth(request, ghAvailable),

@@ -30,7 +30,26 @@ function isCommandRoute(value: unknown): value is string | readonly string[] {
 }
 
 type LegacyBuilder = (yargs: Argv<object>) => Argv<object> | void;
+type LegacyHostBuilder = (
+  yargs: Argv<object>,
+  services: AideHostServices
+) => Argv<object> | void;
 type LegacyHandler = (argv: object) => void | Promise<void>;
+
+export interface AideHostAwareCommandModule<
+  TBase extends object,
+  TArgs extends object,
+> extends CommandModule<TBase, TArgs> {
+  readonly aideBuilder?: LegacyHostBuilder;
+}
+
+function hostAwareBuilder(
+  module: CommandModule<object, object>
+): LegacyHostBuilder | undefined {
+  const value = (module as AideHostAwareCommandModule<object, object>)
+    .aideBuilder;
+  return typeof value === 'function' ? value : undefined;
+}
 
 function wrapLegacyInlineBuilder(
   builder: unknown,
@@ -118,10 +137,16 @@ function legacyCommandModule(
   services: AideHostServices
 ): CommandModule<object, object> {
   const wrapped: CommandModule<object, object> = { ...module };
+  const aideBuilder = hostAwareBuilder(module);
   const builder = module.builder;
   const handler = module.handler;
 
-  if (typeof builder === 'function') {
+  if (aideBuilder !== undefined) {
+    wrapped.builder = (yargs) =>
+      withLegacyBuilderCommandWrapping(yargs, services, () =>
+        aideBuilder(yargs, services)
+      ) ?? yargs;
+  } else if (typeof builder === 'function') {
     wrapped.builder = (yargs) =>
       withLegacyBuilderCommandWrapping(
         yargs,

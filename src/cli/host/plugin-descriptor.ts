@@ -84,6 +84,53 @@ export interface AideAuthAccount {
   readonly scope?: AideAuthScope;
 }
 
+export interface AideAuthCommandNames {
+  readonly name?: string;
+  readonly aliases?: readonly string[];
+}
+
+export interface AideAuthEnvMigration {
+  readonly description: string;
+  readonly variables: readonly string[];
+}
+
+export interface AideAuthInputChoice {
+  readonly value: string;
+  readonly label?: string;
+}
+
+export type AideAuthInputField =
+  | {
+      readonly kind: 'text' | 'secret';
+      readonly key: string;
+      readonly label: string;
+      readonly description?: string;
+      readonly required?: boolean;
+      readonly stdin?: boolean;
+      readonly validate?: (value: string) => string | null;
+    }
+  | {
+      readonly kind: 'select';
+      readonly key: string;
+      readonly label: string;
+      readonly description?: string;
+      readonly required?: boolean;
+      readonly choices: readonly AideAuthInputChoice[];
+      readonly default?: string;
+    };
+
+export interface AideAuthLoginMetadata {
+  readonly command?: AideAuthCommandNames;
+  readonly summary?: string;
+  readonly fields?: readonly AideAuthInputField[];
+  readonly envMigration?: AideAuthEnvMigration;
+}
+
+export interface AideAuthLogoutMetadata {
+  readonly command?: AideAuthCommandNames;
+  readonly summary?: string;
+}
+
 export interface AideAuthPromptTextRequest {
   readonly label: string;
   readonly secret?: boolean;
@@ -124,6 +171,8 @@ export interface AideAuthProviderOperations {
 export interface AideAuthProviderCapability {
   readonly providerId: string;
   readonly label: string;
+  readonly login?: AideAuthLoginMetadata;
+  readonly logout?: AideAuthLogoutMetadata;
   readonly status: (
     request?: AideAuthStatusRequest
   ) => Effect.Effect<AidePluginAuthStatus, unknown, never>;
@@ -320,6 +369,25 @@ export const corePullRequestProviderOwners = Object.freeze({
   github: 'github',
   'azure-devops': 'azure-devops',
 } as const);
+
+export const coreAuthProviderOwners = Object.freeze({
+  ado: 'azure-devops',
+  'azure-devops': 'azure-devops',
+  github: 'github',
+  jira: 'jira',
+} as const);
+
+export function coreAuthProviderOwner(providerId: string): string | undefined {
+  if (
+    !Object.prototype.hasOwnProperty.call(coreAuthProviderOwners, providerId)
+  ) {
+    return undefined;
+  }
+
+  return coreAuthProviderOwners[
+    providerId as keyof typeof coreAuthProviderOwners
+  ];
+}
 
 export function corePullRequestProviderOwner(
   providerId: string

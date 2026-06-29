@@ -18,9 +18,15 @@ export {
 } from './host/runtime-context.js';
 export type {
   AideAuthAccount,
+  AideAuthCommandNames,
+  AideAuthEnvMigration,
+  AideAuthInputChoice,
+  AideAuthInputField,
   AideAuthInputValue,
+  AideAuthLoginMetadata,
   AideAuthLoginRequest,
   AideAuthLoginResult,
+  AideAuthLogoutMetadata,
   AideAuthLogoutResult,
   AideAuthPrompt,
   AideAuthPromptTextRequest,
@@ -96,6 +102,13 @@ export const aideReservedPluginIds = Object.freeze([
 export const aideReservedPullRequestProviderIds = Object.freeze([
   'azure-devops',
   'github',
+] as const);
+
+export const aideReservedAuthProviderIds = Object.freeze([
+  'ado',
+  'azure-devops',
+  'github',
+  'jira',
 ] as const);
 
 export interface AidePluginManifest {
@@ -221,5 +234,11 @@ export function isReservedAidePluginId(id: string): boolean {
 export function isReservedAidePullRequestProviderId(id: string): boolean {
   return aideReservedPullRequestProviderIds.includes(
     id as (typeof aideReservedPullRequestProviderIds)[number]
+  );
+}
+
+export function isReservedAideAuthProviderId(id: string): boolean {
+  return aideReservedAuthProviderIds.includes(
+    id as (typeof aideReservedAuthProviderIds)[number]
   );
 }

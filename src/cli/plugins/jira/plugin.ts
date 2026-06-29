@@ -4,6 +4,7 @@ import * as v from 'valibot';
 import { jiraCommands } from '@cli/commands/jira/index.js';
 import {
   defineAidePlugin,
+  type AideAuthInputField,
   type AideAuthLoginRequest,
   type AidePluginAuthStatus,
   pluginCommandModule,
@@ -19,7 +20,7 @@ import {
   formatMigrationError,
   formatUnsetHint,
   messages,
-  promptAuthString,
+  promptAuthField,
   validateNonEmpty,
   validateUrl,
 } from '../auth-operation-utils.js';
@@ -80,6 +81,39 @@ aide jira attach PROJ-123 --list
 aide jira attach PROJ-123 --upload ./file.pdf
 \`\`\``;
 
+const jiraUrlField = {
+  kind: 'text',
+  key: 'url',
+  label: 'Jira URL',
+  description: 'Jira URL',
+  required: true,
+  validate: validateUrl,
+} as const satisfies AideAuthInputField;
+
+const jiraEmailField = {
+  kind: 'text',
+  key: 'email',
+  label: 'Email',
+  description: 'Jira email',
+  required: true,
+  validate: validateNonEmpty,
+} as const satisfies AideAuthInputField;
+
+const jiraTokenField = {
+  kind: 'secret',
+  key: 'token',
+  label: 'API token',
+  description: 'Jira API token',
+  required: true,
+  stdin: true,
+} as const satisfies AideAuthInputField;
+
+const jiraLoginFields = Object.freeze([
+  jiraUrlField,
+  jiraEmailField,
+  jiraTokenField,
+] as const);
+
 function mapJiraAuthStatus(
   status: ConfigStatus<JiraConfig>
 ): AidePluginAuthStatus {
@@ -126,18 +160,9 @@ function loginJiraAuth(request: AideAuthLoginRequest) {
       };
     }
 
-    const url = yield* promptAuthString(request, 'url', {
-      label: 'Jira URL',
-      validate: validateUrl,
-    });
-    const email = yield* promptAuthString(request, 'email', {
-      label: 'Email',
-      validate: validateNonEmpty,
-    });
-    const token = yield* promptAuthString(request, 'token', {
-      label: 'API token',
-      secret: true,
-    });
+    const url = yield* promptAuthField(request, jiraUrlField);
+    const email = yield* promptAuthField(request, jiraEmailField);
+    const token = yield* promptAuthField(request, jiraTokenField);
 
     const validated = yield* Effect.try({
       try: () =>
@@ -194,6 +219,24 @@ export function createJiraPlugin(opts: JiraPluginOptions = {}) {
       authProvider: {
         providerId: 'jira',
         label: 'Jira',
+        login: {
+          summary: 'Save Jira credentials',
+          fields: jiraLoginFields,
+          envMigration: {
+            description:
+              'Migrate JIRA_URL / JIRA_EMAIL / JIRA_API_TOKEN into the keyring',
+            variables: [
+              'JIRA_URL',
+              'JIRA_EMAIL',
+              'JIRA_USERNAME',
+              'JIRA_API_TOKEN',
+              'JIRA_TOKEN',
+            ],
+          },
+        },
+        logout: {
+          summary: 'Remove Jira credentials',
+        },
         status: authStatus,
         operations: {
           login: loginJiraAuth,

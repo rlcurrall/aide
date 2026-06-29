@@ -1,6 +1,7 @@
 import { Effect } from 'effect';
 
 import type {
+  AideAuthInputField,
   AideAuthLoginRequest,
   AideAuthPromptTextRequest,
 } from '@cli/host/plugin-descriptor.js';
@@ -25,6 +26,17 @@ export function promptAuthString(
     return Effect.fail(new Error(`Missing auth input '${key}'.`));
   }
   return request.prompt.text(prompt);
+}
+
+export function promptAuthField(
+  request: AideAuthLoginRequest,
+  field: Extract<AideAuthInputField, { kind: 'text' | 'secret' }>
+): Effect.Effect<string, unknown, never> {
+  return promptAuthString(request, field.key, {
+    label: field.label,
+    secret: field.kind === 'secret',
+    validate: field.validate,
+  });
 }
 
 export function validateUrl(value: string): string | null {

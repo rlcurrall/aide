@@ -1,317 +1,190 @@
 /**
- * `aide login <service>` - interactive credential setup.
+ * `aide login <service>` - provider-driven credential setup.
  *
- * Subcommands: jira | ado | github. Flags take precedence over prompts; any
- * field not supplied via flag is prompted for. Tokens can also be piped via
- * stdin when the flag is omitted, though if both are provided the flag wins.
- *
- * Each handler is exported so tests can exercise the business logic directly.
+ * The yargs surface is still the adapter, but provider-specific behavior and
+ * input metadata come from registered auth providers.
  */
 
-import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import { Effect } from 'effect';
+import type { ArgumentsCamelCase, Argv, CommandModule } from 'yargs';
 
-import { loginWithAuthProvider } from '@cli/host/auth-provider-operations.js';
 import type {
+  AideAuthInputField,
+  AideAuthInputValue,
   AideAuthLoginRequest,
-  AideAuthLoginResult,
-  AideAuthPrompt,
-  AideDiscoveredCapability,
-  AideAuthProviderCapability,
 } from '@cli/host/plugin-descriptor.js';
-import { createAzureDevOpsPlugin } from '@cli/plugins/azure-devops/plugin.js';
-import { createGitHubPlugin } from '@cli/plugins/github/plugin.js';
-import { createJiraPlugin } from '@cli/plugins/jira/plugin.js';
+import type { AideHostServices } from '@cli/host/runtime-context.js';
+import type { AideHostAwareCommandModule } from '@cli/host/yargs-adapter.js';
 import {
-  TerminalPrompter,
-  text,
-  password,
-  type Prompter,
-} from '@lib/prompts.js';
-import type { AuthMethod } from '@schemas/config.js';
-import { runLegacyCommandEffect } from './effect-bridge.js';
+  authFieldFlagName,
+  authProviderCommandRoutes,
+  providerHasAuthOperation,
+  readStdin,
+  runAuthProviderLogin,
+  type DiscoveredAuthProvider,
+} from './auth-provider-command-utils.js';
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-async function readStdin(): Promise<string> {
-  let buf = '';
-  for await (const chunk of process.stdin as AsyncIterable<Buffer>) {
-    buf += chunk.toString('utf8');
-  }
-  return buf.replace(/\r?\n$/, '');
+interface DynamicLoginArgs {
+  readonly 'from-env'?: boolean;
+  readonly [key: string]: unknown;
 }
 
-function authProvider(plugin: {
-  readonly id: string;
-  readonly capabilities?: {
-    readonly authProvider?: AideAuthProviderCapability;
-  };
-}): AideDiscoveredCapability<AideAuthProviderCapability> {
-  const provider = plugin.capabilities?.authProvider;
-  if (provider === undefined) throw new Error('Plugin has no auth provider');
-  return Object.freeze({ pluginId: plugin.id, capability: provider });
+function authInputValue(value: unknown): AideAuthInputValue {
+  if (typeof value === 'string' || typeof value === 'boolean') return value;
+  return undefined;
 }
 
-async function secretText(
-  request: Parameters<AideAuthPrompt['text']>[0],
-  prompter: Prompter | undefined
-): Promise<string> {
-  if (request.validate === undefined) {
-    return await password({ label: request.label, prompter });
+function fieldDescription(field: AideAuthInputField): string {
+  const description = field.description ?? field.label;
+  return field.kind === 'select' && field.default !== undefined
+    ? `${description} (default: ${field.default})`
+    : description;
+}
+
+function fieldFlagNames(fields: readonly AideAuthInputField[]): string[] {
+  return fields.map(authFieldFlagName);
+}
+
+function configureFieldOption(
+  yargs: Argv<object>,
+  field: AideAuthInputField
+): Argv<object> {
+  const flagName = authFieldFlagName(field);
+  if (field.kind === 'select') {
+    return yargs.option(flagName, {
+      type: 'string',
+      choices: field.choices.map((choice) => choice.value),
+      describe: fieldDescription(field),
+    });
   }
 
-  const activePrompter = prompter ?? new TerminalPrompter();
-  const label = `${request.label}: `;
+  return yargs.option(flagName, {
+    type: 'string',
+    describe: fieldDescription(field),
+  });
+}
 
-  for (;;) {
-    const value = await activePrompter.readLine({ label, masked: true });
-    if (value.length === 0) {
-      activePrompter.writeLine('  value required');
-      continue;
+function configureLoginOptions(
+  yargs: Argv<object>,
+  provider: DiscoveredAuthProvider
+): Argv<object> {
+  const metadata = provider.capability.login;
+  const fields = metadata?.fields ?? [];
+  let configured = yargs;
+
+  for (const field of fields) {
+    configured = configureFieldOption(configured, field);
+  }
+
+  if (metadata?.envMigration !== undefined) {
+    configured = configured.option('from-env', {
+      type: 'boolean',
+      describe: metadata.envMigration.description,
+      default: false,
+    });
+    const conflicts = fieldFlagNames(fields);
+    if (conflicts.length > 0) {
+      configured = configured.conflicts('from-env', conflicts);
     }
-
-    const error = request.validate(value);
-    if (error) {
-      activePrompter.writeLine(`  ${error}`);
-      continue;
-    }
-    return value;
   }
+
+  return configured;
 }
 
-function authPrompt(prompter: Prompter | undefined): AideAuthPrompt {
+async function valueFromStdin(
+  current: AideAuthInputValue,
+  field: AideAuthInputField,
+  fromEnv: boolean
+): Promise<AideAuthInputValue> {
+  if (current !== undefined) return current;
+  if (fromEnv || field.kind === 'select' || field.stdin !== true) {
+    return current;
+  }
+  if (process.stdin.isTTY) return current;
+
+  const piped = (await readStdin()).trim();
+  return piped === '' ? undefined : piped;
+}
+
+async function loginRequestFromArgs(
+  provider: DiscoveredAuthProvider,
+  argv: ArgumentsCamelCase<DynamicLoginArgs>
+): Promise<AideAuthLoginRequest> {
+  const fromEnv = argv['from-env'] === true;
+  if (fromEnv) {
+    return { fromEnv: true };
+  }
+
+  const values: Record<string, AideAuthInputValue> = {};
+
+  for (const field of provider.capability.login?.fields ?? []) {
+    const flagName = authFieldFlagName(field);
+    const rawValue = authInputValue(argv[flagName]);
+    const defaulted =
+      rawValue === undefined && field.kind === 'select'
+        ? field.default
+        : rawValue;
+    const value = await valueFromStdin(defaulted, field, fromEnv);
+    if (value !== undefined) {
+      values[field.key] = value;
+    }
+  }
+
   return {
-    text: (request) =>
-      Effect.tryPromise({
-        try: () =>
-          request.secret
-            ? secretText(request, prompter)
-            : text({
-                label: request.label,
-                validate: request.validate,
-                prompter,
-              }),
-        catch: (error) => error,
-      }),
+    fromEnv,
+    values,
   };
 }
 
-async function runProviderLogin(
-  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
-  request: AideAuthLoginRequest
-): Promise<AideAuthLoginResult> {
-  const result = await runLegacyCommandEffect(
-    loginWithAuthProvider(provider, request)
-  );
-  for (const message of result.messages ?? []) {
-    console.log(message);
-  }
-  return result;
-}
-
-// ---------------------------------------------------------------------------
-// Jira
-// ---------------------------------------------------------------------------
-
-export interface JiraLoginFlags {
-  url?: string;
-  email?: string;
-  token?: string;
-  fromEnv?: boolean;
-}
-
-export async function loginJira(
-  flags: JiraLoginFlags,
-  opts: { prompter?: Prompter } = {}
-): Promise<void> {
-  let pipedToken: string | null = null;
-  if (
-    !flags.fromEnv &&
-    !flags.token &&
-    !opts.prompter &&
-    !process.stdin.isTTY
-  ) {
-    pipedToken = (await readStdin()).trim();
-  }
-
-  await runProviderLogin(authProvider(createJiraPlugin()), {
-    fromEnv: flags.fromEnv,
-    values: {
-      url: flags.url,
-      email: flags.email,
-      token: flags.token ?? pipedToken ?? undefined,
+function loginCommandForProvider(
+  provider: DiscoveredAuthProvider
+): CommandModule<object, DynamicLoginArgs> {
+  return {
+    command: authProviderCommandRoutes(provider, 'login'),
+    describe:
+      provider.capability.login?.summary ??
+      `Save ${provider.capability.label} credentials`,
+    builder: (yargs) => configureLoginOptions(yargs, provider),
+    handler: async (argv) => {
+      await runAuthProviderLogin(
+        provider,
+        await loginRequestFromArgs(provider, argv)
+      );
     },
-    prompt: authPrompt(opts.prompter),
-  });
+  };
 }
 
-// ---------------------------------------------------------------------------
-// Azure DevOps
-// ---------------------------------------------------------------------------
-
-export interface AdoLoginFlags {
-  orgUrl?: string;
-  pat?: string;
-  authMethod?: AuthMethod;
-  fromEnv?: boolean;
+function loginProviderCommandName(provider: DiscoveredAuthProvider): string {
+  const route = authProviderCommandRoutes(provider, 'login');
+  return typeof route === 'string' ? route : route[0]!;
 }
 
-export async function loginAdo(
-  flags: AdoLoginFlags,
-  opts: { prompter?: Prompter } = {}
-): Promise<void> {
-  let pipedToken: string | null = null;
-  if (!flags.fromEnv && !flags.pat && !opts.prompter && !process.stdin.isTTY) {
-    pipedToken = (await readStdin()).trim();
-  }
-
-  await runProviderLogin(authProvider(createAzureDevOpsPlugin()), {
-    fromEnv: flags.fromEnv,
-    values: {
-      orgUrl: flags.orgUrl,
-      pat: flags.pat ?? pipedToken ?? undefined,
-      authMethod: flags.authMethod,
-    },
-    prompt: authPrompt(opts.prompter),
-  });
+function loginProviders(
+  services: AideHostServices
+): readonly DiscoveredAuthProvider[] {
+  return services
+    .authProviders()
+    .filter((provider) => providerHasAuthOperation(provider, 'login'));
 }
 
-// ---------------------------------------------------------------------------
-// GitHub
-// ---------------------------------------------------------------------------
-
-export interface GithubLoginFlags {
-  token?: string;
-  fromEnv?: boolean;
-}
-
-export async function loginGithub(
-  flags: GithubLoginFlags,
-  opts: {
-    prompter?: Prompter;
-    ghAvailable?: () => boolean;
-  } = {}
-): Promise<'gh-cli' | 'stored'> {
-  // --from-env migrates an explicit token from env regardless of gh-cli state,
-  // since the user's intent is to promote that token into the keyring.
-  let pipedToken: string | null = null;
-  if (
-    !flags.fromEnv &&
-    !flags.token &&
-    !opts.prompter &&
-    !process.stdin.isTTY
-  ) {
-    pipedToken = (await readStdin()).trim();
-  }
-
-  const result = await runProviderLogin(
-    authProvider(createGitHubPlugin({ ghAvailable: opts.ghAvailable })),
-    {
-      fromEnv: flags.fromEnv,
-      values: {
-        token: flags.token ?? pipedToken ?? undefined,
-      },
-      prompt: authPrompt(opts.prompter),
-    }
-  );
-  return result.status === 'external' ? 'gh-cli' : 'stored';
-}
-
-// ---------------------------------------------------------------------------
-// yargs wiring
-// ---------------------------------------------------------------------------
-
-interface JiraArgs {
-  url?: string;
-  email?: string;
-  token?: string;
-  'from-env'?: boolean;
-}
-interface AdoArgs {
-  'org-url'?: string;
-  pat?: string;
-  'auth-method'?: AuthMethod;
-  'from-env'?: boolean;
-}
-interface GithubArgs {
-  token?: string;
-  'from-env'?: boolean;
-}
-
-const command: CommandModule = {
+const command: AideHostAwareCommandModule<object, object> = {
   command: 'login <service>',
   describe: 'Save credentials for a service to the OS keyring',
-  builder: (yargs) =>
-    yargs
-      .command({
-        command: 'jira',
-        describe: 'Save Jira credentials',
-        builder: (y) =>
-          y
-            .option('url', { type: 'string', describe: 'Jira URL' })
-            .option('email', { type: 'string', describe: 'Jira email' })
-            .option('token', { type: 'string', describe: 'Jira API token' })
-            .option('from-env', {
-              type: 'boolean',
-              describe:
-                'Migrate JIRA_URL / JIRA_EMAIL / JIRA_API_TOKEN into the keyring',
-              default: false,
-            })
-            .conflicts('from-env', ['url', 'email', 'token']),
-        handler: async (argv: ArgumentsCamelCase<JiraArgs>) =>
-          await loginJira({
-            url: argv.url,
-            email: argv.email,
-            token: argv.token,
-            fromEnv: argv['from-env'],
-          }),
-      })
-      .command({
-        command: 'ado',
-        describe: 'Save Azure DevOps credentials',
-        builder: (y) =>
-          y
-            .option('org-url', { type: 'string', describe: 'ADO org URL' })
-            .option('pat', { type: 'string', describe: 'ADO PAT' })
-            .option('auth-method', {
-              type: 'string',
-              choices: ['pat', 'bearer'] as const,
-              describe: 'Auth method (default: pat)',
-            })
-            .option('from-env', {
-              type: 'boolean',
-              describe:
-                'Migrate AZURE_DEVOPS_ORG_URL / AZURE_DEVOPS_PAT into the keyring',
-              default: false,
-            })
-            .conflicts('from-env', ['org-url', 'pat', 'auth-method']),
-        handler: async (argv: ArgumentsCamelCase<AdoArgs>) =>
-          await loginAdo({
-            orgUrl: argv['org-url'],
-            pat: argv.pat,
-            authMethod: argv['auth-method'],
-            fromEnv: argv['from-env'],
-          }),
-      })
-      .command({
-        command: 'github',
-        describe: 'Save GitHub token (only if gh CLI is unavailable)',
-        builder: (y) =>
-          y
-            .option('token', { type: 'string', describe: 'GitHub token' })
-            .option('from-env', {
-              type: 'boolean',
-              describe: 'Migrate GITHUB_TOKEN / GH_TOKEN into the keyring',
-              default: false,
-            })
-            .conflicts('from-env', ['token']),
-        handler: async (argv: ArgumentsCamelCase<GithubArgs>) => {
-          await loginGithub({ token: argv.token, fromEnv: argv['from-env'] });
-        },
-      })
-      .demandCommand(1, 'Specify a service: jira, ado, or github'),
+  aideBuilder: (yargs, services) => {
+    const providers = loginProviders(services);
+    let configured = yargs;
+
+    for (const provider of providers) {
+      configured = configured.command(loginCommandForProvider(provider));
+    }
+
+    const names = providers.map(loginProviderCommandName);
+    return configured.demandCommand(
+      1,
+      names.length === 0
+        ? 'No auth providers with login operations are registered'
+        : `Specify a service: ${names.join(', ')}`
+    );
+  },
   handler: () => {
     // Never reached - subcommand is required.
   },

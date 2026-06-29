@@ -5,6 +5,10 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "exports": {
+    ".": "./src/cli/index.ts",
+    "./plugin-api": "./src/cli/plugin-api.ts"
+  },
   "bin": {
     "aide": "./src/cli/index.ts"
   },

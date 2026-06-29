@@ -17,12 +17,21 @@ import type {
   AidePullRequestProviderOperations,
   AnyYargsCommandModule,
   AideAuthProviderCapability,
+  AideAuthCommandNames,
+  AideAuthEnvMigration,
+  AideAuthInputChoice,
+  AideAuthInputField,
+  AideAuthLoginMetadata,
+  AideAuthLogoutMetadata,
   AideAuthProviderOperations,
   AidePrimeContributionCapability,
   AidePrimeStatusContribution,
   AidePrimeStatusMessages,
 } from './plugin-descriptor.js';
-import { corePullRequestProviderOwner } from './plugin-descriptor.js';
+import {
+  coreAuthProviderOwner,
+  corePullRequestProviderOwner,
+} from './plugin-descriptor.js';
 import {
   AIDE_PLUGIN_API_VERSION,
   aidePluginCapabilityKinds,
@@ -32,10 +41,19 @@ import {
   type AidePluginManifest,
   type AidePublicPluginDescriptor,
 } from '../plugin-api.js';
+import { authInputFieldFlagName } from './auth-input-fields.js';
 
 const defaultExtensionPolicy: AideCommandExtensionPolicy = Object.freeze({
   kind: 'same-plugin',
 });
+const authCommandTokenPattern = /^[a-z][a-z0-9-]*$/;
+const reservedAuthLoginFlagNames = new Set([
+  'from-env',
+  'h',
+  'help',
+  'v',
+  'version',
+]);
 
 function eraseCommandModule<TBase extends object, TArgs extends object>(
   module: CommandModule<TBase, TArgs>
@@ -126,6 +144,383 @@ function assertNonEmptyString(
   }
 }
 
+function assertAuthCommandToken(
+  pluginId: string,
+  providerId: string,
+  operation: 'login' | 'logout',
+  field: string,
+  value: string
+): void {
+  assertId('Auth provider', value);
+  if (!authCommandTokenPattern.test(value)) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' ${operation} command ${field} '${value}' must be lowercase kebab-case`
+    );
+  }
+}
+
+function snapshotAuthCommandNames(
+  pluginId: string,
+  providerId: string,
+  operation: 'login' | 'logout',
+  command: unknown
+): AideAuthCommandNames | undefined {
+  if (command === undefined) return undefined;
+  if (!isRecord(command)) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' ${operation} command metadata must be an object`
+    );
+  }
+
+  const name = command.name;
+  const aliases = command.aliases;
+  if (name !== undefined) {
+    if (typeof name !== 'string') {
+      throw new Error(
+        `Plugin '${pluginId}' auth provider '${providerId}' ${operation} command name must be a string`
+      );
+    }
+    assertAuthCommandToken(pluginId, providerId, operation, 'name', name);
+  }
+  if (aliases !== undefined && !Array.isArray(aliases)) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' ${operation} command aliases must be an array`
+    );
+  }
+
+  const snapshotAliases =
+    aliases === undefined
+      ? undefined
+      : Object.freeze(
+          aliases.map((alias) => {
+            if (typeof alias !== 'string') {
+              throw new Error(
+                `Plugin '${pluginId}' auth provider '${providerId}' ${operation} command aliases must contain strings`
+              );
+            }
+            assertAuthCommandToken(
+              pluginId,
+              providerId,
+              operation,
+              'alias',
+              alias
+            );
+            return alias;
+          })
+        );
+
+  return Object.freeze({
+    ...(name === undefined ? {} : { name: name as string }),
+    ...(snapshotAliases === undefined ? {} : { aliases: snapshotAliases }),
+  });
+}
+
+function snapshotAuthEnvMigration(
+  pluginId: string,
+  providerId: string,
+  value: unknown
+): AideAuthEnvMigration | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' env migration metadata must be an object`
+    );
+  }
+
+  assertNonEmptyString(
+    pluginId,
+    `auth provider '${providerId}' env migration`,
+    'description',
+    value.description
+  );
+  if (!Array.isArray(value.variables)) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' env migration variables must be an array`
+    );
+  }
+
+  return Object.freeze({
+    description: value.description as string,
+    variables: Object.freeze(
+      value.variables.map((variable) => {
+        if (typeof variable !== 'string' || variable.trim() === '') {
+          throw new Error(
+            `Plugin '${pluginId}' auth provider '${providerId}' env migration variables must contain non-empty strings`
+          );
+        }
+        return variable;
+      })
+    ),
+  });
+}
+
+function snapshotAuthInputChoice(
+  pluginId: string,
+  providerId: string,
+  fieldKey: string,
+  value: unknown
+): AideAuthInputChoice {
+  if (!isRecord(value)) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' field '${fieldKey}' choices must contain objects`
+    );
+  }
+  assertNonEmptyString(
+    pluginId,
+    `auth provider '${providerId}' field '${fieldKey}' choice`,
+    'value',
+    value.value
+  );
+  if (
+    value.label !== undefined &&
+    (typeof value.label !== 'string' || value.label.trim() === '')
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' field '${fieldKey}' choice label must be a non-empty string`
+    );
+  }
+
+  return Object.freeze({
+    value: value.value as string,
+    ...(value.label === undefined ? {} : { label: value.label as string }),
+  });
+}
+
+function snapshotAuthInputField(
+  pluginId: string,
+  providerId: string,
+  field: unknown
+): AideAuthInputField {
+  if (!isRecord(field)) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' login fields must contain objects`
+    );
+  }
+
+  if (
+    field.kind !== 'text' &&
+    field.kind !== 'secret' &&
+    field.kind !== 'select'
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' login field kind must be 'text', 'secret', or 'select'`
+    );
+  }
+  assertNonEmptyString(
+    pluginId,
+    `auth provider '${providerId}' login field`,
+    'key',
+    field.key
+  );
+  assertId('Auth input field', field.key as string);
+  assertNonEmptyString(
+    pluginId,
+    `auth provider '${providerId}' login field '${field.key}'`,
+    'label',
+    field.label
+  );
+
+  if (
+    field.description !== undefined &&
+    (typeof field.description !== 'string' || field.description.trim() === '')
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' login field '${field.key}' description must be a non-empty string`
+    );
+  }
+  if (field.required !== undefined && typeof field.required !== 'boolean') {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' login field '${field.key}' required must be a boolean`
+    );
+  }
+
+  if (field.kind === 'select') {
+    if (!Array.isArray(field.choices) || field.choices.length === 0) {
+      throw new Error(
+        `Plugin '${pluginId}' auth provider '${providerId}' login field '${field.key}' choices must be a non-empty array`
+      );
+    }
+
+    const choices = Object.freeze(
+      field.choices.map((choice) =>
+        snapshotAuthInputChoice(
+          pluginId,
+          providerId,
+          field.key as string,
+          choice
+        )
+      )
+    );
+    if (
+      field.default !== undefined &&
+      (typeof field.default !== 'string' ||
+        !choices.some((choice) => choice.value === field.default))
+    ) {
+      throw new Error(
+        `Plugin '${pluginId}' auth provider '${providerId}' login field '${field.key}' default must match a choice value`
+      );
+    }
+
+    return Object.freeze({
+      kind: 'select',
+      key: field.key as string,
+      label: field.label as string,
+      ...(field.description === undefined
+        ? {}
+        : { description: field.description as string }),
+      ...(field.required === undefined
+        ? {}
+        : { required: field.required as boolean }),
+      choices,
+      ...(field.default === undefined ? {} : { default: field.default }),
+    });
+  }
+
+  if (field.stdin !== undefined && typeof field.stdin !== 'boolean') {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' login field '${field.key}' stdin must be a boolean`
+    );
+  }
+  if (field.validate !== undefined && typeof field.validate !== 'function') {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' login field '${field.key}' validate must be a function`
+    );
+  }
+
+  return Object.freeze({
+    kind: field.kind,
+    key: field.key as string,
+    label: field.label as string,
+    ...(field.description === undefined
+      ? {}
+      : { description: field.description as string }),
+    ...(field.required === undefined
+      ? {}
+      : { required: field.required as boolean }),
+    ...(field.stdin === undefined ? {} : { stdin: field.stdin as boolean }),
+    ...(field.validate === undefined
+      ? {}
+      : { validate: field.validate as (value: string) => string | null }),
+  });
+}
+
+function snapshotAuthLoginMetadata(
+  pluginId: string,
+  providerId: string,
+  metadata: unknown
+): AideAuthLoginMetadata | undefined {
+  if (metadata === undefined) return undefined;
+  if (!isRecord(metadata)) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' login metadata must be an object`
+    );
+  }
+
+  if (
+    metadata.summary !== undefined &&
+    (typeof metadata.summary !== 'string' || metadata.summary.trim() === '')
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' login summary must be a non-empty string`
+    );
+  }
+  if (metadata.fields !== undefined && !Array.isArray(metadata.fields)) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' login fields must be an array`
+    );
+  }
+
+  const fields =
+    metadata.fields === undefined
+      ? undefined
+      : Object.freeze(
+          metadata.fields.map((field) =>
+            snapshotAuthInputField(pluginId, providerId, field)
+          )
+        );
+  const fieldKeys = fields?.map((field) => field.key) ?? [];
+  const duplicateKey = fieldKeys.find(
+    (key, index) => fieldKeys.indexOf(key) !== index
+  );
+  if (duplicateKey !== undefined) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' declares login field '${duplicateKey}' more than once`
+    );
+  }
+  const flagOwners = new Map<string, string>();
+  for (const field of fields ?? []) {
+    const flagName = authInputFieldFlagName(field);
+    if (!/^[a-z][a-z0-9-]*$/.test(flagName)) {
+      throw new Error(
+        `Plugin '${pluginId}' auth provider '${providerId}' login field '${field.key}' maps to invalid flag name '${flagName}'`
+      );
+    }
+    if (reservedAuthLoginFlagNames.has(flagName)) {
+      throw new Error(
+        `Plugin '${pluginId}' auth provider '${providerId}' login field '${field.key}' maps to reserved flag '--${flagName}'`
+      );
+    }
+    const existingField = flagOwners.get(flagName);
+    if (existingField !== undefined) {
+      throw new Error(
+        `Plugin '${pluginId}' auth provider '${providerId}' declares login fields '${existingField}' and '${field.key}' that both map to flag '--${flagName}'`
+      );
+    }
+    flagOwners.set(flagName, field.key);
+  }
+
+  return Object.freeze({
+    command: snapshotAuthCommandNames(
+      pluginId,
+      providerId,
+      'login',
+      metadata.command
+    ),
+    ...(metadata.summary === undefined
+      ? {}
+      : { summary: metadata.summary as string }),
+    ...(fields === undefined ? {} : { fields }),
+    envMigration: snapshotAuthEnvMigration(
+      pluginId,
+      providerId,
+      metadata.envMigration
+    ),
+  });
+}
+
+function snapshotAuthLogoutMetadata(
+  pluginId: string,
+  providerId: string,
+  metadata: unknown
+): AideAuthLogoutMetadata | undefined {
+  if (metadata === undefined) return undefined;
+  if (!isRecord(metadata)) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' logout metadata must be an object`
+    );
+  }
+  if (
+    metadata.summary !== undefined &&
+    (typeof metadata.summary !== 'string' || metadata.summary.trim() === '')
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' logout summary must be a non-empty string`
+    );
+  }
+
+  return Object.freeze({
+    command: snapshotAuthCommandNames(
+      pluginId,
+      providerId,
+      'logout',
+      metadata.command
+    ),
+    ...(metadata.summary === undefined
+      ? {}
+      : { summary: metadata.summary as string }),
+  });
+}
+
 function snapshotAuthCapability(
   pluginId: string,
   capability: unknown
@@ -208,6 +603,16 @@ function snapshotAuthProviderCapability(
   return Object.freeze({
     providerId: capability.providerId,
     label: capability.label,
+    login: snapshotAuthLoginMetadata(
+      pluginId,
+      capability.providerId,
+      capability.login
+    ),
+    logout: snapshotAuthLogoutMetadata(
+      pluginId,
+      capability.providerId,
+      capability.logout
+    ),
     status: capability.status as AideAuthProviderCapability['status'],
     accounts:
       capability.accounts === undefined
@@ -530,6 +935,7 @@ function snapshotPluginCapabilities(
 function assertId(
   kind:
     | 'Auth provider'
+    | 'Auth input field'
     | 'Command'
     | 'Plugin'
     | 'Prime status group'
@@ -661,6 +1067,29 @@ function ownedPluginCapability<TCapability>(
   capability: TCapability
 ): OwnedPluginCapability<TCapability> {
   return Object.freeze({ pluginId, capability });
+}
+
+function authProviderCommandNames(
+  provider: AideAuthProviderCapability,
+  operation: 'login' | 'logout'
+): readonly string[] {
+  const metadata = operation === 'login' ? provider.login : provider.logout;
+  return [
+    metadata?.command?.name,
+    ...(metadata?.command?.aliases ?? []),
+  ].filter((name): name is string => name !== undefined);
+}
+
+function authProviderAddressableNames(
+  provider: AideAuthProviderCapability
+): readonly string[] {
+  return Array.from(
+    new Set([
+      provider.providerId,
+      ...authProviderCommandNames(provider, 'login'),
+      ...authProviderCommandNames(provider, 'logout'),
+    ])
+  );
 }
 
 function assertPluginCommandParentGraphAcyclic(
@@ -1215,7 +1644,7 @@ export class CommandRegistry {
     this.#assertPluginAvailable(snapshot.id);
     const authProvider = snapshot.capabilities?.authProvider;
     if (authProvider !== undefined) {
-      this.#assertAuthProviderAvailable(snapshot.id, authProvider.providerId);
+      this.#assertAuthProviderAvailable(snapshot.id, authProvider);
     }
     const pullRequestProvider = snapshot.capabilities?.pullRequestProvider;
     if (pullRequestProvider !== undefined) {
@@ -1429,7 +1858,9 @@ export class CommandRegistry {
 
     this.#pluginIds.add(snapshot.id);
     if (authProvider !== undefined) {
-      this.#authProviderOwners.set(authProvider.providerId, snapshot.id);
+      for (const name of authProviderAddressableNames(authProvider)) {
+        this.#authProviderOwners.set(name, snapshot.id);
+      }
     }
     if (pullRequestProvider !== undefined) {
       this.#pullRequestProviderOwners.set(
@@ -1499,14 +1930,26 @@ export class CommandRegistry {
     }
   }
 
-  #assertAuthProviderAvailable(pluginId: string, providerId: string): void {
-    assertId('Auth provider', providerId);
+  #assertAuthProviderAvailable(
+    pluginId: string,
+    provider: AideAuthProviderCapability
+  ): void {
+    for (const name of authProviderAddressableNames(provider)) {
+      assertId('Auth provider', name);
 
-    const existingOwner = this.#authProviderOwners.get(providerId);
-    if (existingOwner !== undefined) {
-      throw new Error(
-        `Auth provider '${providerId}' is already registered by plugin '${existingOwner}'`
-      );
+      const reservedOwner = coreAuthProviderOwner(name);
+      if (reservedOwner !== undefined && reservedOwner !== pluginId) {
+        throw new Error(
+          `Plugin '${pluginId}' cannot declare reserved auth provider '${name}' (reserved for plugin '${reservedOwner}')`
+        );
+      }
+
+      const existingOwner = this.#authProviderOwners.get(name);
+      if (existingOwner !== undefined) {
+        throw new Error(
+          `Auth provider '${name}' is already registered by plugin '${existingOwner}'`
+        );
+      }
     }
   }
 

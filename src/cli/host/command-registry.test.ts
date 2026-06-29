@@ -344,6 +344,27 @@ describe('CommandRegistry', () => {
     ).toThrow(
       "External plugin 'external-github' cannot declare reserved pull request provider 'github'"
     );
+
+    expect(() =>
+      registry.registerExternalPlugin(
+        definePublicAidePlugin({
+          id: 'external-auth',
+          summary: 'External auth provider',
+          commands: [],
+          capabilities: {
+            authProvider: {
+              providerId: 'github',
+              label: 'External GitHub Auth',
+              status: () => Effect.succeed({ state: 'configured' }),
+            },
+          },
+        }),
+        { manifest: externalManifest('external-auth', ['auth-provider']) }
+      )
+    ).toThrow(
+      "Plugin 'external-auth' cannot declare reserved auth provider 'github' (reserved for plugin 'github')"
+    );
+
     expect(registry.pluginIds()).toEqual([]);
   });
 
@@ -1667,6 +1688,148 @@ describe('CommandRegistry', () => {
       )
     ).toThrow(
       "Plugin 'bad-auth-operations-plugin' auth provider 'bad-auth-operations' operation 'login' must be a function"
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'bad-auth-metadata-plugin',
+          summary: 'Bad auth metadata plugin',
+          commands: [],
+          capabilities: {
+            authProvider: {
+              providerId: 'bad-auth-metadata',
+              label: 'Bad Auth Metadata',
+              status: () => Effect.succeed({ state: 'configured' }),
+              login: {
+                fields: [
+                  {
+                    kind: 'select',
+                    key: 'mode',
+                    label: 'Mode',
+                    choices: [],
+                  },
+                ],
+              },
+            },
+          },
+        } as unknown as Parameters<typeof defineAidePlugin>[0])
+      )
+    ).toThrow(
+      "Plugin 'bad-auth-metadata-plugin' auth provider 'bad-auth-metadata' login field 'mode' choices must be a non-empty array"
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'bad-auth-flag-plugin',
+          summary: 'Bad auth flag plugin',
+          commands: [],
+          capabilities: {
+            authProvider: {
+              providerId: 'bad-auth-flag',
+              label: 'Bad Auth Flag',
+              status: () => Effect.succeed({ state: 'configured' }),
+              login: {
+                fields: [
+                  {
+                    kind: 'text',
+                    key: 'apiToken',
+                    label: 'API token',
+                  },
+                  {
+                    kind: 'text',
+                    key: 'api-token',
+                    label: 'API token alias',
+                  },
+                ],
+              },
+            },
+          },
+        })
+      )
+    ).toThrow(
+      "Plugin 'bad-auth-flag-plugin' auth provider 'bad-auth-flag' declares login fields 'apiToken' and 'api-token' that both map to flag '--api-token'"
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'bad-auth-reserved-flag-plugin',
+          summary: 'Bad auth reserved flag plugin',
+          commands: [],
+          capabilities: {
+            authProvider: {
+              providerId: 'bad-auth-reserved-flag',
+              label: 'Bad Auth Reserved Flag',
+              status: () => Effect.succeed({ state: 'configured' }),
+              login: {
+                fields: [
+                  {
+                    kind: 'text',
+                    key: 'fromEnv',
+                    label: 'From env',
+                  },
+                ],
+              },
+            },
+          },
+        })
+      )
+    ).toThrow(
+      "Plugin 'bad-auth-reserved-flag-plugin' auth provider 'bad-auth-reserved-flag' login field 'fromEnv' maps to reserved flag '--from-env'"
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'bad-auth-invalid-flag-plugin',
+          summary: 'Bad auth invalid flag plugin',
+          commands: [],
+          capabilities: {
+            authProvider: {
+              providerId: 'bad-auth-invalid-flag',
+              label: 'Bad Auth Invalid Flag',
+              status: () => Effect.succeed({ state: 'configured' }),
+              login: {
+                fields: [
+                  {
+                    kind: 'text',
+                    key: 'ApiToken',
+                    label: 'API token',
+                  },
+                ],
+              },
+            },
+          },
+        })
+      )
+    ).toThrow(
+      "Plugin 'bad-auth-invalid-flag-plugin' auth provider 'bad-auth-invalid-flag' login field 'ApiToken' maps to invalid flag name '-api-token'"
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'bad-auth-command-plugin',
+          summary: 'Bad auth command plugin',
+          commands: [],
+          capabilities: {
+            authProvider: {
+              providerId: 'bad-auth-command',
+              label: 'Bad Auth Command',
+              status: () => Effect.succeed({ state: 'configured' }),
+              login: {
+                command: {
+                  name: '--bad',
+                },
+              },
+            },
+          },
+        })
+      )
+    ).toThrow(
+      "Plugin 'bad-auth-command-plugin' auth provider 'bad-auth-command' login command name '--bad' must be lowercase kebab-case"
     );
 
     expect(() =>

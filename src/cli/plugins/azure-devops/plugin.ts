@@ -3,6 +3,7 @@ import * as v from 'valibot';
 
 import {
   defineAidePlugin,
+  type AideAuthInputField,
   type AideAuthLoginRequest,
   type AidePullRequestBranchLookupRequest,
   type AidePullRequestBranchLookupResult,
@@ -33,7 +34,7 @@ import {
   formatMigrationError,
   formatUnsetHint,
   messages,
-  promptAuthString,
+  promptAuthField,
   validateUrl,
 } from '../auth-operation-utils.js';
 
@@ -51,6 +52,42 @@ interface AzureDevOpsPluginOptions {
   readonly probeConfig?: ProbeAdoConfig;
   readonly createClient?: CreateAzureDevOpsClient;
 }
+
+const azureDevOpsOrgUrlField = {
+  kind: 'text',
+  key: 'orgUrl',
+  label: 'Azure DevOps org URL',
+  description: 'ADO org URL',
+  required: true,
+  validate: validateUrl,
+} as const satisfies AideAuthInputField;
+
+const azureDevOpsPatField = {
+  kind: 'secret',
+  key: 'pat',
+  label: 'PAT',
+  description: 'ADO PAT',
+  required: true,
+  stdin: true,
+} as const satisfies AideAuthInputField;
+
+const azureDevOpsAuthMethodField = {
+  kind: 'select',
+  key: 'authMethod',
+  label: 'Auth method',
+  description: 'Auth method',
+  choices: [
+    { value: 'pat', label: 'PAT' },
+    { value: 'bearer', label: 'Bearer' },
+  ],
+  default: 'pat',
+} as const satisfies AideAuthInputField;
+
+const azureDevOpsLoginFields = Object.freeze([
+  azureDevOpsOrgUrlField,
+  azureDevOpsPatField,
+  azureDevOpsAuthMethodField,
+] as const);
 
 function mapAzureDevOpsAuthStatus(
   status: ConfigStatus<AzureDevOpsConfig>
@@ -105,14 +142,8 @@ function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
       };
     }
 
-    const orgUrl = yield* promptAuthString(request, 'orgUrl', {
-      label: 'Azure DevOps org URL',
-      validate: validateUrl,
-    });
-    const pat = yield* promptAuthString(request, 'pat', {
-      label: 'PAT',
-      secret: true,
-    });
+    const orgUrl = yield* promptAuthField(request, azureDevOpsOrgUrlField);
+    const pat = yield* promptAuthField(request, azureDevOpsPatField);
     const authMethod = (authInputString(request, 'authMethod') ??
       'pat') as AuthMethod;
 
@@ -337,6 +368,28 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
       authProvider: {
         providerId: 'azure-devops',
         label: 'Azure DevOps',
+        login: {
+          command: {
+            name: 'ado',
+          },
+          summary: 'Save Azure DevOps credentials',
+          fields: azureDevOpsLoginFields,
+          envMigration: {
+            description:
+              'Migrate AZURE_DEVOPS_ORG_URL / AZURE_DEVOPS_PAT into the keyring',
+            variables: [
+              'AZURE_DEVOPS_ORG_URL',
+              'AZURE_DEVOPS_PAT',
+              'AZURE_DEVOPS_AUTH_METHOD',
+            ],
+          },
+        },
+        logout: {
+          command: {
+            name: 'ado',
+          },
+          summary: 'Remove Azure DevOps credentials',
+        },
         status: authStatus,
         operations: {
           login: loginAzureDevOpsAuth,
