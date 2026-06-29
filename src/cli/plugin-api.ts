@@ -58,6 +58,7 @@ export type {
   AidePullRequestProviderOperations,
   AidePullRequestRef,
   AidePullRequestRemoteMatch,
+  AidePullRequestRepositoryMatch,
   AidePullRequestRepositoryRef,
   AidePullRequestUrlMatch,
   AidePullRequestViewItem,

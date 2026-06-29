@@ -6,46 +6,19 @@
 import { Effect } from 'effect';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
-import type {
-  AidePullRequestRepositoryRef,
-  AidePullRequestViewItem,
-  AidePullRequestViewResult,
-} from '@cli/host/plugin-descriptor.js';
-import {
-  PullRequestProviderOperationError,
-  PullRequestProviderOperationTimeoutError,
-  UnsupportedPullRequestProviderError,
-  UnsupportedPullRequestProviderOperationError,
-} from '@cli/host/pull-request-provider-resolver.js';
+import type { AidePullRequestViewResult } from '@cli/host/plugin-descriptor.js';
 import { getAideHostContext } from '@cli/host/runtime-context.js';
-import { MissingRepoContextError, validatePRId } from '@lib/ado-utils.js';
+import { validatePRId } from '@lib/ado-utils.js';
 import { logProgress } from '@lib/cli-utils.js';
 import { handleCommandError } from '@lib/errors.js';
-import {
-  extractBranchName,
-  getCurrentBranch,
-  getGitRemoteUrl,
-} from '@lib/git-utils.js';
-import type { GitHubPullRequest } from '@lib/github-types.js';
-import {
-  DEFAULT_GITHUB_HOST,
-  buildGitHubPrUrl,
-  getGitHubPRStatus,
-} from '@lib/github-utils.js';
-import {
-  GitHubAuthError,
-  findPRByCurrentBranchAny,
-  parsePRUrlAny,
-  resolvePlatformContext,
-  type PlatformContext,
-} from '@lib/platform.js';
-import type { AzureDevOpsPullRequest } from '@lib/types.js';
+import { getCurrentBranch, getGitRemoteUrl } from '@lib/git-utils.js';
 import { validateArgs } from '@lib/validation.js';
 import {
   ViewArgsSchema,
   type OutputFormat,
   type ViewArgs,
 } from '@schemas/pr/view.js';
+import { resolveExplicitPullRequestRepositoryRef } from './repository-ref.js';
 
 // ============================================================================
 // Provider-neutral Formatting
@@ -131,9 +104,7 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
   const format = args.format ?? 'text';
 
   try {
-    const resolved =
-      (await resolveProviderPullRequestView(argv, args, format)) ??
-      (await resolveLegacyPullRequestView(args, format));
+    const resolved = await resolvePullRequestView(argv, args, format);
 
     if (resolved.autoDiscovered) {
       logProgress(
@@ -149,53 +120,69 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
   }
 }
 
-async function resolveProviderPullRequestView(
+async function resolvePullRequestView(
   argv: ArgumentsCamelCase<ViewArgs>,
   args: ViewArgs,
   format: OutputFormat
 ): Promise<{
   readonly result: AidePullRequestViewResult;
   readonly autoDiscovered: boolean;
-} | null> {
+}> {
   const hostContext = getAideHostContext(argv);
   if (hostContext === null) {
-    return null;
+    throw new Error('Pull request provider services are unavailable.');
   }
 
   const hasExplicitRepoContext =
     args.project !== undefined || args.repo !== undefined;
 
   if (args.pr === undefined) {
-    if (hasExplicitRepoContext) {
-      return null;
-    }
-
-    const remoteUrl = getGitRemoteUrl();
     const branch = getCurrentBranch();
-    if (!remoteUrl || !branch) {
-      return null;
+    if (!branch) {
+      throw new Error(
+        'Could not detect current git branch. Are you in a git repository? (Detached HEAD state is not supported)'
+      );
     }
 
     logProgress(`Searching for PR from branch '${branch}'...`, format);
-    let result: AidePullRequestViewResult;
-    try {
-      result = await Effect.runPromise(
-        hostContext.services.findPullRequestForBranchForRemote(remoteUrl, {
-          branch,
-        })
-      );
-    } catch (error) {
-      if (isProviderBranchLookupFallbackEligible(error)) {
-        return null;
-      }
-      throw error;
-    }
+    const { result, autoDiscovered } = hasExplicitRepoContext
+      ? await (async () => {
+          const { repository, autoDiscovered } =
+            await resolveExplicitPullRequestRepositoryRef(
+              args.project,
+              args.repo
+            );
+          const result = await Effect.runPromise(
+            hostContext.services.findPullRequestForBranchForRepository(
+              repository,
+              {
+                branch,
+              }
+            )
+          );
+          return { result, autoDiscovered };
+        })()
+      : await (async () => {
+          const remoteUrl = getGitRemoteUrl();
+          if (!remoteUrl) {
+            throw new Error(
+              'Could not determine repository context. Provide a PR ID, full PR URL, or run from a git repository with a supported remote.'
+            );
+          }
+          const result = await Effect.runPromise(
+            hostContext.services.findPullRequestForBranchForRemote(remoteUrl, {
+              branch,
+            })
+          );
+          return { result, autoDiscovered: true };
+        })();
+
     logProgress(
       `Found PR #${result.pullRequest.id}: ${result.pullRequest.title}`,
       format
     );
     logProgress('', format);
-    return { result, autoDiscovered: true };
+    return { result, autoDiscovered };
   }
 
   if (args.pr.startsWith('http')) {
@@ -205,18 +192,29 @@ async function resolveProviderPullRequestView(
     return { result, autoDiscovered: false };
   }
 
-  if (hasExplicitRepoContext) {
-    return null;
-  }
-
   const validation = validatePRId(args.pr);
   if (!validation.valid || validation.value === undefined) {
-    return null;
+    throw new Error(
+      `Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
+    );
+  }
+
+  if (hasExplicitRepoContext) {
+    const { repository, autoDiscovered } =
+      await resolveExplicitPullRequestRepositoryRef(args.project, args.repo);
+    const result = await Effect.runPromise(
+      hostContext.services.getPullRequestForRepository(repository, {
+        pullRequest: { number: validation.value },
+      })
+    );
+    return { result, autoDiscovered };
   }
 
   const remoteUrl = getGitRemoteUrl();
   if (!remoteUrl) {
-    return null;
+    throw new Error(
+      'Could not determine repository context. Provide a full PR URL or run from a git repository with a supported remote.'
+    );
   }
 
   const result = await Effect.runPromise(
@@ -225,259 +223,6 @@ async function resolveProviderPullRequestView(
     })
   );
   return { result, autoDiscovered: true };
-}
-
-function isProviderBranchLookupFallbackEligible(error: unknown): boolean {
-  return (
-    error instanceof UnsupportedPullRequestProviderError ||
-    error instanceof UnsupportedPullRequestProviderOperationError ||
-    error instanceof PullRequestProviderOperationError ||
-    error instanceof PullRequestProviderOperationTimeoutError
-  );
-}
-
-async function resolveLegacyPullRequestView(
-  args: ViewArgs,
-  format: OutputFormat
-): Promise<{
-  readonly result: AidePullRequestViewResult;
-  readonly autoDiscovered: boolean;
-}> {
-  let ctx: PlatformContext | undefined;
-  try {
-    ctx = await resolvePlatformContext(args.project, args.repo);
-  } catch (error) {
-    // URL fallback only for context-discovery failures. ConfigError from
-    // GitHubClient.create() (malformed stored creds) always rethrows -
-    // retrying with a URL would hit the same corrupted blob.
-    if (
-      !(
-        error instanceof MissingRepoContextError ||
-        error instanceof GitHubAuthError
-      ) ||
-      !args.pr?.startsWith('http')
-    ) {
-      throw error;
-    }
-    ctx = undefined;
-  }
-
-  let prId: number | undefined;
-
-  if (args.pr) {
-    if (args.pr.startsWith('http')) {
-      const parsed = parsePRUrlAny(args.pr);
-      if (!parsed) {
-        throw new Error(
-          `Invalid PR URL: ${args.pr}. Expected Azure DevOps or GitHub PR URL format.`
-        );
-      }
-      prId = parsed.prId;
-
-      if (parsed.platform === 'github' && parsed.owner && parsed.ghRepo) {
-        const { GitHubClient } = await import('@lib/github-client.js');
-        const host = parsed.ghHost ?? DEFAULT_GITHUB_HOST;
-        ctx = {
-          platform: 'github',
-          owner: parsed.owner,
-          repo: parsed.ghRepo,
-          host,
-          client: await GitHubClient.create({ host }),
-          autoDiscovered: false,
-        };
-      } else if (
-        parsed.platform === 'azure-devops' &&
-        parsed.project &&
-        parsed.repo
-      ) {
-        const { loadAzureDevOpsConfig } = await import('@lib/config.js');
-        const { AzureDevOpsClient } =
-          await import('@lib/azure-devops-client.js');
-        const { config } = await loadAzureDevOpsConfig();
-        ctx = {
-          platform: 'azure-devops',
-          org: parsed.org ?? '',
-          project: parsed.project,
-          repo: parsed.repo,
-          client: new AzureDevOpsClient(config),
-          autoDiscovered: false,
-        };
-      }
-    } else {
-      const validation = validatePRId(args.pr);
-      if (validation.valid) {
-        prId = validation.value;
-      } else {
-        throw new Error(
-          `Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
-        );
-      }
-    }
-  } else {
-    if (!ctx) {
-      throw new Error(
-        'Could not determine repository context. Provide a PR ID or full PR URL.'
-      );
-    }
-
-    const result = await findPRByCurrentBranchAny(ctx);
-
-    if (result.branch) {
-      logProgress(`Searching for PR from branch '${result.branch}'...`, format);
-    }
-
-    if (!result.success) {
-      throw new Error(result.error);
-    }
-
-    if (ctx.platform === 'github' && result.githubPr) {
-      prId = result.githubPr.number;
-      logProgress(`Found PR #${prId}: ${result.githubPr.title}`, format);
-      logProgress('', format);
-    } else if (result.pr) {
-      prId = result.pr.pullRequestId;
-      logProgress(`Found PR #${prId}: ${result.pr.title}`, format);
-      logProgress('', format);
-    }
-  }
-
-  if (prId === undefined) {
-    throw new Error(
-      'Could not determine PR ID. Please provide a PR ID, full PR URL, or run from a branch with an associated PR.'
-    );
-  }
-
-  if (!ctx) {
-    throw new Error(
-      'Could not determine repository context. Provide a full PR URL.'
-    );
-  }
-
-  const result =
-    ctx.platform === 'github'
-      ? await viewGitHubPullRequest(ctx, prId)
-      : await viewAzureDevOpsPullRequest(ctx, prId);
-  return { result, autoDiscovered: ctx.autoDiscovered };
-}
-
-async function viewGitHubPullRequest(
-  ctx: Extract<PlatformContext, { platform: 'github' }>,
-  prId: number
-): Promise<AidePullRequestViewResult> {
-  const pr = await ctx.client.getPullRequest(ctx.owner, ctx.repo, prId);
-  const url = buildGitHubPrUrl(ctx.owner, ctx.repo, prId, ctx.host);
-  const repository = {
-    kind: 'github',
-    host: ctx.host,
-    owner: ctx.owner,
-    repo: ctx.repo,
-  } as const;
-
-  return {
-    repository,
-    repositoryLabel: repositoryLabel(repository),
-    pullRequest: githubPullRequestToViewItem(pr, url),
-  };
-}
-
-async function viewAzureDevOpsPullRequest(
-  ctx: Extract<PlatformContext, { platform: 'azure-devops' }>,
-  prId: number
-): Promise<AidePullRequestViewResult> {
-  const [pr, labelsResponse] = await Promise.all([
-    ctx.client.getPullRequest(ctx.project, ctx.repo, prId),
-    ctx.client.getPullRequestLabels(ctx.project, ctx.repo, prId),
-  ]);
-  const labels = labelsResponse.value
-    .filter((label) => label.active)
-    .map((label) => label.name);
-  const repository = {
-    kind: 'azure-devops',
-    org: ctx.org,
-    project: ctx.project,
-    repo: ctx.repo,
-  } as const;
-
-  return {
-    repository,
-    repositoryLabel: repositoryLabel(repository),
-    pullRequest: azureDevOpsPullRequestToViewItem(pr, labels),
-  };
-}
-
-function githubPullRequestStatus(
-  pr: GitHubPullRequest
-): AidePullRequestViewItem['status'] {
-  const status = getGitHubPRStatus(pr);
-  if (
-    status === 'active' ||
-    status === 'completed' ||
-    status === 'abandoned' ||
-    status === 'draft'
-  ) {
-    return status;
-  }
-  return 'active';
-}
-
-function githubPullRequestToViewItem(
-  pr: GitHubPullRequest,
-  url: string
-): AidePullRequestViewItem {
-  return {
-    id: pr.number,
-    title: pr.title,
-    status: githubPullRequestStatus(pr),
-    createdAt: pr.created_at,
-    author: {
-      displayName: pr.user.login,
-      username: pr.user.login,
-    },
-    ...(pr.body === null ? {} : { description: pr.body }),
-    url,
-    draft: pr.draft,
-    sourceBranch: pr.head.ref,
-    targetBranch: pr.base.ref,
-    labels: pr.labels.map((label) => label.name),
-  };
-}
-
-function azureDevOpsPullRequestToViewItem(
-  pr: AzureDevOpsPullRequest,
-  labels: readonly string[]
-): AidePullRequestViewItem {
-  return {
-    id: pr.pullRequestId,
-    title: pr.title,
-    status: pr.isDraft ? 'draft' : pr.status,
-    createdAt: pr.creationDate,
-    author: {
-      displayName: pr.createdBy.displayName,
-      ...(pr.createdBy.uniqueName === undefined
-        ? {}
-        : { email: pr.createdBy.uniqueName }),
-    },
-    ...(pr.description === undefined ? {} : { description: pr.description }),
-    draft: pr.isDraft ?? false,
-    ...(pr.sourceRefName === undefined
-      ? {}
-      : { sourceBranch: extractBranchName(pr.sourceRefName) }),
-    ...(pr.targetRefName === undefined
-      ? {}
-      : { targetBranch: extractBranchName(pr.targetRefName) }),
-    labels,
-  };
-}
-
-function repositoryLabel(repository: AidePullRequestRepositoryRef): string {
-  switch (repository.kind) {
-    case 'github':
-      return `${repository.host}/${repository.owner}/${repository.repo}`;
-    case 'azure-devops':
-      return `${repository.org}/${repository.project}/${repository.repo}`;
-    case 'external':
-      return repository.displayName;
-  }
 }
 
 export default {

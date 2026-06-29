@@ -37,10 +37,14 @@ import {
   UnsupportedPullRequestProviderOperationError,
   UnsupportedPullRequestProviderError,
   findPullRequestForBranchForRemote,
+  findPullRequestForBranchForRepository,
   getPullRequestForRemote,
+  getPullRequestForRepository,
   getPullRequestForUrl,
   listPullRequestsForRemote,
+  listPullRequestsForRepository,
   resolvePullRequestProviderForRemote,
+  resolvePullRequestProviderForRepository,
   resolvePullRequestProviderForUrl,
   resolvePullRequestProviderFromRegistryForRemote,
   resolvePullRequestProviderFromRegistryForUrl,
@@ -316,6 +320,59 @@ describe('pull request provider resolution', () => {
       throw new Error('Expected Azure DevOps pull request URL match');
     }
     expect(ado.match.pullRequest).toEqual({ number: 42 });
+  });
+
+  test('resolves repository refs by provider id without invoking matchers', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+    const providers = [
+      {
+        ...provider,
+        capability: {
+          ...provider.capability,
+          matchRemote: () => {
+            throw new Error('remote matcher should not run');
+          },
+          matchPullRequestUrl: () => {
+            throw new Error('url matcher should not run');
+          },
+        },
+      },
+    ];
+
+    const result = await Effect.runPromise(
+      resolvePullRequestProviderForRepository(
+        providers,
+        externalRepository('gitlab')
+      )
+    );
+
+    expect(result).toEqual({
+      pluginId: 'gitlab-plugin',
+      providerId: 'gitlab',
+      priority: 100,
+      features: {},
+      match: {
+        source: 'repository-ref',
+        repository: externalRepository('gitlab'),
+      },
+    });
+    expect(Object.isFrozen(result.match)).toBe(true);
+  });
+
+  test('fails with a typed unsupported-provider error when no provider owns a repository ref', async () => {
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRepository(
+        [fakeProvider('gitlab-plugin', 'gitlab', 100)],
+        externalRepository('bitbucket')
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(UnsupportedPullRequestProviderError);
+    if (!(error instanceof UnsupportedPullRequestProviderError)) {
+      throw new Error('Expected unsupported provider error');
+    }
+    expect(error.source).toBe('repository-ref');
+    expect(error.value).toBe('bitbucket');
   });
 
   test('fails with a typed unsupported-provider error when no provider matches', async () => {
@@ -859,6 +916,67 @@ describe('pull request provider auth capabilities', () => {
 });
 
 describe('pull request provider list operations', () => {
+  test('lists pull requests for a repository ref through a fake provider', async () => {
+    const calls: unknown[] = [];
+    const repository = externalRepository('gitlab', { projectId: 10 });
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+
+    const result = await Effect.runPromise(
+      listPullRequestsForRepository(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                listPullRequests: (request) => {
+                  calls.push(request);
+                  return Effect.succeed({
+                    repository,
+                    repositoryLabel: 'gitlab/acme/widgets',
+                    pullRequests: [
+                      {
+                        id: 1,
+                        title: 'Repository-ref PR',
+                        status: 'active',
+                        createdAt: '2026-01-01T00:00:00Z',
+                        author: { displayName: 'Ada Lovelace' },
+                      },
+                    ],
+                  });
+                },
+              },
+            },
+          },
+        ],
+        repository,
+        { status: 'active', limit: 10, createdBy: 'ada' }
+      )
+    );
+
+    expect(calls).toEqual([
+      {
+        match: {
+          source: 'repository-ref',
+          repository,
+        },
+        status: 'active',
+        limit: 10,
+        createdBy: 'ada',
+      },
+    ]);
+    expect(result.repositoryLabel).toBe('gitlab/acme/widgets');
+    expect(result.pullRequests).toEqual([
+      {
+        id: 1,
+        title: 'Repository-ref PR',
+        status: 'active',
+        createdAt: '2026-01-01T00:00:00Z',
+        author: { displayName: 'Ada Lovelace' },
+      },
+    ]);
+  });
+
   test('lists GitHub pull requests through a provider-owned operation', async () => {
     const calls: unknown[] = [];
     const plugin = createGitHubPlugin({
@@ -1300,6 +1418,59 @@ describe('pull request provider list operations', () => {
 });
 
 describe('pull request provider view operations', () => {
+  test('gets a pull request for a repository ref through a fake provider', async () => {
+    const calls: unknown[] = [];
+    const repository = externalRepository('gitlab', { projectId: 10 });
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+
+    const result = await Effect.runPromise(
+      getPullRequestForRepository(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                getPullRequest: (request) => {
+                  calls.push(request);
+                  return Effect.succeed({
+                    repository,
+                    repositoryLabel: 'gitlab/acme/widgets',
+                    pullRequest: {
+                      id: 2,
+                      title: 'Repository-ref detail',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Ada Lovelace' },
+                    },
+                  });
+                },
+              },
+            },
+          },
+        ],
+        repository,
+        { pullRequest: { number: 2 } }
+      )
+    );
+
+    expect(calls).toEqual([
+      {
+        match: {
+          source: 'repository-ref',
+          repository,
+        },
+        pullRequest: { number: 2 },
+      },
+    ]);
+    expect(result.repositoryLabel).toBe('gitlab/acme/widgets');
+    expect(result.pullRequest).toMatchObject({
+      id: 2,
+      title: 'Repository-ref detail',
+      status: 'active',
+    });
+  });
+
   test('gets a GitHub pull request through a provider-owned operation', async () => {
     const calls: unknown[] = [];
     const plugin = createGitHubPlugin({
@@ -1609,6 +1780,61 @@ describe('pull request provider view operations', () => {
 });
 
 describe('pull request provider branch lookup operations', () => {
+  test('finds a pull request for a branch with a repository ref through a fake provider', async () => {
+    const calls: unknown[] = [];
+    const repository = externalRepository('gitlab', { projectId: 10 });
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+
+    const result = await Effect.runPromise(
+      findPullRequestForBranchForRepository(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                findPullRequestForBranch: (request) => {
+                  calls.push(request);
+                  return Effect.succeed({
+                    branch: 'feature/repository-ref',
+                    repository,
+                    repositoryLabel: 'gitlab/acme/widgets',
+                    pullRequest: {
+                      id: 3,
+                      title: 'Repository-ref branch',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Ada Lovelace' },
+                      sourceBranch: 'feature/repository-ref',
+                    },
+                  });
+                },
+              },
+            },
+          },
+        ],
+        repository,
+        { branch: 'feature/repository-ref' }
+      )
+    );
+
+    expect(calls).toEqual([
+      {
+        match: {
+          source: 'repository-ref',
+          repository,
+        },
+        branch: 'feature/repository-ref',
+      },
+    ]);
+    expect(result.branch).toBe('feature/repository-ref');
+    expect(result.pullRequest).toMatchObject({
+      id: 3,
+      title: 'Repository-ref branch',
+      sourceBranch: 'feature/repository-ref',
+    });
+  });
+
   test('finds a GitHub pull request for a branch through a provider-owned operation', async () => {
     const calls: unknown[] = [];
     const plugin = createGitHubPlugin({

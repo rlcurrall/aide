@@ -215,6 +215,7 @@ export interface AidePrimeContributionCapability {
 
 export type AidePullRequestProviderMatchSource =
   | 'git-remote'
+  | 'repository-ref'
   | 'pull-request-url';
 
 export type AidePullRequestRepositoryRef =
@@ -252,6 +253,12 @@ export interface AidePullRequestRemoteMatch extends AidePullRequestProviderMatch
   readonly pullRequest?: never;
 }
 
+export interface AidePullRequestRepositoryMatch extends AidePullRequestProviderMatchBase {
+  readonly source: 'repository-ref';
+  readonly repository: AidePullRequestRepositoryRef;
+  readonly pullRequest?: never;
+}
+
 export interface AidePullRequestUrlMatch extends AidePullRequestProviderMatchBase {
   readonly source: 'pull-request-url';
   readonly repository: AidePullRequestRepositoryRef;
@@ -260,6 +267,7 @@ export interface AidePullRequestUrlMatch extends AidePullRequestProviderMatchBas
 
 export type AidePullRequestProviderMatch =
   | AidePullRequestRemoteMatch
+  | AidePullRequestRepositoryMatch
   | AidePullRequestUrlMatch;
 
 export interface AidePullRequestProviderFeatures {
@@ -282,7 +290,7 @@ export type AidePullRequestListItemStatus =
   | 'draft';
 
 export interface AidePullRequestListRequest {
-  readonly match: AidePullRequestRemoteMatch;
+  readonly match: AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch;
   readonly status?: AidePullRequestListFilterStatus;
   readonly limit?: number;
   readonly createdBy?: string;
@@ -329,7 +337,7 @@ export interface AidePullRequestViewResult {
 }
 
 export interface AidePullRequestBranchLookupRequest {
-  readonly match: AidePullRequestRemoteMatch;
+  readonly match: AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch;
   readonly branch: string;
 }
 

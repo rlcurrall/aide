@@ -6,29 +6,18 @@
 import { Effect } from 'effect';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
-import type {
-  AidePullRequestListItem,
-  AidePullRequestListItemStatus,
-  AidePullRequestListResult,
-  AidePullRequestRepositoryRef,
-} from '@cli/host/plugin-descriptor.js';
+import type { AidePullRequestListResult } from '@cli/host/plugin-descriptor.js';
 import { getAideHostContext } from '@cli/host/runtime-context.js';
 import { logProgress } from '@lib/cli-utils.js';
 import { handleCommandError } from '@lib/errors.js';
 import { getGitRemoteUrl } from '@lib/git-utils.js';
-import type { GitHubPullRequest } from '@lib/github-types.js';
-import {
-  getGitHubPRStatus,
-  mapStatusToGitHubState,
-} from '@lib/github-utils.js';
-import { resolvePlatformContext, type PlatformContext } from '@lib/platform.js';
-import type { AzureDevOpsPullRequest } from '@lib/types.js';
 import { validateArgs } from '@lib/validation.js';
 import {
   ListArgsSchema,
   type ListArgs,
   type OutputFormat,
 } from '@schemas/pr/list.js';
+import { resolveExplicitPullRequestRepositoryRef } from './repository-ref.js';
 
 // ============================================================================
 // Provider-neutral Formatting
@@ -98,85 +87,6 @@ export function formatPullRequestListOutput(
 // Handler
 // ============================================================================
 
-async function listGitHubPullRequests(
-  ctx: Extract<PlatformContext, { platform: 'github' }>,
-  args: ListArgs
-): Promise<AidePullRequestListResult> {
-  const { status, limit } = args;
-  const createdBy = args.createdBy ?? args.author;
-
-  const ghState = mapStatusToGitHubState(status);
-  let prs = await ctx.client.listPullRequests(ctx.owner, ctx.repo, {
-    state: ghState,
-    per_page: limit,
-  });
-
-  if (status === 'abandoned') {
-    prs = prs.filter((pr) => !pr.merged);
-  }
-  if (status === 'completed') {
-    prs = prs.filter((pr) => pr.merged);
-  }
-  if (limit && prs.length > limit) {
-    prs = prs.slice(0, limit);
-  }
-  if (createdBy) {
-    const searchTerm = createdBy.toLowerCase();
-    prs = prs.filter((pr) => pr.user.login.toLowerCase().includes(searchTerm));
-  }
-
-  const repository = {
-    kind: 'github',
-    host: ctx.host,
-    owner: ctx.owner,
-    repo: ctx.repo,
-  } as const;
-
-  return {
-    repository,
-    repositoryLabel: repositoryLabel(repository),
-    pullRequests: prs.map(githubPullRequestToListItem),
-  };
-}
-
-async function listAzureDevOpsPullRequests(
-  ctx: Extract<PlatformContext, { platform: 'azure-devops' }>,
-  args: ListArgs
-): Promise<AidePullRequestListResult> {
-  const { status, limit } = args;
-  const createdBy = args.createdBy ?? args.author;
-
-  const response = await ctx.client.listPullRequests(ctx.project, ctx.repo, {
-    status,
-    top: limit,
-  });
-
-  let prs = response.value;
-  if (createdBy) {
-    const searchTerm = createdBy.toLowerCase();
-    prs = prs.filter((pr) => {
-      const displayName = pr.createdBy.displayName.toLowerCase();
-      const uniqueName = pr.createdBy.uniqueName?.toLowerCase() || '';
-      return (
-        displayName.includes(searchTerm) || uniqueName.includes(searchTerm)
-      );
-    });
-  }
-
-  const repository = {
-    kind: 'azure-devops',
-    org: ctx.org,
-    project: ctx.project,
-    repo: ctx.repo,
-  } as const;
-
-  return {
-    repository,
-    repositoryLabel: repositoryLabel(repository),
-    pullRequests: prs.map(azureDevOpsPullRequestToListItem),
-  };
-}
-
 async function handler(argv: ArgumentsCamelCase<ListArgs>): Promise<void> {
   const args = validateArgs(ListArgsSchema, argv, 'list arguments');
   const format = args.format ?? 'text';
@@ -207,27 +117,39 @@ async function resolvePullRequestList(
   readonly autoDiscovered: boolean;
 }> {
   const hostContext = getAideHostContext(argv);
-  const remoteUrl = getGitRemoteUrl();
+  if (hostContext === null) {
+    throw new Error('Pull request provider services are unavailable.');
+  }
+
   const hasExplicitRepoContext =
     args.project !== undefined || args.repo !== undefined;
 
-  if (hostContext && remoteUrl && !hasExplicitRepoContext) {
+  const request = {
+    status: args.status,
+    limit: args.limit,
+    createdBy: args.createdBy ?? args.author,
+  };
+
+  if (hasExplicitRepoContext) {
+    const { repository, autoDiscovered } =
+      await resolveExplicitPullRequestRepositoryRef(args.project, args.repo);
     const result = await Effect.runPromise(
-      hostContext.services.listPullRequestsForRemote(remoteUrl, {
-        status: args.status,
-        limit: args.limit,
-        createdBy: args.createdBy ?? args.author,
-      })
+      hostContext.services.listPullRequestsForRepository(repository, request)
     );
-    return { result, autoDiscovered: true };
+    return { result, autoDiscovered };
   }
 
-  const ctx = await resolvePlatformContext(args.project, args.repo);
-  const result =
-    ctx.platform === 'github'
-      ? await listGitHubPullRequests(ctx, args)
-      : await listAzureDevOpsPullRequests(ctx, args);
-  return { result, autoDiscovered: ctx.autoDiscovered };
+  const remoteUrl = getGitRemoteUrl();
+  if (remoteUrl === null) {
+    throw new Error(
+      'Could not determine repository context. Run this command from a git repository with a supported remote or specify --project and --repo.'
+    );
+  }
+
+  const result = await Effect.runPromise(
+    hostContext.services.listPullRequestsForRemote(remoteUrl, request)
+  );
+  return { result, autoDiscovered: true };
 }
 
 function logListRequest(args: ListArgs, format: OutputFormat): void {
@@ -239,69 +161,6 @@ function logListRequest(args: ListArgs, format: OutputFormat): void {
   if (createdBy) logProgress(`Created by: ${createdBy}`, format);
   if (limit) logProgress(`Limit: ${limit}`, format);
   logProgress('', format);
-}
-
-function githubPullRequestStatus(
-  pr: GitHubPullRequest
-): AidePullRequestListItemStatus {
-  const status = getGitHubPRStatus(pr);
-  if (
-    status === 'active' ||
-    status === 'completed' ||
-    status === 'abandoned' ||
-    status === 'draft'
-  ) {
-    return status;
-  }
-  return 'active';
-}
-
-function githubPullRequestToListItem(
-  pr: GitHubPullRequest
-): AidePullRequestListItem {
-  return {
-    id: pr.number,
-    title: pr.title,
-    status: githubPullRequestStatus(pr),
-    createdAt: pr.created_at,
-    author: {
-      displayName: pr.user.login,
-      username: pr.user.login,
-    },
-    ...(pr.body === null ? {} : { description: pr.body }),
-    url: pr.html_url,
-    draft: pr.draft,
-  };
-}
-
-function azureDevOpsPullRequestToListItem(
-  pr: AzureDevOpsPullRequest
-): AidePullRequestListItem {
-  return {
-    id: pr.pullRequestId,
-    title: pr.title,
-    status: pr.isDraft ? 'draft' : pr.status,
-    createdAt: pr.creationDate,
-    author: {
-      displayName: pr.createdBy.displayName,
-      ...(pr.createdBy.uniqueName === undefined
-        ? {}
-        : { email: pr.createdBy.uniqueName }),
-    },
-    ...(pr.description === undefined ? {} : { description: pr.description }),
-    draft: pr.isDraft ?? false,
-  };
-}
-
-function repositoryLabel(repository: AidePullRequestRepositoryRef): string {
-  switch (repository.kind) {
-    case 'github':
-      return `${repository.host}/${repository.owner}/${repository.repo}`;
-    case 'azure-devops':
-      return `${repository.org}/${repository.project}/${repository.repo}`;
-    case 'external':
-      return repository.displayName;
-  }
 }
 
 export default {

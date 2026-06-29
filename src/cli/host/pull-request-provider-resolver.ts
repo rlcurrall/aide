@@ -17,6 +17,7 @@ import type {
   AidePullRequestProviderMatchSource,
   AidePullRequestRef,
   AidePullRequestRemoteMatch,
+  AidePullRequestRepositoryMatch,
   AidePullRequestRepositoryRef,
   AidePullRequestUrlMatch,
   AidePullRequestViewItem,
@@ -212,6 +213,30 @@ function candidateSummary<TMatch extends AidePullRequestProviderMatch>(
     providerId: resolved.providerId,
     priority: resolved.priority,
   };
+}
+
+function repositoryRefValue(repository: AidePullRequestRepositoryRef): string {
+  switch (repository.kind) {
+    case 'github':
+      return `${repository.host}/${repository.owner}/${repository.repo}`;
+    case 'azure-devops':
+      return `${repository.org}/${repository.project}/${repository.repo}`;
+    case 'external':
+      return repository.displayName;
+  }
+}
+
+function repositoryRefProviderId(
+  repository: AidePullRequestRepositoryRef
+): string {
+  switch (repository.kind) {
+    case 'github':
+      return 'github';
+    case 'azure-devops':
+      return 'azure-devops';
+    case 'external':
+      return repository.providerId;
+  }
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
@@ -489,7 +514,9 @@ function snapshotPullRequestViewItem(
 }
 
 function validatePullRequestListResult(
-  provider: ResolvedPullRequestProviderCandidate<AidePullRequestRemoteMatch>,
+  provider: ResolvedPullRequestProviderCandidate<
+    AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
+  >,
   result: unknown
 ): Effect.Effect<
   AidePullRequestListResult,
@@ -596,7 +623,9 @@ function validatePullRequestViewResult(
 }
 
 function validatePullRequestBranchLookupResult(
-  provider: ResolvedPullRequestProviderCandidate<AidePullRequestRemoteMatch>,
+  provider: ResolvedPullRequestProviderCandidate<
+    AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
+  >,
   request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
   result: unknown
 ): Effect.Effect<
@@ -759,9 +788,9 @@ function validateProviderMatch<TMatch extends AidePullRequestProviderMatch>(
     return invalid('invalid detail');
   }
 
-  if (source === 'git-remote') {
+  if (source === 'git-remote' || source === 'repository-ref') {
     if (hasOwn(candidate, 'pullRequest')) {
-      return invalid('git-remote match must not include pull request ref');
+      return invalid(`${source} match must not include pull request ref`);
     }
     return Effect.succeed(
       Object.freeze({
@@ -1009,6 +1038,108 @@ function selectProviderCandidateForOperation<
   );
 }
 
+function collectRepositoryRefMatches(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repositoryRef: AidePullRequestRepositoryRef
+): Effect.Effect<
+  ResolvedPullRequestProviderCandidate<AidePullRequestRepositoryMatch>[],
+  InvalidPullRequestProviderMatchError
+> {
+  const repository = snapshotRepositoryRef(repositoryRef);
+  const value =
+    repository === null
+      ? 'invalid repository ref'
+      : repositoryRefValue(repository);
+  if (repository === null) {
+    return Effect.fail(
+      new InvalidPullRequestProviderMatchError({
+        source: 'repository-ref',
+        value,
+        pluginId: 'host',
+        providerId: 'unknown',
+        reason: 'invalid repository ref',
+      })
+    );
+  }
+
+  const expectedProviderId = repositoryRefProviderId(repository);
+  return Effect.forEach(providers, ({ pluginId, capability }) => {
+    if (capability.providerId !== expectedProviderId) {
+      return Effect.succeed([]);
+    }
+
+    const match = Object.freeze({
+      source: 'repository-ref' as const,
+      repository,
+    });
+    return validateProviderPrioritySafely(
+      pluginId,
+      capability,
+      'repository-ref',
+      value,
+      match
+    ).pipe(
+      Effect.map((priority) => [
+        {
+          pluginId,
+          providerId: capability.providerId,
+          capability,
+          features: capability.features,
+          match,
+          priority,
+        },
+      ])
+    );
+  }).pipe(Effect.map((matches) => matches.flat()));
+}
+
+function selectProviderCandidateForRepository(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  options: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch> = {}
+): Effect.Effect<
+  ResolvedPullRequestProviderCandidate<AidePullRequestRepositoryMatch>,
+  PullRequestProviderResolutionError
+> {
+  const value =
+    snapshotRepositoryRef(repository) === null
+      ? 'invalid repository ref'
+      : repositoryRefValue(repository);
+  return collectRepositoryRefMatches(providers, repository).pipe(
+    Effect.flatMap((matches) =>
+      selectProvider(matches, 'repository-ref', value, options)
+    )
+  );
+}
+
+function selectProviderCandidateForRepositoryOperation(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  hasOperation: (
+    provider: ResolvedPullRequestProviderCandidate<AidePullRequestRepositoryMatch>
+  ) => boolean,
+  options: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch> = {}
+): Effect.Effect<
+  ResolvedPullRequestProviderCandidate<AidePullRequestRepositoryMatch>,
+  PullRequestProviderResolutionError
+> {
+  const value =
+    snapshotRepositoryRef(repository) === null
+      ? 'invalid repository ref'
+      : repositoryRefValue(repository);
+  return collectRepositoryRefMatches(providers, repository).pipe(
+    Effect.flatMap((matches) => {
+      const operationMatches = matches.filter(hasOperation);
+      return selectProvider(
+        operationMatches.length > 0 ? operationMatches : matches,
+        'repository-ref',
+        value,
+        options
+      );
+    })
+  );
+}
+
 export function resolvePullRequestProviderForRemote(
   providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
@@ -1039,6 +1170,21 @@ export function resolvePullRequestProviderForUrl(
     'pull-request-url',
     url,
     (provider) => provider.matchPullRequestUrl(url),
+    options
+  ).pipe(Effect.map(stripProviderCapability));
+}
+
+export function resolvePullRequestProviderForRepository(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  options: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch> = {}
+): Effect.Effect<
+  ResolvedPullRequestProvider<AidePullRequestRepositoryMatch>,
+  PullRequestProviderResolutionError
+> {
+  return selectProviderCandidateForRepository(
+    providers,
+    repository,
     options
   ).pipe(Effect.map(stripProviderCapability));
 }
@@ -1124,7 +1270,9 @@ function invokePullRequestProviderOperation<A, I>(
 }
 
 export function listPullRequestsWithProvider(
-  provider: ResolvedPullRequestProviderCandidate<AidePullRequestRemoteMatch>,
+  provider: ResolvedPullRequestProviderCandidate<
+    AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
+  >,
   request: Omit<AidePullRequestListRequest, 'match'>,
   options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
 ): Effect.Effect<
@@ -1177,7 +1325,9 @@ export function getPullRequestWithProvider(
 }
 
 export function findPullRequestForBranchWithProvider(
-  provider: ResolvedPullRequestProviderCandidate<AidePullRequestRemoteMatch>,
+  provider: ResolvedPullRequestProviderCandidate<
+    AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
+  >,
   request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
   options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
 ): Effect.Effect<
@@ -1228,6 +1378,28 @@ export function listPullRequestsForRemote(
   );
 }
 
+export function listPullRequestsForRepository(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  request: Omit<AidePullRequestListRequest, 'match'> = {},
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestListResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForRepositoryOperation(
+    providers,
+    repository,
+    (provider) =>
+      provider.capability.operations?.listPullRequests !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      listPullRequestsWithProvider(provider, request, options)
+    )
+  );
+}
+
 export function findPullRequestForBranchForRemote(
   providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
@@ -1252,6 +1424,28 @@ export function findPullRequestForBranchForRemote(
   );
 }
 
+export function findPullRequestForBranchForRepository(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestBranchLookupResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForRepositoryOperation(
+    providers,
+    repository,
+    (provider) =>
+      provider.capability.operations?.findPullRequestForBranch !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      findPullRequestForBranchWithProvider(provider, request, options)
+    )
+  );
+}
+
 export function getPullRequestForRemote(
   providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
@@ -1266,6 +1460,27 @@ export function getPullRequestForRemote(
     'git-remote',
     remoteUrl,
     (provider) => provider.matchRemote(remoteUrl),
+    (provider) => provider.capability.operations?.getPullRequest !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      getPullRequestWithProvider(provider, request, options)
+    )
+  );
+}
+
+export function getPullRequestForRepository(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestViewResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForRepositoryOperation(
+    providers,
+    repository,
     (provider) => provider.capability.operations?.getPullRequest !== undefined,
     options
   ).pipe(
@@ -1324,5 +1539,18 @@ export function resolvePullRequestProviderFromRegistryForUrl(
   return resolvePullRequestProviderForUrl(
     registry.capabilities.pullRequestProviders(),
     url
+  );
+}
+
+export function resolvePullRequestProviderFromRegistryForRepository(
+  registry: CommandRegistry,
+  repository: AidePullRequestRepositoryRef
+): Effect.Effect<
+  ResolvedPullRequestProvider<AidePullRequestRepositoryMatch>,
+  PullRequestProviderResolutionError
+> {
+  return resolvePullRequestProviderForRepository(
+    registry.capabilities.pullRequestProviders(),
+    repository
   );
 }
