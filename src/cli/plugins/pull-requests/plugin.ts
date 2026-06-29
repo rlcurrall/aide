@@ -10,7 +10,7 @@ import {
   prReplyCommand,
   prUpdateCommand,
   prViewCommand,
-} from '@cli/commands/pr/index.js';
+} from './commands/index.js';
 import {
   defineAidePlugin,
   pluginCommandModule,
