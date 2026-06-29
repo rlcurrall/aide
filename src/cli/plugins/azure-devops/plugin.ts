@@ -1,7 +1,9 @@
 import { Effect } from 'effect';
+import * as v from 'valibot';
 
 import {
   defineAidePlugin,
+  type AideAuthLoginRequest,
   type AidePullRequestBranchLookupRequest,
   type AidePullRequestBranchLookupResult,
   type AidePullRequestListRequest,
@@ -15,11 +17,25 @@ import { parseGitRemote, parsePRUrl } from '@lib/ado-utils.js';
 import {
   loadAzureDevOpsConfig,
   probeAdoConfig,
+  readAdoEnvForMigration,
   type ConfigStatus,
 } from '@lib/config.js';
 import { extractBranchName } from '@lib/git-utils.js';
+import { deleteSecret, setSecret } from '@lib/secrets.js';
 import type { AzureDevOpsPullRequest } from '@lib/types.js';
-import type { AzureDevOpsConfig } from '@schemas/config.js';
+import {
+  StoredAdoSchema,
+  type AuthMethod,
+  type AzureDevOpsConfig,
+} from '@schemas/config.js';
+import {
+  authInputString,
+  formatMigrationError,
+  formatUnsetHint,
+  messages,
+  promptAuthString,
+  validateUrl,
+} from '../auth-operation-utils.js';
 
 type ProbeAdoConfig = () => Promise<ConfigStatus<AzureDevOpsConfig>>;
 type AzureDevOpsPullRequestClient = Pick<
@@ -64,6 +80,77 @@ function mapAzureDevOpsAuthStatus(
           'system keyring is unreachable and Azure DevOps env vars are not set',
       };
   }
+}
+
+function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
+  return Effect.gen(function* () {
+    if (request.fromEnv) {
+      const result = readAdoEnvForMigration();
+      if (result.kind !== 'ok') {
+        return yield* Effect.fail(
+          new Error(formatMigrationError('Azure DevOps', result))
+        );
+      }
+
+      yield* Effect.tryPromise({
+        try: () => setSecret('ado', JSON.stringify(result.value)),
+        catch: (error) => error,
+      });
+      return {
+        status: 'stored' as const,
+        messages: messages(
+          'Migrated Azure DevOps credentials from env to keyring.',
+          formatUnsetHint(result.varsUsed)
+        ),
+      };
+    }
+
+    const orgUrl = yield* promptAuthString(request, 'orgUrl', {
+      label: 'Azure DevOps org URL',
+      validate: validateUrl,
+    });
+    const pat = yield* promptAuthString(request, 'pat', {
+      label: 'PAT',
+      secret: true,
+    });
+    const authMethod = (authInputString(request, 'authMethod') ??
+      'pat') as AuthMethod;
+
+    const validated = yield* Effect.try({
+      try: () =>
+        v.parse(StoredAdoSchema, {
+          orgUrl,
+          pat,
+          authMethod,
+        }),
+      catch: (error) => error,
+    });
+    yield* Effect.tryPromise({
+      try: () => setSecret('ado', JSON.stringify(validated)),
+      catch: (error) => error,
+    });
+
+    return {
+      status: 'stored' as const,
+      messages: ['Saved credentials for ado.'],
+    };
+  });
+}
+
+function logoutAzureDevOpsAuth() {
+  return Effect.tryPromise({
+    try: () => deleteSecret('ado'),
+    catch: (error) => error,
+  }).pipe(
+    Effect.map((removed) => ({
+      status: removed ? ('removed' as const) : ('not-found' as const),
+      messages: [
+        removed
+          ? 'Removed stored credentials for ado.'
+          : 'No stored credentials for ado.',
+      ],
+    }))
+  );
 }
 
 export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
@@ -251,6 +338,10 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
         providerId: 'azure-devops',
         label: 'Azure DevOps',
         status: authStatus,
+        operations: {
+          login: loginAzureDevOpsAuth,
+          logout: logoutAzureDevOpsAuth,
+        },
       },
       primeContribution: {
         status: [

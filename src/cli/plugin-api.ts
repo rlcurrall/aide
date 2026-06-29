@@ -18,7 +18,14 @@ export {
 } from './host/runtime-context.js';
 export type {
   AideAuthAccount,
+  AideAuthInputValue,
+  AideAuthLoginRequest,
+  AideAuthLoginResult,
+  AideAuthLogoutResult,
+  AideAuthPrompt,
+  AideAuthPromptTextRequest,
   AideAuthProviderCapability,
+  AideAuthProviderOperations,
   AideAuthScope,
   AideAuthStatusRequest,
   AideCommandExtensionPolicy,

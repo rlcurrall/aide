@@ -9,6 +9,7 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 
 import { loginJira, loginAdo, loginGithub } from './login.js';
+import { AuthProviderOperationError } from '@cli/host/auth-provider-operations.js';
 import type { Prompter, ReadLineOptions } from '@lib/prompts.js';
 import {
   installMockSecrets,
@@ -89,17 +90,19 @@ describe('loginJira', () => {
     expect(store.has('aide:jira')).toBe(true);
   });
 
-  test('loginJira propagates KeyringUnavailableError when setSecret fails', async () => {
+  test('loginJira wraps KeyringUnavailableError when setSecret fails', async () => {
     restore(); // tear down the default mock
     const localRestore = installMockSecrets(store, 'set');
     try {
       const p = new ScriptedPrompter([]);
-      await expect(
-        loginJira(
-          { url: 'https://x.atlassian.net', email: 'a@b.c', token: 't' },
-          { prompter: p }
-        )
-      ).rejects.toMatchObject({ name: 'KeyringUnavailableError' });
+      const error = await loginJira(
+        { url: 'https://x.atlassian.net', email: 'a@b.c', token: 't' },
+        { prompter: p }
+      ).catch((error) => error);
+      expect(error).toBeInstanceOf(AuthProviderOperationError);
+      expect((error as AuthProviderOperationError).cause).toMatchObject({
+        name: 'KeyringUnavailableError',
+      });
     } finally {
       localRestore();
     }

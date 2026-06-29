@@ -84,6 +84,43 @@ export interface AideAuthAccount {
   readonly scope?: AideAuthScope;
 }
 
+export interface AideAuthPromptTextRequest {
+  readonly label: string;
+  readonly secret?: boolean;
+  readonly validate?: (value: string) => string | null;
+}
+
+export interface AideAuthPrompt {
+  readonly text: (
+    request: AideAuthPromptTextRequest
+  ) => Effect.Effect<string, unknown, never>;
+}
+
+export type AideAuthInputValue = string | boolean | undefined;
+
+export interface AideAuthLoginRequest {
+  readonly fromEnv?: boolean;
+  readonly values?: Readonly<Record<string, AideAuthInputValue>>;
+  readonly prompt?: AideAuthPrompt;
+}
+
+export interface AideAuthLoginResult {
+  readonly status: 'stored' | 'external' | 'unchanged';
+  readonly messages?: readonly string[];
+}
+
+export interface AideAuthLogoutResult {
+  readonly status: 'removed' | 'not-found';
+  readonly messages?: readonly string[];
+}
+
+export interface AideAuthProviderOperations {
+  readonly login?: (
+    request: AideAuthLoginRequest
+  ) => Effect.Effect<AideAuthLoginResult, unknown, never>;
+  readonly logout?: () => Effect.Effect<AideAuthLogoutResult, unknown, never>;
+}
+
 export interface AideAuthProviderCapability {
   readonly providerId: string;
   readonly label: string;
@@ -95,6 +132,7 @@ export interface AideAuthProviderCapability {
     unknown,
     never
   >;
+  readonly operations?: AideAuthProviderOperations;
 }
 
 export interface AidePrimeStatusMessages {

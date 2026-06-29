@@ -1483,6 +1483,18 @@ describe('CommandRegistry', () => {
             providerId: 'dynamic-auth',
             label: 'Dynamic Auth',
             status,
+            operations: {
+              login: () =>
+                Effect.succeed({
+                  status: 'stored' as const,
+                  messages: ['logged in'],
+                }),
+              logout: () =>
+                Effect.succeed({
+                  status: 'removed' as const,
+                  messages: ['logged out'],
+                }),
+            },
           },
           primeContribution: {
             status: [
@@ -1528,6 +1540,12 @@ describe('CommandRegistry', () => {
     const providerStatus = await Effect.runPromise(
       authProviders[0]!.capability.status()
     );
+    const loginResult = await Effect.runPromise(
+      authProviders[0]!.capability.operations!.login!({})
+    );
+    const logoutResult = await Effect.runPromise(
+      authProviders[0]!.capability.operations!.logout!()
+    );
     const primeStatus = await Effect.runPromise(
       primeContributions[0]!.capability.status![0]!.status()
     );
@@ -1536,6 +1554,14 @@ describe('CommandRegistry', () => {
     );
 
     expect(providerStatus).toEqual({ state: 'configured', detail: 'ready' });
+    expect(loginResult).toEqual({
+      status: 'stored',
+      messages: ['logged in'],
+    });
+    expect(logoutResult).toEqual({
+      status: 'removed',
+      messages: ['logged out'],
+    });
     expect(primeStatus).toEqual({ state: 'configured', detail: 'ready' });
     expect(sections).toEqual([
       { id: 'dynamic-auth-help', order: 500, body: '## Dynamic Auth' },
@@ -1619,6 +1645,28 @@ describe('CommandRegistry', () => {
       )
     ).toThrow(
       "Plugin 'bad-prime-plugin' prime contribution status must be an array"
+    );
+
+    expect(() =>
+      registry.registerPlugin(
+        defineAidePlugin({
+          id: 'bad-auth-operations-plugin',
+          summary: 'Bad auth operations plugin',
+          commands: [],
+          capabilities: {
+            authProvider: {
+              providerId: 'bad-auth-operations',
+              label: 'Bad Auth Operations',
+              status: () => Effect.succeed({ state: 'configured' }),
+              operations: {
+                login: 'ready',
+              },
+            },
+          },
+        } as unknown as Parameters<typeof defineAidePlugin>[0])
+      )
+    ).toThrow(
+      "Plugin 'bad-auth-operations-plugin' auth provider 'bad-auth-operations' operation 'login' must be a function"
     );
 
     expect(() =>

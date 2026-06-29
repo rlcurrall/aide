@@ -1,13 +1,28 @@
 import { Effect } from 'effect';
+import * as v from 'valibot';
 
 import { jiraCommands } from '@cli/commands/jira/index.js';
 import {
   defineAidePlugin,
+  type AideAuthLoginRequest,
   type AidePluginAuthStatus,
   pluginCommandModule,
 } from '@cli/host/plugin-descriptor.js';
-import { probeJiraConfig, type ConfigStatus } from '@lib/config.js';
-import type { JiraConfig } from '@schemas/config.js';
+import {
+  probeJiraConfig,
+  readJiraEnvForMigration,
+  type ConfigStatus,
+} from '@lib/config.js';
+import { deleteSecret, setSecret } from '@lib/secrets.js';
+import { StoredJiraSchema, type JiraConfig } from '@schemas/config.js';
+import {
+  formatMigrationError,
+  formatUnsetHint,
+  messages,
+  promptAuthString,
+  validateNonEmpty,
+  validateUrl,
+} from '../auth-operation-utils.js';
 
 type ProbeJiraConfig = () => Promise<ConfigStatus<JiraConfig>>;
 
@@ -88,6 +103,79 @@ function mapJiraAuthStatus(
   }
 }
 
+function loginJiraAuth(request: AideAuthLoginRequest) {
+  return Effect.gen(function* () {
+    if (request.fromEnv) {
+      const result = readJiraEnvForMigration();
+      if (result.kind !== 'ok') {
+        return yield* Effect.fail(
+          new Error(formatMigrationError('Jira', result))
+        );
+      }
+
+      yield* Effect.tryPromise({
+        try: () => setSecret('jira', JSON.stringify(result.value)),
+        catch: (error) => error,
+      });
+      return {
+        status: 'stored' as const,
+        messages: messages(
+          'Migrated Jira credentials from env to keyring.',
+          formatUnsetHint(result.varsUsed)
+        ),
+      };
+    }
+
+    const url = yield* promptAuthString(request, 'url', {
+      label: 'Jira URL',
+      validate: validateUrl,
+    });
+    const email = yield* promptAuthString(request, 'email', {
+      label: 'Email',
+      validate: validateNonEmpty,
+    });
+    const token = yield* promptAuthString(request, 'token', {
+      label: 'API token',
+      secret: true,
+    });
+
+    const validated = yield* Effect.try({
+      try: () =>
+        v.parse(StoredJiraSchema, {
+          url,
+          email,
+          apiToken: token,
+        }),
+      catch: (error) => error,
+    });
+    yield* Effect.tryPromise({
+      try: () => setSecret('jira', JSON.stringify(validated)),
+      catch: (error) => error,
+    });
+
+    return {
+      status: 'stored' as const,
+      messages: ['Saved credentials for jira.'],
+    };
+  });
+}
+
+function logoutJiraAuth() {
+  return Effect.tryPromise({
+    try: () => deleteSecret('jira'),
+    catch: (error) => error,
+  }).pipe(
+    Effect.map((removed) => ({
+      status: removed ? ('removed' as const) : ('not-found' as const),
+      messages: [
+        removed
+          ? 'Removed stored credentials for jira.'
+          : 'No stored credentials for jira.',
+      ],
+    }))
+  );
+}
+
 export function createJiraPlugin(opts: JiraPluginOptions = {}) {
   const probeConfig = opts.probeConfig ?? (() => probeJiraConfig());
   const authStatus = () =>
@@ -107,6 +195,10 @@ export function createJiraPlugin(opts: JiraPluginOptions = {}) {
         providerId: 'jira',
         label: 'Jira',
         status: authStatus,
+        operations: {
+          login: loginJiraAuth,
+          logout: logoutJiraAuth,
+        },
       },
       primeContribution: {
         status: [

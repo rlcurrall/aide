@@ -17,6 +17,7 @@ import type {
   AidePullRequestProviderOperations,
   AnyYargsCommandModule,
   AideAuthProviderCapability,
+  AideAuthProviderOperations,
   AidePrimeContributionCapability,
   AidePrimeStatusContribution,
   AidePrimeStatusMessages,
@@ -140,6 +141,45 @@ function snapshotAuthCapability(
   });
 }
 
+function snapshotAuthProviderOperations(
+  pluginId: string,
+  providerId: string,
+  operations: unknown
+): AideAuthProviderOperations | undefined {
+  if (operations === undefined) return undefined;
+  if (!isRecord(operations)) {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' operations must be an object`
+    );
+  }
+
+  const login = operations.login;
+  const logout = operations.logout;
+  if (login !== undefined && typeof login !== 'function') {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' operation 'login' must be a function`
+    );
+  }
+  if (logout !== undefined && typeof logout !== 'function') {
+    throw new Error(
+      `Plugin '${pluginId}' auth provider '${providerId}' operation 'logout' must be a function`
+    );
+  }
+
+  if (login === undefined && logout === undefined) {
+    return Object.freeze({});
+  }
+
+  return Object.freeze({
+    ...(login === undefined
+      ? {}
+      : { login: login as AideAuthProviderOperations['login'] }),
+    ...(logout === undefined
+      ? {}
+      : { logout: logout as AideAuthProviderOperations['logout'] }),
+  });
+}
+
 function snapshotAuthProviderCapability(
   pluginId: string,
   capability: unknown
@@ -173,6 +213,11 @@ function snapshotAuthProviderCapability(
       capability.accounts === undefined
         ? undefined
         : (capability.accounts as AideAuthProviderCapability['accounts']),
+    operations: snapshotAuthProviderOperations(
+      pluginId,
+      capability.providerId,
+      capability.operations
+    ),
   });
 }
 

@@ -10,7 +10,8 @@ small author-facing surface for:
 
 - command descriptors and command results
 - plugin descriptors and descriptor-backed command placement
-- auth capability status contracts
+- auth provider status, account discovery, prompt, login, and logout contracts
+- prime status and help contributions
 - pull request provider refs, matches, features, and operations
 - mediated host services through `AideHostServicesTag`
 - manifest, trust, capability, and conflict policy metadata
@@ -62,8 +63,8 @@ External plugins use an `AidePluginManifest`:
 - `capabilities` must exactly match capabilities provided by the descriptor.
 - `loading.order`, `loading.after`, and `loading.before` are validated metadata
   for future deterministic loading.
-- `conflicts.commands` and `conflicts.pullRequestProviders` currently support
-  only `reject`.
+- `conflicts.commands`, `conflicts.authProviders`, and
+  `conflicts.pullRequestProviders` currently support only `reject`.
 
 The host should reject unsupported API versions before evaluating plugin code.
 
@@ -104,11 +105,41 @@ External pull request providers cannot claim core provider ids:
 Core providers are host-owned. External providers can still represent their own
 repository refs through `kind: "external"` with their own provider id.
 
+## Auth Providers
+
+Auth providers own credentials for a backend or account family. A provider id
+is dynamic and plugin-owned; host commands should not pin a static list of auth
+providers when the registry can supply the registered providers.
+
+An auth provider exposes:
+
+- `providerId` and `label` for discovery and display.
+- `status(request?)` for lightweight availability and configuration checks.
+- optional `accounts()` for scoped account discovery.
+- optional `operations.login(request)` and `operations.logout()` for
+  credential mutation.
+
+`login(request)` receives structured values, an optional `fromEnv` intent, and
+an optional prompt adapter. The prompt adapter is deliberately auth-focused
+instead of yargs-focused: plugins request text or secret input by label and
+validation function, while the host decides how that prompt is presented. The
+operation returns a typed result and messages; it should not print directly.
+The host invocation layer verifies that operations return Effects, validates
+result status/messages, and snapshots results before command code uses them.
+
+The current legacy `aide login` and `aide logout` commands still preserve their
+existing yargs shape, but their credential mutation now delegates to provider
+operations. A future slice should replace their static service subcommands with
+provider-driven discovery once the public argument metadata DSL exists.
+
 ## Host Services
 
 Plugins that need host-mediated operations should use `AideHostServicesTag`.
-The current mediated services are pull request provider resolution and pull
-request operations:
+The current mediated services are:
+
+- auth provider discovery
+- prime contribution discovery
+- pull request provider discovery and resolution
 
 - resolve provider for a git remote
 - resolve provider for a pull request URL

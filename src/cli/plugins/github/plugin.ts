@@ -1,7 +1,9 @@
 import { Effect } from 'effect';
+import * as v from 'valibot';
 
 import {
   defineAidePlugin,
+  type AideAuthLoginRequest,
   type AidePullRequestBranchLookupRequest,
   type AidePullRequestBranchLookupResult,
   type AidePullRequestListRequest,
@@ -13,9 +15,11 @@ import {
 } from '@cli/host/plugin-descriptor.js';
 import {
   probeGithubConfig,
+  readGithubEnvForMigration,
   type ConfigStatus,
   type GithubConfigValue,
 } from '@lib/config.js';
+import { isGhCliAvailable } from '@lib/gh-utils.js';
 import { GitHubClient } from '@lib/github-client.js';
 import type {
   GitHubListPROptions,
@@ -27,6 +31,14 @@ import {
   parseGitHubPRUrl,
   parseGitHubRemote,
 } from '@lib/github-utils.js';
+import { deleteSecret, setSecret } from '@lib/secrets.js';
+import { StoredGithubSchema } from '@schemas/config.js';
+import {
+  formatMigrationError,
+  formatUnsetHint,
+  messages,
+  promptAuthString,
+} from '../auth-operation-utils.js';
 
 type ProbeGithubConfig = () => Promise<ConfigStatus<GithubConfigValue>>;
 type GitHubPullRequestClient = Pick<
@@ -75,12 +87,82 @@ function mapGithubAuthStatus(
   }
 }
 
+function loginGitHubAuth(
+  request: AideAuthLoginRequest,
+  ghAvailable: () => boolean
+) {
+  return Effect.gen(function* () {
+    if (request.fromEnv) {
+      const result = readGithubEnvForMigration();
+      if (result.kind !== 'ok') {
+        return yield* Effect.fail(
+          new Error(formatMigrationError('GitHub', result))
+        );
+      }
+
+      yield* Effect.tryPromise({
+        try: () => setSecret('github', JSON.stringify(result.value)),
+        catch: (error) => error,
+      });
+      return {
+        status: 'stored' as const,
+        messages: messages(
+          'Migrated GitHub credentials from env to keyring.',
+          formatUnsetHint(result.varsUsed)
+        ),
+      };
+    }
+
+    if (ghAvailable()) {
+      return {
+        status: 'external' as const,
+        messages: ['Using gh CLI auth. Nothing to do.'],
+      };
+    }
+
+    const token = yield* promptAuthString(request, 'token', {
+      label: 'GitHub token',
+      secret: true,
+    });
+    const validated = yield* Effect.try({
+      try: () => v.parse(StoredGithubSchema, { token }),
+      catch: (error) => error,
+    });
+    yield* Effect.tryPromise({
+      try: () => setSecret('github', JSON.stringify(validated)),
+      catch: (error) => error,
+    });
+
+    return {
+      status: 'stored' as const,
+      messages: ['Saved credentials for github.'],
+    };
+  });
+}
+
+function logoutGitHubAuth() {
+  return Effect.tryPromise({
+    try: () => deleteSecret('github'),
+    catch: (error) => error,
+  }).pipe(
+    Effect.map((removed) => ({
+      status: removed ? ('removed' as const) : ('not-found' as const),
+      messages: [
+        removed
+          ? 'Removed stored credentials for github.'
+          : 'No stored credentials for github.',
+      ],
+    }))
+  );
+}
+
 export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
   const probeConfig =
     opts.probeConfig ??
     (() => probeGithubConfig({ ghAvailable: opts.ghAvailable }));
   const createClient =
     opts.createClient ?? ((options) => GitHubClient.create(options));
+  const ghAvailable = opts.ghAvailable ?? isGhCliAvailable;
   const authStatus = () =>
     Effect.tryPromise({
       try: () => probeConfig(),
@@ -217,6 +299,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         providerId: 'github',
         label: 'GitHub',
         status: authStatus,
+        operations: {
+          login: (request) => loginGitHubAuth(request, ghAvailable),
+          logout: logoutGitHubAuth,
+        },
       },
       primeContribution: {
         status: [

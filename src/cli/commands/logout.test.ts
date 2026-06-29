@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { logout } from './logout.js';
+import { AuthProviderOperationError } from '@cli/host/auth-provider-operations.js';
 import { installMockSecrets, type Store } from '@lib/test-helpers.js';
 
 describe('logout', () => {
@@ -26,11 +27,13 @@ describe('logout', () => {
     expect(result).toBe('not-found');
   });
 
-  test('logout propagates KeyringUnavailableError when deleteSecret fails', async () => {
+  test('logout wraps KeyringUnavailableError when deleteSecret fails', async () => {
     restore();
     const localRestore = installMockSecrets(store, 'delete');
     try {
-      await expect(logout('jira')).rejects.toMatchObject({
+      const error = await logout('jira').catch((error) => error);
+      expect(error).toBeInstanceOf(AuthProviderOperationError);
+      expect((error as AuthProviderOperationError).cause).toMatchObject({
         name: 'KeyringUnavailableError',
       });
     } finally {

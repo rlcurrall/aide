@@ -9,23 +9,27 @@
  */
 
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import * as v from 'valibot';
+import { Effect } from 'effect';
 
-import { text, password, type Prompter } from '@lib/prompts.js';
-import { setSecret } from '@lib/secrets.js';
+import { loginWithAuthProvider } from '@cli/host/auth-provider-operations.js';
+import type {
+  AideAuthLoginRequest,
+  AideAuthLoginResult,
+  AideAuthPrompt,
+  AideDiscoveredCapability,
+  AideAuthProviderCapability,
+} from '@cli/host/plugin-descriptor.js';
+import { createAzureDevOpsPlugin } from '@cli/plugins/azure-devops/plugin.js';
+import { createGitHubPlugin } from '@cli/plugins/github/plugin.js';
+import { createJiraPlugin } from '@cli/plugins/jira/plugin.js';
 import {
-  StoredJiraSchema,
-  StoredAdoSchema,
-  StoredGithubSchema,
-  type AuthMethod,
-} from '@schemas/config.js';
-import { isGhCliAvailable } from '@lib/gh-utils.js';
-import {
-  readJiraEnvForMigration,
-  readAdoEnvForMigration,
-  readGithubEnvForMigration,
-  type MigrationError,
-} from '@lib/config.js';
+  TerminalPrompter,
+  text,
+  password,
+  type Prompter,
+} from '@lib/prompts.js';
+import type { AuthMethod } from '@schemas/config.js';
+import { runLegacyCommandEffect } from './effect-bridge.js';
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -39,34 +43,72 @@ async function readStdin(): Promise<string> {
   return buf.replace(/\r?\n$/, '');
 }
 
-function validateUrl(s: string): string | null {
-  try {
-    new URL(s);
-    return null;
-  } catch {
-    return 'must be a valid URL';
+function authProvider(plugin: {
+  readonly id: string;
+  readonly capabilities?: {
+    readonly authProvider?: AideAuthProviderCapability;
+  };
+}): AideDiscoveredCapability<AideAuthProviderCapability> {
+  const provider = plugin.capabilities?.authProvider;
+  if (provider === undefined) throw new Error('Plugin has no auth provider');
+  return Object.freeze({ pluginId: plugin.id, capability: provider });
+}
+
+async function secretText(
+  request: Parameters<AideAuthPrompt['text']>[0],
+  prompter: Prompter | undefined
+): Promise<string> {
+  if (request.validate === undefined) {
+    return await password({ label: request.label, prompter });
+  }
+
+  const activePrompter = prompter ?? new TerminalPrompter();
+  const label = `${request.label}: `;
+
+  for (;;) {
+    const value = await activePrompter.readLine({ label, masked: true });
+    if (value.length === 0) {
+      activePrompter.writeLine('  value required');
+      continue;
+    }
+
+    const error = request.validate(value);
+    if (error) {
+      activePrompter.writeLine(`  ${error}`);
+      continue;
+    }
+    return value;
   }
 }
 
-function validateNonEmpty(s: string): string | null {
-  return s.length === 0 ? 'required' : null;
+function authPrompt(prompter: Prompter | undefined): AideAuthPrompt {
+  return {
+    text: (request) =>
+      Effect.tryPromise({
+        try: () =>
+          request.secret
+            ? secretText(request, prompter)
+            : text({
+                label: request.label,
+                validate: request.validate,
+                prompter,
+              }),
+        catch: (error) => error,
+      }),
+  };
 }
 
-function formatMigrationError(service: string, err: MigrationError): string {
-  if (err.kind === 'missing') {
-    return `Cannot migrate ${service} from env: missing ${err.missingVars.join(', ')}.`;
+async function runProviderLogin(
+  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  request: AideAuthLoginRequest
+): Promise<AideAuthLoginResult> {
+  const result = await runLegacyCommandEffect(
+    loginWithAuthProvider(provider, request)
+  );
+  for (const message of result.messages ?? []) {
+    console.log(message);
   }
-  return `Cannot migrate ${service} from env: ${err.reason}.`;
-}
-
-function formatUnsetHint(varsUsed: string[]): string {
-  if (varsUsed.length === 0) return '';
-  if (varsUsed.length === 1) {
-    return `Note: ${varsUsed[0]} is still set and takes precedence over the keyring. Unset it to use the keyring.`;
-  }
-  const list =
-    varsUsed.slice(0, -1).join(', ') + ', and ' + varsUsed[varsUsed.length - 1];
-  return `Note: ${list} are still set and take precedence over the keyring. Unset them to use the keyring.`;
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,49 +126,25 @@ export async function loginJira(
   flags: JiraLoginFlags,
   opts: { prompter?: Prompter } = {}
 ): Promise<void> {
-  if (flags.fromEnv) {
-    const result = readJiraEnvForMigration();
-    if (result.kind !== 'ok')
-      throw new Error(formatMigrationError('Jira', result));
-    await setSecret('jira', JSON.stringify(result.value));
-    console.log('Migrated Jira credentials from env to keyring.');
-    console.log(formatUnsetHint(result.varsUsed));
-    return;
-  }
-
   let pipedToken: string | null = null;
-  if (!flags.token && !opts.prompter && !process.stdin.isTTY) {
+  if (
+    !flags.fromEnv &&
+    !flags.token &&
+    !opts.prompter &&
+    !process.stdin.isTTY
+  ) {
     pipedToken = (await readStdin()).trim();
   }
 
-  const url =
-    flags.url ??
-    (await text({
-      label: 'Jira URL',
-      validate: validateUrl,
-      prompter: opts.prompter,
-    }));
-
-  const email =
-    flags.email ??
-    (await text({
-      label: 'Email',
-      validate: validateNonEmpty,
-      prompter: opts.prompter,
-    }));
-
-  const token =
-    flags.token ??
-    pipedToken ??
-    (await password({ label: 'API token', prompter: opts.prompter }));
-
-  const validated = v.parse(StoredJiraSchema, {
-    url,
-    email,
-    apiToken: token,
+  await runProviderLogin(authProvider(createJiraPlugin()), {
+    fromEnv: flags.fromEnv,
+    values: {
+      url: flags.url,
+      email: flags.email,
+      token: flags.token ?? pipedToken ?? undefined,
+    },
+    prompt: authPrompt(opts.prompter),
   });
-  await setSecret('jira', JSON.stringify(validated));
-  console.log('Saved credentials for jira.');
 }
 
 // ---------------------------------------------------------------------------
@@ -144,43 +162,20 @@ export async function loginAdo(
   flags: AdoLoginFlags,
   opts: { prompter?: Prompter } = {}
 ): Promise<void> {
-  if (flags.fromEnv) {
-    const result = readAdoEnvForMigration();
-    if (result.kind !== 'ok')
-      throw new Error(formatMigrationError('Azure DevOps', result));
-    await setSecret('ado', JSON.stringify(result.value));
-    console.log('Migrated Azure DevOps credentials from env to keyring.');
-    console.log(formatUnsetHint(result.varsUsed));
-    return;
-  }
-
   let pipedToken: string | null = null;
-  if (!flags.pat && !opts.prompter && !process.stdin.isTTY) {
+  if (!flags.fromEnv && !flags.pat && !opts.prompter && !process.stdin.isTTY) {
     pipedToken = (await readStdin()).trim();
   }
 
-  const orgUrl =
-    flags.orgUrl ??
-    (await text({
-      label: 'Azure DevOps org URL',
-      validate: validateUrl,
-      prompter: opts.prompter,
-    }));
-
-  const pat =
-    flags.pat ??
-    pipedToken ??
-    (await password({ label: 'PAT', prompter: opts.prompter }));
-
-  const authMethod: AuthMethod = flags.authMethod ?? 'pat';
-
-  const validated = v.parse(StoredAdoSchema, {
-    orgUrl,
-    pat,
-    authMethod,
+  await runProviderLogin(authProvider(createAzureDevOpsPlugin()), {
+    fromEnv: flags.fromEnv,
+    values: {
+      orgUrl: flags.orgUrl,
+      pat: flags.pat ?? pipedToken ?? undefined,
+      authMethod: flags.authMethod,
+    },
+    prompt: authPrompt(opts.prompter),
   });
-  await setSecret('ado', JSON.stringify(validated));
-  console.log('Saved credentials for ado.');
 }
 
 // ---------------------------------------------------------------------------
@@ -201,36 +196,27 @@ export async function loginGithub(
 ): Promise<'gh-cli' | 'stored'> {
   // --from-env migrates an explicit token from env regardless of gh-cli state,
   // since the user's intent is to promote that token into the keyring.
-  if (flags.fromEnv) {
-    const result = readGithubEnvForMigration();
-    if (result.kind !== 'ok')
-      throw new Error(formatMigrationError('GitHub', result));
-    await setSecret('github', JSON.stringify(result.value));
-    console.log('Migrated GitHub credentials from env to keyring.');
-    console.log(formatUnsetHint(result.varsUsed));
-    return 'stored';
-  }
-
-  const ghCheck = opts.ghAvailable ?? isGhCliAvailable;
-  if (ghCheck()) {
-    console.log('Using gh CLI auth. Nothing to do.');
-    return 'gh-cli';
-  }
-
   let pipedToken: string | null = null;
-  if (!flags.token && !opts.prompter && !process.stdin.isTTY) {
+  if (
+    !flags.fromEnv &&
+    !flags.token &&
+    !opts.prompter &&
+    !process.stdin.isTTY
+  ) {
     pipedToken = (await readStdin()).trim();
   }
 
-  const token =
-    flags.token ??
-    pipedToken ??
-    (await password({ label: 'GitHub token', prompter: opts.prompter }));
-
-  const validated = v.parse(StoredGithubSchema, { token });
-  await setSecret('github', JSON.stringify(validated));
-  console.log('Saved credentials for github.');
-  return 'stored';
+  const result = await runProviderLogin(
+    authProvider(createGitHubPlugin({ ghAvailable: opts.ghAvailable })),
+    {
+      fromEnv: flags.fromEnv,
+      values: {
+        token: flags.token ?? pipedToken ?? undefined,
+      },
+      prompt: authPrompt(opts.prompter),
+    }
+  );
+  return result.status === 'external' ? 'gh-cli' : 'stored';
 }
 
 // ---------------------------------------------------------------------------
