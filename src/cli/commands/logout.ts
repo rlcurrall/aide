@@ -1,42 +1,82 @@
 /**
- * `aide logout <service>` - remove stored credentials for a service.
+ * `aide logout <service>` - remove stored credentials for a provider.
  *
- * Env vars are never touched; this operation only affects the OS keyring.
+ * Env vars are never touched; this operation only affects the provider-owned
+ * credential store.
  */
 
-import type { ArgumentsCamelCase, CommandModule } from 'yargs';
+import type { ArgumentsCamelCase } from 'yargs';
 
-import { deleteSecret, type SecretName } from '@lib/secrets.js';
+import type { AideHostServices } from '@cli/host/runtime-context.js';
+import { getAideHostContext } from '@cli/host/runtime-context.js';
+import type { AideHostAwareCommandModule } from '@cli/host/yargs-adapter.js';
+import {
+  authProviderCommandRoutes,
+  findAuthProviderByCommandName,
+  providerHasAuthOperation,
+  runAuthProviderLogout,
+  type DiscoveredAuthProvider,
+} from './auth-provider-command-utils.js';
 
 export type LogoutResult = 'removed' | 'not-found';
 
-export async function logout(service: SecretName): Promise<LogoutResult> {
-  const existed = await deleteSecret(service);
-  return existed ? 'removed' : 'not-found';
-}
-
 interface Args {
-  service: SecretName;
+  service: string;
 }
 
-const command: CommandModule<object, Args> = {
+function logoutProviders(
+  services: AideHostServices
+): readonly DiscoveredAuthProvider[] {
+  return services
+    .authProviders()
+    .filter((provider) => providerHasAuthOperation(provider, 'logout'));
+}
+
+function logoutProviderCommandNames(
+  provider: DiscoveredAuthProvider
+): readonly string[] {
+  const route = authProviderCommandRoutes(provider, 'logout');
+  return typeof route === 'string' ? [route] : route;
+}
+
+function allLogoutProviderCommandNames(
+  providers: readonly DiscoveredAuthProvider[]
+): readonly string[] {
+  return Array.from(new Set(providers.flatMap(logoutProviderCommandNames)));
+}
+
+async function logoutProvider(
+  providers: readonly DiscoveredAuthProvider[],
+  service: string
+): Promise<LogoutResult> {
+  const provider = findAuthProviderByCommandName(providers, service, 'logout');
+  if (provider === null) {
+    throw new Error(`Unknown auth provider '${service}'`);
+  }
+
+  const result = await runAuthProviderLogout(provider);
+  return result.status;
+}
+
+const command: AideHostAwareCommandModule<object, Args> = {
   command: 'logout <service>',
   describe: 'Remove stored credentials from the OS keyring',
-  builder: {
-    service: {
+  aideBuilder: (yargs, services) => {
+    const providers = logoutProviders(services);
+    return yargs.positional('service', {
       type: 'string',
-      choices: ['jira', 'ado', 'github'] as const,
+      choices: allLogoutProviderCommandNames(providers),
       demandOption: true,
       describe: 'Service to log out of',
-    },
+    });
   },
   handler: async (argv: ArgumentsCamelCase<Args>) => {
-    const result = await logout(argv.service);
-    if (result === 'removed') {
-      console.log(`Removed stored credentials for ${argv.service}.`);
-    } else {
-      console.log(`No stored credentials for ${argv.service}.`);
+    const services = getAideHostContext(argv)?.services;
+    if (services === undefined) {
+      throw new Error('Host services are unavailable for logout');
     }
+    const contextProviders = logoutProviders(services);
+    await logoutProvider(contextProviders, argv.service);
   },
 };
 

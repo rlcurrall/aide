@@ -5,6 +5,10 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "exports": {
+    ".": "./src/cli/index.ts",
+    "./plugin-api": "./src/cli/plugin-api.ts"
+  },
   "bin": {
     "aide": "./src/cli/index.ts"
   },
@@ -16,7 +20,10 @@
     "build:mac": "bun build --compile --target=bun-darwin-arm64 src/cli/index.ts --outfile dist/aide-mac",
     "build:all": "bun run build:win && bun run build:linux && bun run build:mac",
     "release": "bun run src/scripts/release.ts",
-    "test": "bun test",
+    "test": "bun test && bun run test:effect",
+    "test:bun": "bun test",
+    "test:effect": "bunx --bun vitest run",
+    "test:all": "bun run test",
     "lint": "oxlint .",
     "lint:fix": "oxlint . --fix",
     "format": "oxfmt . --write",
@@ -26,13 +33,15 @@
     "@types/bun": "latest",
     "@types/yargs": "^17.0.35",
     "oxfmt": "^0.56.0",
-    "oxlint": "^1.71.0"
+    "oxlint": "^1.71.0",
+    "vitest": "^4.1.9"
   },
   "peerDependencies": {
     "typescript": "^5"
   },
   "dependencies": {
     "arkregex": "^0.0.5",
+    "effect": "^3.21.4",
     "marked": "^16.3.0",
     "valibot": "^1.2.0",
     "yargs": "^18.0.0"

@@ -17,7 +17,12 @@ export const PrUpdateArgsSchema = v.object({
   repo: v.optional(v.string()),
   format: v.optional(OutputFormatSchema, 'text'),
   title: v.optional(v.string()),
+  body: v.optional(v.string()), // Alias for description
   description: v.optional(v.string()),
+  bodyFile: v.optional(v.string()), // Alias for descriptionFile
+  descriptionFile: v.optional(v.string()),
+  'body-file': v.optional(v.string()), // Alias for descriptionFile
+  'description-file': v.optional(v.string()),
   target: v.optional(v.string()),
   draft: v.optional(v.boolean()),
   publish: v.optional(v.boolean()),

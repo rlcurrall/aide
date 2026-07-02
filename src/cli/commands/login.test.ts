@@ -1,21 +1,21 @@
-/**
- * Tests for the login command.
- *
- * These exercise the per-service handlers directly (not the yargs wiring),
- * injecting a ScriptedPrompter and mocking Bun.secrets. The yargs wiring is
- * smoke-tested manually before release.
- */
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-
-import { loginJira, loginAdo, loginGithub } from './login.js';
+import type {
+  AideAuthProviderCapability,
+  AideDiscoveredCapability,
+} from '@cli/host/plugin-descriptor.js';
+import { AuthProviderOperationError } from '@cli/host/auth-provider-operations.js';
+import { createAzureDevOpsPlugin } from '@cli/plugins/azure-devops/plugin.js';
+import { createGitHubPlugin } from '@cli/plugins/github/plugin.js';
+import { createJiraPlugin } from '@cli/plugins/jira/plugin.js';
 import type { Prompter, ReadLineOptions } from '@lib/prompts.js';
 import {
   installMockSecrets,
-  saveEnv,
   restoreEnv,
+  saveEnv,
   type Store,
 } from '@lib/test-helpers.js';
+import { runAuthProviderLogin } from './auth-provider-command-utils.js';
 
 const JIRA_VARS = [
   'JIRA_URL',
@@ -34,20 +34,34 @@ const GITHUB_VARS = ['GITHUB_TOKEN', 'GH_TOKEN'];
 class ScriptedPrompter implements Prompter {
   private inputs: string[];
   readonly writes: string[] = [];
+
   constructor(inputs: string[]) {
     this.inputs = [...inputs];
   }
+
   async readLine(_opts: ReadLineOptions): Promise<string> {
     const next = this.inputs.shift();
     if (next === undefined) throw new Error('ScriptedPrompter exhausted');
     return next;
   }
+
   writeLine(s: string): void {
     this.writes.push(s);
   }
 }
 
-describe('loginJira', () => {
+function authProvider(plugin: {
+  readonly id: string;
+  readonly capabilities?: {
+    readonly authProvider?: AideAuthProviderCapability;
+  };
+}): AideDiscoveredCapability<AideAuthProviderCapability> {
+  const provider = plugin.capabilities?.authProvider;
+  if (provider === undefined) throw new Error('Plugin has no auth provider');
+  return Object.freeze({ pluginId: plugin.id, capability: provider });
+}
+
+describe('provider-backed login', () => {
   let store: Store;
   let restore: () => void;
 
@@ -59,125 +73,135 @@ describe('loginJira', () => {
 
   afterEach(() => restore());
 
-  test('uses supplied flags without prompting', async () => {
+  test('uses supplied Jira values without prompting', async () => {
     const p = new ScriptedPrompter([]);
-    await loginJira(
+    await runAuthProviderLogin(
+      authProvider(createJiraPlugin()),
       {
-        url: 'https://x.atlassian.net',
-        email: 'a@b.c',
-        token: 'tkn',
+        values: {
+          url: 'https://x.atlassian.net',
+          email: 'a@b.c',
+          token: 'tkn',
+        },
       },
       { prompter: p }
     );
+
     const stored = JSON.parse(store.get('aide:jira') ?? '{}');
     expect(stored.url).toBe('https://x.atlassian.net');
     expect(stored.email).toBe('a@b.c');
     expect(stored.apiToken).toBe('tkn');
   });
 
-  test('prompts for missing fields only', async () => {
+  test('prompts for missing Jira fields only', async () => {
     const p = new ScriptedPrompter(['a@b.c', 'tkn']);
-    await loginJira({ url: 'https://x.atlassian.net' }, { prompter: p });
+    await runAuthProviderLogin(
+      authProvider(createJiraPlugin()),
+      { values: { url: 'https://x.atlassian.net' } },
+      { prompter: p }
+    );
+
     const stored = JSON.parse(store.get('aide:jira') ?? '{}');
     expect(stored.email).toBe('a@b.c');
     expect(stored.apiToken).toBe('tkn');
   });
 
-  test('prompts for all fields when no flags supplied', async () => {
+  test('prompts for all Jira fields when no values are supplied', async () => {
     const p = new ScriptedPrompter(['https://x.atlassian.net', 'a@b.c', 'tkn']);
-    await loginJira({}, { prompter: p });
+    await runAuthProviderLogin(
+      authProvider(createJiraPlugin()),
+      {},
+      {
+        prompter: p,
+      }
+    );
+
     expect(store.has('aide:jira')).toBe(true);
   });
 
-  test('loginJira propagates KeyringUnavailableError when setSecret fails', async () => {
-    restore(); // tear down the default mock
+  test('wraps KeyringUnavailableError when setSecret fails', async () => {
+    restore();
     const localRestore = installMockSecrets(store, 'set');
     try {
       const p = new ScriptedPrompter([]);
-      await expect(
-        loginJira(
-          { url: 'https://x.atlassian.net', email: 'a@b.c', token: 't' },
-          { prompter: p }
-        )
-      ).rejects.toMatchObject({ name: 'KeyringUnavailableError' });
+      const error = await runAuthProviderLogin(
+        authProvider(createJiraPlugin()),
+        {
+          values: {
+            url: 'https://x.atlassian.net',
+            email: 'a@b.c',
+            token: 't',
+          },
+        },
+        { prompter: p }
+      ).catch((error) => error);
+
+      expect(error).toBeInstanceOf(AuthProviderOperationError);
+      expect((error as AuthProviderOperationError).cause).toMatchObject({
+        name: 'KeyringUnavailableError',
+      });
     } finally {
       localRestore();
     }
   });
-});
 
-describe('loginAdo', () => {
-  let store: Store;
-  let restore: () => void;
-
-  beforeEach(() => {
-    store = new Map();
-    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
-    restore = installMockSecrets(store);
-  });
-
-  afterEach(() => restore());
-
-  test('stores with default authMethod of pat when not supplied', async () => {
+  test('stores Azure DevOps with default authMethod of pat when not supplied', async () => {
     const p = new ScriptedPrompter([]);
-    await loginAdo(
-      { orgUrl: 'https://dev.azure.com/x', pat: 't' },
+    await runAuthProviderLogin(
+      authProvider(createAzureDevOpsPlugin()),
+      { values: { orgUrl: 'https://dev.azure.com/x', pat: 't' } },
       { prompter: p }
     );
+
     const stored = JSON.parse(store.get('aide:ado') ?? '{}');
     expect(stored.authMethod).toBe('pat');
   });
 
-  test('stores bearer authMethod when supplied', async () => {
+  test('stores Azure DevOps bearer authMethod when supplied', async () => {
     const p = new ScriptedPrompter([]);
-    await loginAdo(
+    await runAuthProviderLogin(
+      authProvider(createAzureDevOpsPlugin()),
       {
-        orgUrl: 'https://dev.azure.com/x',
-        pat: 't',
-        authMethod: 'bearer',
+        values: {
+          orgUrl: 'https://dev.azure.com/x',
+          pat: 't',
+          authMethod: 'bearer',
+        },
       },
       { prompter: p }
     );
+
     const stored = JSON.parse(store.get('aide:ado') ?? '{}');
     expect(stored.authMethod).toBe('bearer');
   });
-});
 
-describe('loginGithub', () => {
-  let store: Store;
-  let restore: () => void;
-
-  beforeEach(() => {
-    store = new Map();
-    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
-    restore = installMockSecrets(store);
-  });
-
-  afterEach(() => restore());
-
-  test('no-op when gh CLI is available', async () => {
+  test('reports external GitHub auth when gh CLI is available', async () => {
     const p = new ScriptedPrompter([]);
-    const result = await loginGithub(
-      { token: 'should-be-ignored' },
-      { prompter: p, ghAvailable: () => true }
+    const result = await runAuthProviderLogin(
+      authProvider(createGitHubPlugin({ ghAvailable: () => true })),
+      { values: { token: 'should-be-ignored' } },
+      { prompter: p }
     );
-    expect(result).toBe('gh-cli');
+
+    expect(result.status).toBe('external');
     expect(store.has('aide:github')).toBe(false);
   });
 
-  test('stores token when gh CLI is missing', async () => {
+  test('stores GitHub token when gh CLI is missing', async () => {
     const p = new ScriptedPrompter(['ghp_xxx']);
-    const result = await loginGithub(
+    const result = await runAuthProviderLogin(
+      authProvider(createGitHubPlugin({ ghAvailable: () => false })),
       {},
-      { prompter: p, ghAvailable: () => false }
+      { prompter: p }
     );
-    expect(result).toBe('stored');
+
+    expect(result.status).toBe('stored');
     const stored = JSON.parse(store.get('aide:github') ?? '{}');
     expect(stored.token).toBe('ghp_xxx');
   });
 });
 
-describe('login --from-env', () => {
+describe('provider-backed login --from-env', () => {
   let envSnap: Map<string, string | undefined>;
   let store: Store;
   let restore: () => void;
@@ -211,32 +235,41 @@ describe('login --from-env', () => {
     restore();
   });
 
-  test('loginJira --from-env writes env vars to keyring', async () => {
+  test('Jira --from-env writes env vars to keyring', async () => {
     Bun.env.JIRA_URL = 'https://x.atlassian.net';
     Bun.env.JIRA_EMAIL = 'a@b.c';
     Bun.env.JIRA_API_TOKEN = 'tkn';
-    await loginJira({ fromEnv: true });
+    await runAuthProviderLogin(authProvider(createJiraPlugin()), {
+      fromEnv: true,
+    });
+
     const stored = JSON.parse(store.get('aide:jira') ?? '{}');
     expect(stored.url).toBe('https://x.atlassian.net');
     expect(stored.email).toBe('a@b.c');
     expect(stored.apiToken).toBe('tkn');
   });
 
-  test('loginJira --from-env success message lists env vars to unset', async () => {
+  test('Jira --from-env success message lists env vars to unset', async () => {
     Bun.env.JIRA_URL = 'https://x.atlassian.net';
     Bun.env.JIRA_EMAIL = 'a@b.c';
     Bun.env.JIRA_API_TOKEN = 'tkn';
-    await loginJira({ fromEnv: true });
+    await runAuthProviderLogin(authProvider(createJiraPlugin()), {
+      fromEnv: true,
+    });
+
     const output = logSpy.messages.join('\n');
     expect(output).toMatch(/JIRA_URL.*JIRA_EMAIL.*JIRA_API_TOKEN/);
     expect(output).toMatch(/Unset them/i);
   });
 
-  test('loginJira --from-env hint uses whichever alias is set', async () => {
+  test('Jira --from-env hint uses whichever alias is set', async () => {
     Bun.env.JIRA_URL = 'https://x.atlassian.net';
     Bun.env.JIRA_USERNAME = 'user@b.c';
     Bun.env.JIRA_TOKEN = 'tkn';
-    await loginJira({ fromEnv: true });
+    await runAuthProviderLogin(authProvider(createJiraPlugin()), {
+      fromEnv: true,
+    });
+
     const output = logSpy.messages.join('\n');
     expect(output).toContain('JIRA_USERNAME');
     expect(output).toContain('JIRA_TOKEN');
@@ -244,93 +277,126 @@ describe('login --from-env', () => {
     expect(output).not.toContain('JIRA_API_TOKEN,');
   });
 
-  test('loginGithub --from-env hint names GITHUB_TOKEN when that alias is set', async () => {
+  test('GitHub --from-env hint names GITHUB_TOKEN when that alias is set', async () => {
     Bun.env.GITHUB_TOKEN = 'ghp_xxx';
-    await loginGithub({ fromEnv: true }, { ghAvailable: () => false });
+    await runAuthProviderLogin(
+      authProvider(createGitHubPlugin({ ghAvailable: () => false })),
+      { fromEnv: true }
+    );
+
     const output = logSpy.messages.join('\n');
     expect(output).toContain('GITHUB_TOKEN');
     expect(output).toMatch(/Unset it/i);
   });
 
-  test('loginGithub --from-env hint names GH_TOKEN when that alias is set', async () => {
+  test('GitHub --from-env hint names GH_TOKEN when that alias is set', async () => {
     Bun.env.GH_TOKEN = 'ghp_yyy';
-    await loginGithub({ fromEnv: true }, { ghAvailable: () => false });
+    await runAuthProviderLogin(
+      authProvider(createGitHubPlugin({ ghAvailable: () => false })),
+      { fromEnv: true }
+    );
+
     const output = logSpy.messages.join('\n');
     expect(output).toContain('GH_TOKEN');
     expect(output).not.toContain('GITHUB_TOKEN');
   });
 
-  test('loginJira --from-env accepts JIRA_USERNAME / JIRA_TOKEN aliases', async () => {
+  test('Jira --from-env accepts JIRA_USERNAME / JIRA_TOKEN aliases', async () => {
     Bun.env.JIRA_URL = 'https://x.atlassian.net';
     Bun.env.JIRA_USERNAME = 'user@b.c';
     Bun.env.JIRA_TOKEN = 'tkn';
-    await loginJira({ fromEnv: true });
+    await runAuthProviderLogin(authProvider(createJiraPlugin()), {
+      fromEnv: true,
+    });
+
     const stored = JSON.parse(store.get('aide:jira') ?? '{}');
     expect(stored.email).toBe('user@b.c');
     expect(stored.apiToken).toBe('tkn');
   });
 
-  test('loginJira --from-env lists missing vars when env is incomplete', async () => {
+  test('Jira --from-env lists missing vars when env is incomplete', async () => {
     Bun.env.JIRA_URL = 'https://x.atlassian.net';
-    await expect(loginJira({ fromEnv: true })).rejects.toThrow(
-      /JIRA_EMAIL.*JIRA_API_TOKEN/
-    );
+    await expect(
+      runAuthProviderLogin(authProvider(createJiraPlugin()), {
+        fromEnv: true,
+      })
+    ).rejects.toThrow(/JIRA_EMAIL.*JIRA_API_TOKEN/);
     expect(store.has('aide:jira')).toBe(false);
   });
 
-  test('loginJira --from-env reports invalid env values', async () => {
+  test('Jira --from-env reports invalid env values', async () => {
     Bun.env.JIRA_URL = 'not-a-url';
     Bun.env.JIRA_EMAIL = 'a@b.c';
     Bun.env.JIRA_API_TOKEN = 'tkn';
-    await expect(loginJira({ fromEnv: true })).rejects.toThrow(/URL/);
+    await expect(
+      runAuthProviderLogin(authProvider(createJiraPlugin()), {
+        fromEnv: true,
+      })
+    ).rejects.toThrow(/URL/);
   });
 
-  test('loginAdo --from-env writes env vars to keyring', async () => {
+  test('Azure DevOps --from-env writes env vars to keyring', async () => {
     Bun.env.AZURE_DEVOPS_ORG_URL = 'https://dev.azure.com/org';
     Bun.env.AZURE_DEVOPS_PAT = 'pat';
-    await loginAdo({ fromEnv: true });
+    await runAuthProviderLogin(authProvider(createAzureDevOpsPlugin()), {
+      fromEnv: true,
+    });
+
     const stored = JSON.parse(store.get('aide:ado') ?? '{}');
     expect(stored.orgUrl).toBe('https://dev.azure.com/org');
     expect(stored.pat).toBe('pat');
     expect(stored.authMethod).toBe('pat');
   });
 
-  test('loginAdo --from-env respects AZURE_DEVOPS_AUTH_METHOD', async () => {
+  test('Azure DevOps --from-env respects AZURE_DEVOPS_AUTH_METHOD', async () => {
     Bun.env.AZURE_DEVOPS_ORG_URL = 'https://dev.azure.com/org';
     Bun.env.AZURE_DEVOPS_PAT = 'pat';
     Bun.env.AZURE_DEVOPS_AUTH_METHOD = 'bearer';
-    await loginAdo({ fromEnv: true });
+    await runAuthProviderLogin(authProvider(createAzureDevOpsPlugin()), {
+      fromEnv: true,
+    });
+
     const stored = JSON.parse(store.get('aide:ado') ?? '{}');
     expect(stored.authMethod).toBe('bearer');
   });
 
-  test('loginAdo --from-env lists missing vars', async () => {
-    await expect(loginAdo({ fromEnv: true })).rejects.toThrow(
-      /AZURE_DEVOPS_ORG_URL.*AZURE_DEVOPS_PAT/
-    );
+  test('Azure DevOps --from-env lists missing vars', async () => {
+    await expect(
+      runAuthProviderLogin(authProvider(createAzureDevOpsPlugin()), {
+        fromEnv: true,
+      })
+    ).rejects.toThrow(/AZURE_DEVOPS_ORG_URL.*AZURE_DEVOPS_PAT/);
   });
 
-  test('loginGithub --from-env writes GITHUB_TOKEN to keyring even when gh-cli is available', async () => {
+  test('GitHub --from-env writes GITHUB_TOKEN to keyring even when gh-cli is available', async () => {
     Bun.env.GITHUB_TOKEN = 'ghp_xxx';
-    const result = await loginGithub(
-      { fromEnv: true },
-      { ghAvailable: () => true }
+    const result = await runAuthProviderLogin(
+      authProvider(createGitHubPlugin({ ghAvailable: () => true })),
+      { fromEnv: true }
     );
-    expect(result).toBe('stored');
+
+    expect(result.status).toBe('stored');
     const stored = JSON.parse(store.get('aide:github') ?? '{}');
     expect(stored.token).toBe('ghp_xxx');
   });
 
-  test('loginGithub --from-env accepts GH_TOKEN alias', async () => {
+  test('GitHub --from-env accepts GH_TOKEN alias', async () => {
     Bun.env.GH_TOKEN = 'ghp_yyy';
-    await loginGithub({ fromEnv: true }, { ghAvailable: () => false });
+    await runAuthProviderLogin(
+      authProvider(createGitHubPlugin({ ghAvailable: () => false })),
+      { fromEnv: true }
+    );
+
     const stored = JSON.parse(store.get('aide:github') ?? '{}');
     expect(stored.token).toBe('ghp_yyy');
   });
 
-  test('loginGithub --from-env errors when no token is in env', async () => {
+  test('GitHub --from-env errors when no token is in env', async () => {
     await expect(
-      loginGithub({ fromEnv: true }, { ghAvailable: () => false })
+      runAuthProviderLogin(
+        authProvider(createGitHubPlugin({ ghAvailable: () => false })),
+        { fromEnv: true }
+      )
     ).rejects.toThrow(/GITHUB_TOKEN/);
   });
 });

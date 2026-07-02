@@ -1,331 +1,190 @@
 /**
- * `aide login <service>` - interactive credential setup.
+ * `aide login <service>` - provider-driven credential setup.
  *
- * Subcommands: jira | ado | github. Flags take precedence over prompts; any
- * field not supplied via flag is prompted for. Tokens can also be piped via
- * stdin when the flag is omitted, though if both are provided the flag wins.
- *
- * Each handler is exported so tests can exercise the business logic directly.
+ * The yargs surface is still the adapter, but provider-specific behavior and
+ * input metadata come from registered auth providers.
  */
 
-import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import * as v from 'valibot';
+import type { ArgumentsCamelCase, Argv, CommandModule } from 'yargs';
 
-import { text, password, type Prompter } from '@lib/prompts.js';
-import { setSecret } from '@lib/secrets.js';
+import type {
+  AideAuthInputField,
+  AideAuthInputValue,
+  AideAuthLoginRequest,
+} from '@cli/host/plugin-descriptor.js';
+import type { AideHostServices } from '@cli/host/runtime-context.js';
+import type { AideHostAwareCommandModule } from '@cli/host/yargs-adapter.js';
 import {
-  StoredJiraSchema,
-  StoredAdoSchema,
-  StoredGithubSchema,
-  type AuthMethod,
-} from '@schemas/config.js';
-import { isGhCliAvailable } from '@lib/gh-utils.js';
-import {
-  readJiraEnvForMigration,
-  readAdoEnvForMigration,
-  readGithubEnvForMigration,
-  type MigrationError,
-} from '@lib/config.js';
+  authFieldFlagName,
+  authProviderCommandRoutes,
+  providerHasAuthOperation,
+  readStdin,
+  runAuthProviderLogin,
+  type DiscoveredAuthProvider,
+} from './auth-provider-command-utils.js';
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-async function readStdin(): Promise<string> {
-  let buf = '';
-  for await (const chunk of process.stdin as AsyncIterable<Buffer>) {
-    buf += chunk.toString('utf8');
-  }
-  return buf.replace(/\r?\n$/, '');
+interface DynamicLoginArgs {
+  readonly 'from-env'?: boolean;
+  readonly [key: string]: unknown;
 }
 
-function validateUrl(s: string): string | null {
-  try {
-    new URL(s);
-    return null;
-  } catch {
-    return 'must be a valid URL';
-  }
+function authInputValue(value: unknown): AideAuthInputValue {
+  if (typeof value === 'string' || typeof value === 'boolean') return value;
+  return undefined;
 }
 
-function validateNonEmpty(s: string): string | null {
-  return s.length === 0 ? 'required' : null;
+function fieldDescription(field: AideAuthInputField): string {
+  const description = field.description ?? field.label;
+  return field.kind === 'select' && field.default !== undefined
+    ? `${description} (default: ${field.default})`
+    : description;
 }
 
-function formatMigrationError(service: string, err: MigrationError): string {
-  if (err.kind === 'missing') {
-    return `Cannot migrate ${service} from env: missing ${err.missingVars.join(', ')}.`;
-  }
-  return `Cannot migrate ${service} from env: ${err.reason}.`;
+function fieldFlagNames(fields: readonly AideAuthInputField[]): string[] {
+  return fields.map(authFieldFlagName);
 }
 
-function formatUnsetHint(varsUsed: string[]): string {
-  if (varsUsed.length === 0) return '';
-  if (varsUsed.length === 1) {
-    return `Note: ${varsUsed[0]} is still set and takes precedence over the keyring. Unset it to use the keyring.`;
-  }
-  const list =
-    varsUsed.slice(0, -1).join(', ') + ', and ' + varsUsed[varsUsed.length - 1];
-  return `Note: ${list} are still set and take precedence over the keyring. Unset them to use the keyring.`;
-}
-
-// ---------------------------------------------------------------------------
-// Jira
-// ---------------------------------------------------------------------------
-
-export interface JiraLoginFlags {
-  url?: string;
-  email?: string;
-  token?: string;
-  fromEnv?: boolean;
-}
-
-export async function loginJira(
-  flags: JiraLoginFlags,
-  opts: { prompter?: Prompter } = {}
-): Promise<void> {
-  if (flags.fromEnv) {
-    const result = readJiraEnvForMigration();
-    if (result.kind !== 'ok')
-      throw new Error(formatMigrationError('Jira', result));
-    await setSecret('jira', JSON.stringify(result.value));
-    console.log('Migrated Jira credentials from env to keyring.');
-    console.log(formatUnsetHint(result.varsUsed));
-    return;
+function configureFieldOption(
+  yargs: Argv<object>,
+  field: AideAuthInputField
+): Argv<object> {
+  const flagName = authFieldFlagName(field);
+  if (field.kind === 'select') {
+    return yargs.option(flagName, {
+      type: 'string',
+      choices: field.choices.map((choice) => choice.value),
+      describe: fieldDescription(field),
+    });
   }
 
-  let pipedToken: string | null = null;
-  if (!flags.token && !opts.prompter && !process.stdin.isTTY) {
-    pipedToken = (await readStdin()).trim();
-  }
-
-  const url =
-    flags.url ??
-    (await text({
-      label: 'Jira URL',
-      validate: validateUrl,
-      prompter: opts.prompter,
-    }));
-
-  const email =
-    flags.email ??
-    (await text({
-      label: 'Email',
-      validate: validateNonEmpty,
-      prompter: opts.prompter,
-    }));
-
-  const token =
-    flags.token ??
-    pipedToken ??
-    (await password({ label: 'API token', prompter: opts.prompter }));
-
-  const validated = v.parse(StoredJiraSchema, {
-    url,
-    email,
-    apiToken: token,
+  return yargs.option(flagName, {
+    type: 'string',
+    describe: fieldDescription(field),
   });
-  await setSecret('jira', JSON.stringify(validated));
-  console.log('Saved credentials for jira.');
 }
 
-// ---------------------------------------------------------------------------
-// Azure DevOps
-// ---------------------------------------------------------------------------
+function configureLoginOptions(
+  yargs: Argv<object>,
+  provider: DiscoveredAuthProvider
+): Argv<object> {
+  const metadata = provider.capability.login;
+  const fields = metadata?.fields ?? [];
+  let configured = yargs;
 
-export interface AdoLoginFlags {
-  orgUrl?: string;
-  pat?: string;
-  authMethod?: AuthMethod;
-  fromEnv?: boolean;
-}
-
-export async function loginAdo(
-  flags: AdoLoginFlags,
-  opts: { prompter?: Prompter } = {}
-): Promise<void> {
-  if (flags.fromEnv) {
-    const result = readAdoEnvForMigration();
-    if (result.kind !== 'ok')
-      throw new Error(formatMigrationError('Azure DevOps', result));
-    await setSecret('ado', JSON.stringify(result.value));
-    console.log('Migrated Azure DevOps credentials from env to keyring.');
-    console.log(formatUnsetHint(result.varsUsed));
-    return;
+  for (const field of fields) {
+    configured = configureFieldOption(configured, field);
   }
 
-  let pipedToken: string | null = null;
-  if (!flags.pat && !opts.prompter && !process.stdin.isTTY) {
-    pipedToken = (await readStdin()).trim();
+  if (metadata?.envMigration !== undefined) {
+    configured = configured.option('from-env', {
+      type: 'boolean',
+      describe: metadata.envMigration.description,
+      default: false,
+    });
+    const conflicts = fieldFlagNames(fields);
+    if (conflicts.length > 0) {
+      configured = configured.conflicts('from-env', conflicts);
+    }
   }
 
-  const orgUrl =
-    flags.orgUrl ??
-    (await text({
-      label: 'Azure DevOps org URL',
-      validate: validateUrl,
-      prompter: opts.prompter,
-    }));
-
-  const pat =
-    flags.pat ??
-    pipedToken ??
-    (await password({ label: 'PAT', prompter: opts.prompter }));
-
-  const authMethod: AuthMethod = flags.authMethod ?? 'pat';
-
-  const validated = v.parse(StoredAdoSchema, {
-    orgUrl,
-    pat,
-    authMethod,
-  });
-  await setSecret('ado', JSON.stringify(validated));
-  console.log('Saved credentials for ado.');
+  return configured;
 }
 
-// ---------------------------------------------------------------------------
-// GitHub
-// ---------------------------------------------------------------------------
+async function valueFromStdin(
+  current: AideAuthInputValue,
+  field: AideAuthInputField,
+  fromEnv: boolean
+): Promise<AideAuthInputValue> {
+  if (current !== undefined) return current;
+  if (fromEnv || field.kind === 'select' || field.stdin !== true) {
+    return current;
+  }
+  if (process.stdin.isTTY) return current;
 
-export interface GithubLoginFlags {
-  token?: string;
-  fromEnv?: boolean;
+  const piped = (await readStdin()).trim();
+  return piped === '' ? undefined : piped;
 }
 
-export async function loginGithub(
-  flags: GithubLoginFlags,
-  opts: {
-    prompter?: Prompter;
-    ghAvailable?: () => boolean;
-  } = {}
-): Promise<'gh-cli' | 'stored'> {
-  // --from-env migrates an explicit token from env regardless of gh-cli state,
-  // since the user's intent is to promote that token into the keyring.
-  if (flags.fromEnv) {
-    const result = readGithubEnvForMigration();
-    if (result.kind !== 'ok')
-      throw new Error(formatMigrationError('GitHub', result));
-    await setSecret('github', JSON.stringify(result.value));
-    console.log('Migrated GitHub credentials from env to keyring.');
-    console.log(formatUnsetHint(result.varsUsed));
-    return 'stored';
+async function loginRequestFromArgs(
+  provider: DiscoveredAuthProvider,
+  argv: ArgumentsCamelCase<DynamicLoginArgs>
+): Promise<AideAuthLoginRequest> {
+  const fromEnv = argv['from-env'] === true;
+  if (fromEnv) {
+    return { fromEnv: true };
   }
 
-  const ghCheck = opts.ghAvailable ?? isGhCliAvailable;
-  if (ghCheck()) {
-    console.log('Using gh CLI auth. Nothing to do.');
-    return 'gh-cli';
+  const values: Record<string, AideAuthInputValue> = {};
+
+  for (const field of provider.capability.login?.fields ?? []) {
+    const flagName = authFieldFlagName(field);
+    const rawValue = authInputValue(argv[flagName]);
+    const defaulted =
+      rawValue === undefined && field.kind === 'select'
+        ? field.default
+        : rawValue;
+    const value = await valueFromStdin(defaulted, field, fromEnv);
+    if (value !== undefined) {
+      values[field.key] = value;
+    }
   }
 
-  let pipedToken: string | null = null;
-  if (!flags.token && !opts.prompter && !process.stdin.isTTY) {
-    pipedToken = (await readStdin()).trim();
-  }
-
-  const token =
-    flags.token ??
-    pipedToken ??
-    (await password({ label: 'GitHub token', prompter: opts.prompter }));
-
-  const validated = v.parse(StoredGithubSchema, { token });
-  await setSecret('github', JSON.stringify(validated));
-  console.log('Saved credentials for github.');
-  return 'stored';
+  return {
+    fromEnv,
+    values,
+  };
 }
 
-// ---------------------------------------------------------------------------
-// yargs wiring
-// ---------------------------------------------------------------------------
-
-interface JiraArgs {
-  url?: string;
-  email?: string;
-  token?: string;
-  'from-env'?: boolean;
-}
-interface AdoArgs {
-  'org-url'?: string;
-  pat?: string;
-  'auth-method'?: AuthMethod;
-  'from-env'?: boolean;
-}
-interface GithubArgs {
-  token?: string;
-  'from-env'?: boolean;
+function loginCommandForProvider(
+  provider: DiscoveredAuthProvider
+): CommandModule<object, DynamicLoginArgs> {
+  return {
+    command: authProviderCommandRoutes(provider, 'login'),
+    describe:
+      provider.capability.login?.summary ??
+      `Save ${provider.capability.label} credentials`,
+    builder: (yargs) => configureLoginOptions(yargs, provider),
+    handler: async (argv) => {
+      await runAuthProviderLogin(
+        provider,
+        await loginRequestFromArgs(provider, argv)
+      );
+    },
+  };
 }
 
-const command: CommandModule = {
+function loginProviderCommandName(provider: DiscoveredAuthProvider): string {
+  const route = authProviderCommandRoutes(provider, 'login');
+  return typeof route === 'string' ? route : route[0]!;
+}
+
+function loginProviders(
+  services: AideHostServices
+): readonly DiscoveredAuthProvider[] {
+  return services
+    .authProviders()
+    .filter((provider) => providerHasAuthOperation(provider, 'login'));
+}
+
+const command: AideHostAwareCommandModule<object, object> = {
   command: 'login <service>',
   describe: 'Save credentials for a service to the OS keyring',
-  builder: (yargs) =>
-    yargs
-      .command({
-        command: 'jira',
-        describe: 'Save Jira credentials',
-        builder: (y) =>
-          y
-            .option('url', { type: 'string', describe: 'Jira URL' })
-            .option('email', { type: 'string', describe: 'Jira email' })
-            .option('token', { type: 'string', describe: 'Jira API token' })
-            .option('from-env', {
-              type: 'boolean',
-              describe:
-                'Migrate JIRA_URL / JIRA_EMAIL / JIRA_API_TOKEN into the keyring',
-              default: false,
-            })
-            .conflicts('from-env', ['url', 'email', 'token']),
-        handler: async (argv: ArgumentsCamelCase<JiraArgs>) =>
-          await loginJira({
-            url: argv.url,
-            email: argv.email,
-            token: argv.token,
-            fromEnv: argv['from-env'],
-          }),
-      })
-      .command({
-        command: 'ado',
-        describe: 'Save Azure DevOps credentials',
-        builder: (y) =>
-          y
-            .option('org-url', { type: 'string', describe: 'ADO org URL' })
-            .option('pat', { type: 'string', describe: 'ADO PAT' })
-            .option('auth-method', {
-              type: 'string',
-              choices: ['pat', 'bearer'] as const,
-              describe: 'Auth method (default: pat)',
-            })
-            .option('from-env', {
-              type: 'boolean',
-              describe:
-                'Migrate AZURE_DEVOPS_ORG_URL / AZURE_DEVOPS_PAT into the keyring',
-              default: false,
-            })
-            .conflicts('from-env', ['org-url', 'pat', 'auth-method']),
-        handler: async (argv: ArgumentsCamelCase<AdoArgs>) =>
-          await loginAdo({
-            orgUrl: argv['org-url'],
-            pat: argv.pat,
-            authMethod: argv['auth-method'],
-            fromEnv: argv['from-env'],
-          }),
-      })
-      .command({
-        command: 'github',
-        describe: 'Save GitHub token (only if gh CLI is unavailable)',
-        builder: (y) =>
-          y
-            .option('token', { type: 'string', describe: 'GitHub token' })
-            .option('from-env', {
-              type: 'boolean',
-              describe: 'Migrate GITHUB_TOKEN / GH_TOKEN into the keyring',
-              default: false,
-            })
-            .conflicts('from-env', ['token']),
-        handler: async (argv: ArgumentsCamelCase<GithubArgs>) => {
-          await loginGithub({ token: argv.token, fromEnv: argv['from-env'] });
-        },
-      })
-      .demandCommand(1, 'Specify a service: jira, ado, or github'),
+  aideBuilder: (yargs, services) => {
+    const providers = loginProviders(services);
+    let configured = yargs;
+
+    for (const provider of providers) {
+      configured = configured.command(loginCommandForProvider(provider));
+    }
+
+    const names = providers.map(loginProviderCommandName);
+    return configured.demandCommand(
+      1,
+      names.length === 0
+        ? 'No auth providers with login operations are registered'
+        : `Specify a service: ${names.join(', ')}`
+    );
+  },
   handler: () => {
     // Never reached - subcommand is required.
   },
