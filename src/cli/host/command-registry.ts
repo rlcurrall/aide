@@ -783,6 +783,8 @@ function snapshotPullRequestProviderOperations(
   const getPullRequest = operations.getPullRequest;
   const getPullRequestDiff = operations.getPullRequestDiff;
   const listPullRequestComments = operations.listPullRequestComments;
+  const addPullRequestComment = operations.addPullRequestComment;
+  const replyToPullRequestComment = operations.replyToPullRequestComment;
   const findPullRequestForBranch = operations.findPullRequestForBranch;
   if (
     listPullRequests !== undefined &&
@@ -814,6 +816,22 @@ function snapshotPullRequestProviderOperations(
     );
   }
   if (
+    addPullRequestComment !== undefined &&
+    typeof addPullRequestComment !== 'function'
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' pull request provider '${providerId}' operation 'addPullRequestComment' must be a function`
+    );
+  }
+  if (
+    replyToPullRequestComment !== undefined &&
+    typeof replyToPullRequestComment !== 'function'
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' pull request provider '${providerId}' operation 'replyToPullRequestComment' must be a function`
+    );
+  }
+  if (
     findPullRequestForBranch !== undefined &&
     typeof findPullRequestForBranch !== 'function'
   ) {
@@ -827,6 +845,8 @@ function snapshotPullRequestProviderOperations(
     getPullRequest === undefined &&
     getPullRequestDiff === undefined &&
     listPullRequestComments === undefined &&
+    addPullRequestComment === undefined &&
+    replyToPullRequestComment === undefined &&
     findPullRequestForBranch === undefined
   ) {
     return Object.freeze({});
@@ -856,6 +876,18 @@ function snapshotPullRequestProviderOperations(
       : {
           listPullRequestComments:
             listPullRequestComments as AidePullRequestProviderOperations['listPullRequestComments'],
+        }),
+    ...(addPullRequestComment === undefined
+      ? {}
+      : {
+          addPullRequestComment:
+            addPullRequestComment as AidePullRequestProviderOperations['addPullRequestComment'],
+        }),
+    ...(replyToPullRequestComment === undefined
+      ? {}
+      : {
+          replyToPullRequestComment:
+            replyToPullRequestComment as AidePullRequestProviderOperations['replyToPullRequestComment'],
         }),
     ...(findPullRequestForBranch === undefined
       ? {}

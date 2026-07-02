@@ -5,9 +5,11 @@ import {
   defineAidePlugin,
   type AideAuthInputField,
   type AideAuthLoginRequest,
+  type AidePullRequestAddCommentRequest,
   type AidePullRequestBranchLookupRequest,
   type AidePullRequestBranchLookupResult,
   type AidePullRequestComment,
+  type AidePullRequestCommentMutationResult,
   type AidePullRequestCommentThread,
   type AidePullRequestCommentsRequest,
   type AidePullRequestCommentsResult,
@@ -17,6 +19,7 @@ import {
   type AidePullRequestListRequest,
   type AidePullRequestListResult,
   type AidePullRequestListItemStatus,
+  type AidePullRequestReplyCommentRequest,
   type AidePullRequestViewRequest,
   type AidePullRequestViewResult,
   type AidePluginAuthStatus,
@@ -59,7 +62,13 @@ type GitHubPullRequestClient = Pick<
   | 'getPullRequestFiles'
   | 'getIssueComments'
   | 'getReviewComments'
->;
+> &
+  Partial<
+    Pick<
+      GitHubClient,
+      'createIssueComment' | 'createReviewComment' | 'replyToReviewComment'
+    >
+  >;
 type CreateGitHubClient = (options: {
   readonly host: string;
 }) => Promise<GitHubPullRequestClient>;
@@ -340,6 +349,126 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
       catch: (error) => error,
     });
 
+  const addPullRequestComment = (
+    request: AidePullRequestAddCommentRequest
+  ): Effect.Effect<AidePullRequestCommentMutationResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'github') {
+          throw new Error(
+            `GitHub provider cannot add pull request comments for '${repository.kind}' repository refs`
+          );
+        }
+
+        const client = await createClient({ host: repository.host });
+        const comment =
+          request.position === undefined
+            ? await (async () => {
+                if (client.createIssueComment === undefined) {
+                  throw new Error(
+                    'GitHub client does not support creating issue comments'
+                  );
+                }
+                return githubIssueCommentToComment(
+                  await client.createIssueComment(
+                    repository.owner,
+                    repository.repo,
+                    request.pullRequest.number,
+                    request.body
+                  )
+                );
+              })()
+            : await (async (position) => {
+                if (client.createReviewComment === undefined) {
+                  throw new Error(
+                    'GitHub client does not support creating review comments'
+                  );
+                }
+                const pr = await client.getPullRequest(
+                  repository.owner,
+                  repository.repo,
+                  request.pullRequest.number
+                );
+                return githubReviewCommentToComment(
+                  await client.createReviewComment(
+                    repository.owner,
+                    repository.repo,
+                    request.pullRequest.number,
+                    request.body,
+                    {
+                      path: githubReviewCommentPath(position.filePath),
+                      line: position.endLineNumber ?? position.lineNumber,
+                      commit_id: pr.head.sha,
+                      ...(position.endLineNumber === undefined
+                        ? {}
+                        : { start_line: position.lineNumber }),
+                    }
+                  ),
+                  'review'
+                );
+              })(request.position);
+
+        return {
+          repository,
+          repositoryLabel: `${repository.host}/${repository.owner}/${repository.repo}`,
+          pullRequest: { number: request.pullRequest.number },
+          comment,
+          thread: githubCommentMutationThread(comment),
+        };
+      },
+      catch: (error) => error,
+    });
+
+  const replyToPullRequestComment = (
+    request: AidePullRequestReplyCommentRequest
+  ): Effect.Effect<AidePullRequestCommentMutationResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'github') {
+          throw new Error(
+            `GitHub provider cannot reply to pull request comments for '${repository.kind}' repository refs`
+          );
+        }
+
+        const client = await createClient({ host: repository.host });
+        if (client.replyToReviewComment === undefined) {
+          throw new Error(
+            'GitHub client does not support replying to review comments'
+          );
+        }
+        const comment = githubReviewCommentToComment(
+          await client.replyToReviewComment(
+            repository.owner,
+            repository.repo,
+            request.pullRequest.number,
+            request.threadId,
+            request.body
+          ),
+          'reply'
+        );
+
+        return {
+          repository,
+          repositoryLabel: `${repository.host}/${repository.owner}/${repository.repo}`,
+          pullRequest: { number: request.pullRequest.number },
+          comment,
+          thread: Object.freeze({
+            id: request.threadId,
+            ...(comment.filePath === undefined
+              ? {}
+              : { filePath: comment.filePath }),
+            ...(comment.lineNumber === undefined
+              ? {}
+              : { lineNumber: comment.lineNumber }),
+            replies: Object.freeze([comment]),
+          }),
+        };
+      },
+      catch: (error) => error,
+    });
+
   const findPullRequestForBranch = (
     request: AidePullRequestBranchLookupRequest
   ): Effect.Effect<AidePullRequestBranchLookupResult, unknown, never> =>
@@ -473,6 +602,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           getPullRequest,
           getPullRequestDiff,
           listPullRequestComments,
+          addPullRequestComment,
+          replyToPullRequestComment,
           findPullRequestForBranch,
         },
       },
@@ -595,6 +726,32 @@ function githubReviewCommentToComment(
       ? {}
       : { parentId: comment.in_reply_to_id }),
   };
+}
+
+function githubReviewCommentPath(path: string): string {
+  return path.startsWith('/') ? path.slice(1) : path;
+}
+
+function githubCommentMutationThread(
+  comment: AidePullRequestComment
+): AidePullRequestCommentThread {
+  if (comment.kind === 'review') {
+    return Object.freeze({
+      id: comment.id,
+      ...(comment.filePath === undefined ? {} : { filePath: comment.filePath }),
+      ...(comment.lineNumber === undefined
+        ? {}
+        : { lineNumber: comment.lineNumber }),
+      rootComment: comment,
+      replies: Object.freeze([]),
+    });
+  }
+
+  return Object.freeze({
+    id: `issue-${comment.id}`,
+    rootComment: comment,
+    replies: Object.freeze([]),
+  });
 }
 
 function githubCommentsToThreads(

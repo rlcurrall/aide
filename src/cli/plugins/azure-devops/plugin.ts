@@ -5,10 +5,12 @@ import {
   defineAidePlugin,
   type AideAuthInputField,
   type AideAuthLoginRequest,
+  type AidePullRequestAddCommentRequest,
   type AidePullRequestBranchLookupRequest,
   type AidePullRequestBranchLookupResult,
   type AidePullRequestComment,
   type AidePullRequestCommentKind,
+  type AidePullRequestCommentMutationResult,
   type AidePullRequestCommentThread,
   type AidePullRequestCommentsRequest,
   type AidePullRequestCommentsResult,
@@ -17,6 +19,8 @@ import {
   type AidePullRequestDiffResult,
   type AidePullRequestListRequest,
   type AidePullRequestListResult,
+  type AidePullRequestRepositoryRef,
+  type AidePullRequestReplyCommentRequest,
   type AidePullRequestViewRequest,
   type AidePullRequestViewResult,
   type AidePluginAuthStatus,
@@ -33,9 +37,12 @@ import { extractBranchName } from '@lib/git-utils.js';
 import { deleteSecret, setSecret } from '@lib/secrets.js';
 import type {
   AzureDevOpsChangeType,
+  AzureDevOpsCreateCommentResponse,
   AzureDevOpsPRChange,
+  AzureDevOpsPRComment,
   AzureDevOpsPullRequest,
   AdoFlattenedComment,
+  CreateThreadResponse,
 } from '@lib/types.js';
 import {
   StoredAdoSchema,
@@ -59,7 +66,10 @@ type AzureDevOpsPullRequestClient = Pick<
   | 'getPullRequestLabels'
   | 'getAllPullRequestChanges'
   | 'getAllComments'
->;
+> &
+  Partial<
+    Pick<AzureDevOpsClient, 'createPullRequestThread' | 'createThreadComment'>
+  >;
 type CreateAzureDevOpsClient = () => Promise<{
   readonly client: AzureDevOpsPullRequestClient;
   readonly config: AzureDevOpsConfig;
@@ -402,6 +412,103 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
       catch: (error) => error,
     });
 
+  const addPullRequestComment = (
+    request: AidePullRequestAddCommentRequest
+  ): Effect.Effect<AidePullRequestCommentMutationResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot add pull request comments for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient();
+        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
+        if (configuredOrg !== null && configuredOrg !== repository.org) {
+          throw new Error(
+            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
+          );
+        }
+        if (client.createPullRequestThread === undefined) {
+          throw new Error(
+            'Azure DevOps client does not support creating pull request threads'
+          );
+        }
+
+        const thread = await client.createPullRequestThread(
+          repository.project,
+          repository.repo,
+          request.pullRequest.number,
+          request.body,
+          request.position === undefined
+            ? undefined
+            : {
+                filePath: request.position.filePath,
+                line: request.position.lineNumber,
+                endLine: request.position.endLineNumber,
+              }
+        );
+
+        return azureDevOpsThreadMutationResult(
+          repository,
+          request.pullRequest.number,
+          thread
+        );
+      },
+      catch: (error) => error,
+    });
+
+  const replyToPullRequestComment = (
+    request: AidePullRequestReplyCommentRequest
+  ): Effect.Effect<AidePullRequestCommentMutationResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot reply to pull request comments for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient();
+        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
+        if (configuredOrg !== null && configuredOrg !== repository.org) {
+          throw new Error(
+            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
+          );
+        }
+        if (client.createThreadComment === undefined) {
+          throw new Error(
+            'Azure DevOps client does not support creating thread comments'
+          );
+        }
+
+        const response = await client.createThreadComment(
+          repository.project,
+          repository.repo,
+          request.pullRequest.number,
+          request.threadId,
+          request.body,
+          request.parentCommentId
+        );
+        const comment = azureDevOpsCreatedReplyToComment(response);
+
+        return {
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: { number: request.pullRequest.number },
+          comment,
+          thread: Object.freeze({
+            id: request.threadId,
+            replies: Object.freeze([comment]),
+          }),
+        };
+      },
+      catch: (error) => error,
+    });
+
   const findPullRequestForBranch = (
     request: AidePullRequestBranchLookupRequest
   ): Effect.Effect<AidePullRequestBranchLookupResult, unknown, never> =>
@@ -564,6 +671,8 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           getPullRequest,
           getPullRequestDiff,
           listPullRequestComments,
+          addPullRequestComment,
+          replyToPullRequestComment,
           findPullRequestForBranch,
         },
       },
@@ -685,6 +794,82 @@ function azureDevOpsCommentToComment(
       ? {}
       : { parentId: comment.comment.parentCommentId }),
     providerType: comment.comment.commentType,
+  };
+}
+
+function azureDevOpsCreatedThreadCommentToComment(
+  comment: AzureDevOpsPRComment,
+  thread: CreateThreadResponse
+): AidePullRequestComment {
+  const filePath = thread.threadContext?.filePath;
+  const lineNumber = thread.threadContext?.rightFileStart?.line;
+  return {
+    id: comment.id,
+    kind: filePath === undefined ? 'issue' : 'review',
+    author: {
+      displayName: comment.author.displayName,
+      ...(comment.author.uniqueName === undefined
+        ? {}
+        : { email: comment.author.uniqueName }),
+    },
+    body: comment.content ?? '[deleted comment]',
+    createdAt: comment.publishedDate,
+    updatedAt: comment.lastUpdatedDate,
+    ...(filePath === undefined ? {} : { filePath }),
+    ...(lineNumber === undefined ? {} : { lineNumber }),
+    providerType: comment.commentType,
+  };
+}
+
+function azureDevOpsCreatedReplyToComment(
+  comment: AzureDevOpsCreateCommentResponse
+): AidePullRequestComment {
+  return {
+    id: comment.id,
+    kind: 'reply',
+    author: {
+      displayName: comment.author.displayName,
+      ...(comment.author.uniqueName === undefined
+        ? {}
+        : { email: comment.author.uniqueName }),
+    },
+    body: comment.content,
+    createdAt: comment.publishedDate,
+    updatedAt: comment.lastUpdatedDate,
+    ...(comment.parentCommentId <= 0
+      ? {}
+      : { parentId: comment.parentCommentId }),
+    providerType: comment.commentType,
+  };
+}
+
+function azureDevOpsThreadMutationResult(
+  repository: Extract<AidePullRequestRepositoryRef, { kind: 'azure-devops' }>,
+  pullRequestNumber: number,
+  thread: CreateThreadResponse
+): AidePullRequestCommentMutationResult {
+  const rootComment = thread.comments[0];
+  if (rootComment === undefined) {
+    throw new Error('Azure DevOps created thread did not include a comment');
+  }
+
+  const comment = azureDevOpsCreatedThreadCommentToComment(rootComment, thread);
+  const filePath = thread.threadContext?.filePath;
+  const lineNumber = thread.threadContext?.rightFileStart?.line;
+
+  return {
+    repository,
+    repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+    pullRequest: { number: pullRequestNumber },
+    comment,
+    thread: Object.freeze({
+      id: thread.id,
+      status: thread.status,
+      ...(filePath === undefined ? {} : { filePath }),
+      ...(lineNumber === undefined ? {} : { lineNumber }),
+      rootComment: comment,
+      replies: Object.freeze([]),
+    }),
   };
 }
 

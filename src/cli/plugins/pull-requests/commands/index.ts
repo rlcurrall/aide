@@ -5,13 +5,13 @@
  */
 
 import type { CommandModule } from 'yargs';
-import prCommentCommandModule from '@cli/commands/pr/pr-comment.js';
 import prCreateCommandModule from '@cli/commands/pr/pr-create.js';
-import prReplyCommandModule from '@cli/commands/pr/pr-reply.js';
 import prUpdateCommandModule from '@cli/commands/pr/pr-update.js';
+import commentCommandModule from './comment.js';
 import commentsCommandModule from './comments.js';
 import diffCommandModule from './diff.js';
 import listCommandModule from './list.js';
+import replyCommandModule from './reply.js';
 import viewCommandModule from './view.js';
 
 const prExamples = [
@@ -61,7 +61,7 @@ export const prDiffCommand = diffCommandModule;
 export const prCreateCommand = prCreateCommandModule;
 export const prUpdateCommand = prUpdateCommandModule;
 export const prCommentsCommand = commentsCommandModule;
-export const prCommentCommand = prCommentCommandModule;
-export const prReplyCommand = prReplyCommandModule;
+export const prCommentCommand = commentCommandModule;
+export const prReplyCommand = replyCommandModule;
 
 export const prCommandGroup: CommandModule = createPrCommandGroup();

@@ -6,11 +6,14 @@ import type {
 } from './command-registry.js';
 import type {
   AidePullRequestProviderCapability,
+  AidePullRequestAddCommentRequest,
   AidePullRequestBranchLookupRequest,
   AidePullRequestBranchLookupResult,
   AidePullRequestComment,
   AidePullRequestCommentAuthor,
   AidePullRequestCommentKind,
+  AidePullRequestCommentMutationResult,
+  AidePullRequestCommentPosition,
   AidePullRequestCommentThread,
   AidePullRequestCommentsRequest,
   AidePullRequestCommentsResult,
@@ -26,6 +29,7 @@ import type {
   AidePullRequestProviderMatch,
   AidePullRequestProviderMatchSource,
   AidePullRequestRef,
+  AidePullRequestReplyCommentRequest,
   AidePullRequestRemoteMatch,
   AidePullRequestRepositoryMatch,
   AidePullRequestRepositoryRef,
@@ -99,6 +103,26 @@ export interface PullRequestProviderOperationContext<
     options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
   ) => Effect.Effect<
     AidePullRequestCommentsResult,
+    | UnsupportedPullRequestProviderOperationError
+    | InvalidPullRequestProviderOperationResultError
+    | PullRequestProviderOperationError
+    | PullRequestProviderOperationTimeoutError
+  >;
+  readonly addPullRequestComment: (
+    request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+    options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
+  ) => Effect.Effect<
+    AidePullRequestCommentMutationResult,
+    | UnsupportedPullRequestProviderOperationError
+    | InvalidPullRequestProviderOperationResultError
+    | PullRequestProviderOperationError
+    | PullRequestProviderOperationTimeoutError
+  >;
+  readonly replyToPullRequestComment: (
+    request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+    options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
+  ) => Effect.Effect<
+    AidePullRequestCommentMutationResult,
     | UnsupportedPullRequestProviderOperationError
     | InvalidPullRequestProviderOperationResultError
     | PullRequestProviderOperationError
@@ -787,6 +811,18 @@ function snapshotPullRequestCommentThread(
   });
 }
 
+function snapshotPullRequestCommentPosition(
+  value: AidePullRequestCommentPosition
+): AidePullRequestCommentPosition {
+  return Object.freeze({
+    filePath: value.filePath,
+    lineNumber: value.lineNumber,
+    ...(value.endLineNumber === undefined
+      ? {}
+      : { endLineNumber: value.endLineNumber }),
+  });
+}
+
 function validatePullRequestListResult(
   provider: ResolvedPullRequestProviderCandidate<
     AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
@@ -1024,6 +1060,82 @@ function validatePullRequestCommentsResult(
       ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
       pullRequest,
       threads: Object.freeze(threads),
+    })
+  );
+}
+
+function validatePullRequestCommentMutationResult(
+  provider: ResolvedPullRequestProviderCandidate,
+  operation: 'addPullRequestComment' | 'replyToPullRequestComment',
+  request: Pick<AidePullRequestAddCommentRequest, 'pullRequest'> &
+    Partial<Pick<AidePullRequestReplyCommentRequest, 'threadId'>>,
+  result: unknown
+): Effect.Effect<
+  AidePullRequestCommentMutationResult,
+  InvalidPullRequestProviderOperationResultError
+> {
+  const invalid = (reason: string) =>
+    Effect.fail(
+      new InvalidPullRequestProviderOperationResultError({
+        pluginId: provider.pluginId,
+        providerId: provider.providerId,
+        operation,
+        reason,
+      })
+    );
+
+  if (!isRecord(result)) {
+    return invalid('result must be an object');
+  }
+
+  const repository = snapshotRepositoryRef(result.repository);
+  if (repository === null) {
+    return invalid('invalid repository ref');
+  }
+  if (!repositoryRefsMatch(repository, provider.match.repository)) {
+    return invalid('repository ref does not match selected provider match');
+  }
+
+  const repositoryLabel = result.repositoryLabel;
+  if (repositoryLabel !== undefined && typeof repositoryLabel !== 'string') {
+    return invalid('repositoryLabel must be a string');
+  }
+
+  const pullRequest = snapshotPullRequestRef(result.pullRequest);
+  if (pullRequest === null) {
+    return invalid('invalid pull request ref');
+  }
+  if (pullRequest.number !== request.pullRequest.number) {
+    return invalid('pull request id does not match selected pull request');
+  }
+
+  const comment = snapshotPullRequestComment(result.comment);
+  if (comment === null) {
+    return invalid('invalid comment');
+  }
+
+  const thread =
+    result.thread === undefined
+      ? undefined
+      : snapshotPullRequestCommentThread(result.thread);
+  if (thread === null) {
+    return invalid('invalid comment thread');
+  }
+  if (
+    operation === 'replyToPullRequestComment' &&
+    thread !== undefined &&
+    thread.id !== request.threadId
+  ) {
+    return invalid('thread id does not match selected thread');
+  }
+
+  return Effect.succeed(
+    Object.freeze({
+      repository,
+      ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
+      pullRequest,
+      comment,
+      ...(thread === undefined ? {} : { thread }),
     })
   );
 }
@@ -1425,6 +1537,20 @@ function bindProviderOperationContext<
         'operationTimeout'
       > = {}
     ) => listPullRequestCommentsWithProvider(provider, request, options),
+    addPullRequestComment: (
+      request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+      options: Pick<
+        PullRequestProviderOperationOptions,
+        'operationTimeout'
+      > = {}
+    ) => addPullRequestCommentWithProvider(provider, request, options),
+    replyToPullRequestComment: (
+      request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+      options: Pick<
+        PullRequestProviderOperationOptions,
+        'operationTimeout'
+      > = {}
+    ) => replyToPullRequestCommentWithProvider(provider, request, options),
   });
 }
 
@@ -1817,6 +1943,85 @@ export function listPullRequestCommentsWithProvider(
   );
 }
 
+export function addPullRequestCommentWithProvider(
+  provider: ResolvedPullRequestProviderCandidate,
+  request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+): Effect.Effect<
+  AidePullRequestCommentMutationResult,
+  | UnsupportedPullRequestProviderOperationError
+  | InvalidPullRequestProviderOperationResultError
+  | PullRequestProviderOperationError
+  | PullRequestProviderOperationTimeoutError
+> {
+  const operationRequest = Object.freeze({
+    match: provider.match,
+    pullRequest: Object.freeze({
+      number: request.pullRequest.number,
+    }),
+    body: request.body,
+    ...(request.position === undefined
+      ? {}
+      : { position: snapshotPullRequestCommentPosition(request.position) }),
+  });
+  return invokePullRequestProviderOperation(
+    provider,
+    'addPullRequestComment',
+    provider.capability.operations?.addPullRequestComment,
+    operationRequest,
+    options
+  ).pipe(
+    Effect.flatMap((result) =>
+      validatePullRequestCommentMutationResult(
+        provider,
+        'addPullRequestComment',
+        operationRequest,
+        result
+      )
+    )
+  );
+}
+
+export function replyToPullRequestCommentWithProvider(
+  provider: ResolvedPullRequestProviderCandidate,
+  request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+): Effect.Effect<
+  AidePullRequestCommentMutationResult,
+  | UnsupportedPullRequestProviderOperationError
+  | InvalidPullRequestProviderOperationResultError
+  | PullRequestProviderOperationError
+  | PullRequestProviderOperationTimeoutError
+> {
+  const operationRequest = Object.freeze({
+    match: provider.match,
+    pullRequest: Object.freeze({
+      number: request.pullRequest.number,
+    }),
+    threadId: request.threadId,
+    body: request.body,
+    ...(request.parentCommentId === undefined
+      ? {}
+      : { parentCommentId: request.parentCommentId }),
+  });
+  return invokePullRequestProviderOperation(
+    provider,
+    'replyToPullRequestComment',
+    provider.capability.operations?.replyToPullRequestComment,
+    operationRequest,
+    options
+  ).pipe(
+    Effect.flatMap((result) =>
+      validatePullRequestCommentMutationResult(
+        provider,
+        'replyToPullRequestComment',
+        operationRequest,
+        result
+      )
+    )
+  );
+}
+
 export function findPullRequestForBranchWithProvider(
   provider: ResolvedPullRequestProviderCandidate<
     AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
@@ -2185,6 +2390,98 @@ export function listPullRequestCommentsForRepository(
   );
 }
 
+export function addPullRequestCommentForRemote(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  remoteUrl: string,
+  request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestCommentMutationResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'git-remote',
+    remoteUrl,
+    (provider) => provider.matchRemote(remoteUrl),
+    (provider) =>
+      provider.capability.operations?.addPullRequestComment !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      addPullRequestCommentWithProvider(provider, request, options)
+    )
+  );
+}
+
+export function addPullRequestCommentForRepository(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestCommentMutationResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForRepositoryOperation(
+    providers,
+    repository,
+    (provider) =>
+      provider.capability.operations?.addPullRequestComment !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      addPullRequestCommentWithProvider(provider, request, options)
+    )
+  );
+}
+
+export function replyToPullRequestCommentForRemote(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  remoteUrl: string,
+  request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestCommentMutationResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'git-remote',
+    remoteUrl,
+    (provider) => provider.matchRemote(remoteUrl),
+    (provider) =>
+      provider.capability.operations?.replyToPullRequestComment !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      replyToPullRequestCommentWithProvider(provider, request, options)
+    )
+  );
+}
+
+export function replyToPullRequestCommentForRepository(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestCommentMutationResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForRepositoryOperation(
+    providers,
+    repository,
+    (provider) =>
+      provider.capability.operations?.replyToPullRequestComment !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      replyToPullRequestCommentWithProvider(provider, request, options)
+    )
+  );
+}
+
 export function getPullRequestForUrl(
   providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
   url: string,
@@ -2290,6 +2587,62 @@ export function listPullRequestCommentsForUrl(
       listPullRequestCommentsWithProvider(
         provider,
         { pullRequest: provider.match.pullRequest },
+        options
+      )
+    )
+  );
+}
+
+export function addPullRequestCommentForUrl(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  url: string,
+  request: Omit<AidePullRequestAddCommentRequest, 'match' | 'pullRequest'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestCommentMutationResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'pull-request-url',
+    url,
+    (provider) => provider.matchPullRequestUrl(url),
+    (provider) =>
+      provider.capability.operations?.addPullRequestComment !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      addPullRequestCommentWithProvider(
+        provider,
+        { ...request, pullRequest: provider.match.pullRequest },
+        options
+      )
+    )
+  );
+}
+
+export function replyToPullRequestCommentForUrl(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  url: string,
+  request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'pullRequest'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestCommentMutationResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'pull-request-url',
+    url,
+    (provider) => provider.matchPullRequestUrl(url),
+    (provider) =>
+      provider.capability.operations?.replyToPullRequestComment !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      replyToPullRequestCommentWithProvider(
+        provider,
+        { ...request, pullRequest: provider.match.pullRequest },
         options
       )
     )

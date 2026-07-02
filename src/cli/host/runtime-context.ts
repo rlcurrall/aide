@@ -8,8 +8,10 @@ import type {
   AideAuthProviderCapability,
   AideDiscoveredCapability,
   AidePrimeContributionCapability,
+  AidePullRequestAddCommentRequest,
   AidePullRequestBranchLookupRequest,
   AidePullRequestBranchLookupResult,
+  AidePullRequestCommentMutationResult,
   AidePullRequestCommentsRequest,
   AidePullRequestCommentsResult,
   AidePullRequestDiffRequest,
@@ -19,11 +21,15 @@ import type {
   AidePullRequestRemoteMatch,
   AidePullRequestRepositoryMatch,
   AidePullRequestRepositoryRef,
+  AidePullRequestReplyCommentRequest,
   AidePullRequestUrlMatch,
   AidePullRequestViewRequest,
   AidePullRequestViewResult,
 } from './plugin-descriptor.js';
 import {
+  addPullRequestCommentForRemote,
+  addPullRequestCommentForRepository,
+  addPullRequestCommentForUrl,
   findPullRequestForBranchContextForRemote,
   findPullRequestForBranchContextForRepository,
   findPullRequestForBranchForRemote,
@@ -42,6 +48,9 @@ import {
   listPullRequestCommentsForUrl,
   listPullRequestsForRemote,
   listPullRequestsForRepository,
+  replyToPullRequestCommentForRemote,
+  replyToPullRequestCommentForRepository,
+  replyToPullRequestCommentForUrl,
   type PullRequestProviderOperationInvocationError,
   type PullRequestProviderOperationContext,
   resolvePullRequestProviderForRemote,
@@ -187,6 +196,54 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentsResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly addPullRequestCommentForRemote: (
+    remoteUrl: string,
+    request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestCommentMutationResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly addPullRequestCommentForRepository: (
+    repository: AidePullRequestRepositoryRef,
+    request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestCommentMutationResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly addPullRequestCommentForUrl: (
+    url: string,
+    request: Omit<AidePullRequestAddCommentRequest, 'match' | 'pullRequest'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestCommentMutationResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly replyToPullRequestCommentForRemote: (
+    remoteUrl: string,
+    request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestCommentMutationResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly replyToPullRequestCommentForRepository: (
+    repository: AidePullRequestRepositoryRef,
+    request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestCommentMutationResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly replyToPullRequestCommentForUrl: (
+    url: string,
+    request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'pullRequest'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestCommentMutationResult,
     PullRequestProviderOperationInvocationError
   >;
   readonly findPullRequestForBranchForRemote: (
@@ -438,6 +495,70 @@ export function createAideHostServices(
       url: string,
       options: PullRequestProviderOperationOptions = {}
     ) => listPullRequestCommentsForUrl(pullRequestProviders, url, options),
+    addPullRequestCommentForRemote: (
+      remoteUrl: string,
+      request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      addPullRequestCommentForRemote(
+        pullRequestProviders,
+        remoteUrl,
+        request,
+        options
+      ),
+    addPullRequestCommentForRepository: (
+      repository: AidePullRequestRepositoryRef,
+      request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      addPullRequestCommentForRepository(
+        pullRequestProviders,
+        repository,
+        request,
+        options
+      ),
+    addPullRequestCommentForUrl: (
+      url: string,
+      request: Omit<AidePullRequestAddCommentRequest, 'match' | 'pullRequest'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      addPullRequestCommentForUrl(pullRequestProviders, url, request, options),
+    replyToPullRequestCommentForRemote: (
+      remoteUrl: string,
+      request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      replyToPullRequestCommentForRemote(
+        pullRequestProviders,
+        remoteUrl,
+        request,
+        options
+      ),
+    replyToPullRequestCommentForRepository: (
+      repository: AidePullRequestRepositoryRef,
+      request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      replyToPullRequestCommentForRepository(
+        pullRequestProviders,
+        repository,
+        request,
+        options
+      ),
+    replyToPullRequestCommentForUrl: (
+      url: string,
+      request: Omit<
+        AidePullRequestReplyCommentRequest,
+        'match' | 'pullRequest'
+      >,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      replyToPullRequestCommentForUrl(
+        pullRequestProviders,
+        url,
+        request,
+        options
+      ),
     findPullRequestForBranchForRemote: (
       remoteUrl: string,
       request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,

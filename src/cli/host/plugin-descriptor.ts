@@ -413,6 +413,35 @@ export interface AidePullRequestCommentsResult {
   readonly threads: readonly AidePullRequestCommentThread[];
 }
 
+export interface AidePullRequestCommentPosition {
+  readonly filePath: string;
+  readonly lineNumber: number;
+  readonly endLineNumber?: number;
+}
+
+export interface AidePullRequestAddCommentRequest {
+  readonly match: AidePullRequestProviderMatch;
+  readonly pullRequest: AidePullRequestRef;
+  readonly body: string;
+  readonly position?: AidePullRequestCommentPosition;
+}
+
+export interface AidePullRequestReplyCommentRequest {
+  readonly match: AidePullRequestProviderMatch;
+  readonly pullRequest: AidePullRequestRef;
+  readonly threadId: number;
+  readonly body: string;
+  readonly parentCommentId?: number;
+}
+
+export interface AidePullRequestCommentMutationResult {
+  readonly repository: AidePullRequestRepositoryRef;
+  readonly repositoryLabel?: string;
+  readonly pullRequest: AidePullRequestRef;
+  readonly comment: AidePullRequestComment;
+  readonly thread?: AidePullRequestCommentThread;
+}
+
 export interface AidePullRequestBranchLookupRequest {
   readonly match: AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch;
   readonly branch: string;
@@ -435,6 +464,12 @@ export interface AidePullRequestProviderOperations {
   readonly listPullRequestComments?: (
     request: AidePullRequestCommentsRequest
   ) => Effect.Effect<AidePullRequestCommentsResult, unknown, never>;
+  readonly addPullRequestComment?: (
+    request: AidePullRequestAddCommentRequest
+  ) => Effect.Effect<AidePullRequestCommentMutationResult, unknown, never>;
+  readonly replyToPullRequestComment?: (
+    request: AidePullRequestReplyCommentRequest
+  ) => Effect.Effect<AidePullRequestCommentMutationResult, unknown, never>;
   readonly findPullRequestForBranch?: (
     request: AidePullRequestBranchLookupRequest
   ) => Effect.Effect<AidePullRequestBranchLookupResult, unknown, never>;

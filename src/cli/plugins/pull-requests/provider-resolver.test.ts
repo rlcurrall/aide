@@ -20,8 +20,16 @@ import { createBuiltinCommandRegistry } from '@cli/plugins/builtin.js';
 import { createGitHubPlugin } from '@cli/plugins/github/plugin.js';
 import type { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import type { GitHubClient } from '@lib/github-client.js';
-import type { GitHubPullRequest } from '@lib/github-types.js';
-import type { AzureDevOpsPullRequest } from '@lib/types.js';
+import type {
+  GitHubIssueComment,
+  GitHubPullRequest,
+  GitHubReviewComment,
+} from '@lib/github-types.js';
+import type {
+  AzureDevOpsCreateCommentResponse,
+  AzureDevOpsPullRequest,
+  CreateThreadResponse,
+} from '@lib/types.js';
 
 import {
   platformContextFromPullRequestProvider,
@@ -36,6 +44,9 @@ import {
   PullRequestProviderInvocationError,
   UnsupportedPullRequestProviderOperationError,
   UnsupportedPullRequestProviderError,
+  addPullRequestCommentForRemote,
+  addPullRequestCommentForRepository,
+  addPullRequestCommentForUrl,
   findPullRequestForBranchForRemote,
   findPullRequestForBranchForRepository,
   getPullRequestContextForRemote,
@@ -50,6 +61,9 @@ import {
   listPullRequestCommentsForUrl,
   listPullRequestsForRemote,
   listPullRequestsForRepository,
+  replyToPullRequestCommentForRemote,
+  replyToPullRequestCommentForRepository,
+  replyToPullRequestCommentForUrl,
   resolvePullRequestProviderForRemote,
   resolvePullRequestProviderForRepository,
   resolvePullRequestProviderForUrl,
@@ -138,6 +152,88 @@ function fakeAzureDevOpsPullRequest(
       },
     },
     ...prOverrides,
+  };
+}
+
+function fakeGitHubIssueComment(
+  overrides: Partial<GitHubIssueComment> = {}
+): GitHubIssueComment {
+  return {
+    id: 9001,
+    user: { login: 'octocat', id: 1 },
+    body: 'comment body',
+    created_at: '2026-01-03T00:00:00Z',
+    updated_at: '2026-01-03T00:00:00Z',
+    html_url: 'https://github.com/acme/widgets/pull/7#issuecomment-9001',
+    ...overrides,
+  };
+}
+
+function fakeGitHubReviewComment(
+  overrides: Partial<GitHubReviewComment> = {}
+): GitHubReviewComment {
+  return {
+    id: 9002,
+    user: { login: 'octocat', id: 1 },
+    body: 'review body',
+    path: 'src/index.ts',
+    line: 12,
+    original_line: 12,
+    start_line: null,
+    side: 'RIGHT',
+    created_at: '2026-01-03T00:00:00Z',
+    updated_at: '2026-01-03T00:00:00Z',
+    html_url: 'https://github.com/acme/widgets/pull/7#discussion_r9002',
+    commit_id: 'abc',
+    ...overrides,
+  };
+}
+
+function fakeAzureDevOpsThread(
+  overrides: Partial<CreateThreadResponse> = {}
+): CreateThreadResponse {
+  return {
+    id: 77,
+    publishedDate: '2026-01-03T00:00:00Z',
+    lastUpdatedDate: '2026-01-03T00:00:00Z',
+    status: 'active',
+    comments: [
+      {
+        id: 11,
+        parentCommentId: 0,
+        author: {
+          displayName: 'Ada Lovelace',
+          uniqueName: 'ada@example.com',
+          id: 'ada',
+        },
+        content: 'thread comment',
+        publishedDate: '2026-01-03T00:00:00Z',
+        lastUpdatedDate: '2026-01-03T00:00:00Z',
+        lastContentUpdatedDate: '2026-01-03T00:00:00Z',
+        commentType: 'text',
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function fakeAzureDevOpsCreatedComment(
+  overrides: Partial<AzureDevOpsCreateCommentResponse> = {}
+): AzureDevOpsCreateCommentResponse {
+  return {
+    id: 12,
+    parentCommentId: 0,
+    author: {
+      displayName: 'Ada Lovelace',
+      uniqueName: 'ada@example.com',
+      id: 'ada',
+    },
+    content: 'reply comment',
+    publishedDate: '2026-01-03T00:00:00Z',
+    lastUpdatedDate: '2026-01-03T00:00:00Z',
+    lastContentUpdatedDate: '2026-01-03T00:00:00Z',
+    commentType: 'text',
+    ...overrides,
   };
 }
 
@@ -2779,6 +2875,562 @@ describe('pull request provider comments operations', () => {
     expect(error.reason).toBe(
       'pull request id does not match selected pull request'
     );
+  });
+});
+
+describe('pull request provider comment mutation operations', () => {
+  test('binds comment mutations to the provider selected for pull request metadata', async () => {
+    const calls: string[] = [];
+    const primaryProvider = fakeProvider('primary-plugin', 'primary', 200);
+    const fallbackProvider = fakeProvider('fallback-plugin', 'fallback', 100);
+
+    const context = await Effect.runPromise(
+      getPullRequestContextForRemote(
+        [
+          {
+            ...primaryProvider,
+            capability: {
+              ...primaryProvider.capability,
+              operations: {
+                getPullRequest: () => {
+                  calls.push('primary:getPullRequest');
+                  return Effect.succeed({
+                    repository: externalRepository('primary'),
+                    pullRequest: {
+                      id: 5,
+                      title: 'Primary provider PR',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Ada Lovelace' },
+                    },
+                  });
+                },
+              },
+            },
+          },
+          {
+            ...fallbackProvider,
+            capability: {
+              ...fallbackProvider.capability,
+              operations: {
+                addPullRequestComment: () => {
+                  calls.push('fallback:addPullRequestComment');
+                  return Effect.succeed({
+                    repository: externalRepository('fallback'),
+                    pullRequest: { number: 5 },
+                    comment: {
+                      id: 10,
+                      kind: 'issue',
+                      author: { displayName: 'Grace Hopper' },
+                      body: 'Wrong provider',
+                      createdAt: '2026-01-01T00:00:00Z',
+                    },
+                  });
+                },
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 5 } }
+      )
+    );
+
+    const error = await Effect.runPromise(
+      context
+        .addPullRequestComment({
+          pullRequest: { number: 5 },
+          body: 'hello',
+        })
+        .pipe(Effect.flip)
+    );
+
+    expect(context.provider.providerId).toBe('primary');
+    expect(error).toBeInstanceOf(UnsupportedPullRequestProviderOperationError);
+    if (!(error instanceof UnsupportedPullRequestProviderOperationError)) {
+      throw new Error('Expected unsupported provider operation error');
+    }
+    expect(error.providerId).toBe('primary');
+    expect(error.operation).toBe('addPullRequestComment');
+    expect(calls).toEqual(['primary:getPullRequest']);
+  });
+
+  test('adds a pull request comment for a repository ref through a fake provider', async () => {
+    const calls: unknown[] = [];
+    const repository = externalRepository('gitlab', { projectId: 10 });
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+
+    const result = await Effect.runPromise(
+      addPullRequestCommentForRepository(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                addPullRequestComment: (request) => {
+                  calls.push(request);
+                  return Effect.succeed({
+                    repository,
+                    repositoryLabel: 'gitlab/acme/widgets',
+                    pullRequest: { number: 6 },
+                    comment: {
+                      id: 10,
+                      kind: 'review',
+                      author: { displayName: 'Ada Lovelace' },
+                      body: request.body,
+                      createdAt: '2026-01-01T00:00:00Z',
+                      filePath: request.position?.filePath,
+                      lineNumber: request.position?.lineNumber,
+                    },
+                  });
+                },
+              },
+            },
+          },
+        ],
+        repository,
+        {
+          pullRequest: { number: 6 },
+          body: 'Use const',
+          position: { filePath: 'src/index.ts', lineNumber: 12 },
+        }
+      )
+    );
+
+    expect(calls).toEqual([
+      {
+        match: { source: 'repository-ref', repository },
+        pullRequest: { number: 6 },
+        body: 'Use const',
+        position: { filePath: 'src/index.ts', lineNumber: 12 },
+      },
+    ]);
+    expect(result.comment).toMatchObject({
+      id: 10,
+      kind: 'review',
+      body: 'Use const',
+      filePath: 'src/index.ts',
+      lineNumber: 12,
+    });
+  });
+
+  test('adds a GitHub review comment through a provider-owned operation', async () => {
+    const calls: unknown[] = [];
+    const plugin = createGitHubPlugin({
+      createClient: async ({ host }) => {
+        calls.push(host);
+        return {
+          listPullRequests: async () => [],
+          getPullRequest: async (owner, repo, number) => {
+            calls.push({ getPullRequest: { owner, repo, number } });
+            return fakeGitHubPullRequest({
+              number,
+              title: 'GitHub comment',
+              head: { ref: 'feature', sha: 'head-sha', label: 'octo:feature' },
+            });
+          },
+          getPullRequestFiles: async () => [],
+          getIssueComments: async () => [],
+          getReviewComments: async () => [],
+          createIssueComment: async () => fakeGitHubIssueComment(),
+          createReviewComment: async (owner, repo, number, body, options) => {
+            calls.push({
+              createReviewComment: { owner, repo, number, body, options },
+            });
+            return fakeGitHubReviewComment({
+              id: 22,
+              body,
+              path: options.path,
+              line: options.line,
+              commit_id: options.commit_id,
+            });
+          },
+          replyToReviewComment: async () => fakeGitHubReviewComment(),
+        };
+      },
+    });
+
+    const result = await Effect.runPromise(
+      addPullRequestCommentForRemote(
+        [
+          {
+            pluginId: plugin.id,
+            capability: plugin.capabilities!.pullRequestProvider!,
+          },
+        ],
+        'git@github.com:acme/widgets.git',
+        {
+          pullRequest: { number: 12 },
+          body: 'Use const',
+          position: {
+            filePath: '/src/index.ts',
+            lineNumber: 10,
+            endLineNumber: 12,
+          },
+        }
+      )
+    );
+
+    expect(calls).toEqual([
+      'github.com',
+      { getPullRequest: { owner: 'acme', repo: 'widgets', number: 12 } },
+      {
+        createReviewComment: {
+          owner: 'acme',
+          repo: 'widgets',
+          number: 12,
+          body: 'Use const',
+          options: {
+            path: 'src/index.ts',
+            line: 12,
+            commit_id: 'head-sha',
+            start_line: 10,
+          },
+        },
+      },
+    ]);
+    expect(result.comment).toMatchObject({
+      id: 22,
+      kind: 'review',
+      body: 'Use const',
+      filePath: 'src/index.ts',
+      lineNumber: 12,
+    });
+    expect(result.thread).toMatchObject({
+      id: 22,
+      rootComment: { id: 22 },
+    });
+  });
+
+  test('adds a general pull request comment from a PR URL', async () => {
+    const calls: unknown[] = [];
+    const plugin = createGitHubPlugin({
+      createClient: async () => ({
+        listPullRequests: async () => [],
+        getPullRequest: async () =>
+          fakeGitHubPullRequest({ number: 1, title: 'Unused' }),
+        getPullRequestFiles: async () => [],
+        getIssueComments: async () => [],
+        getReviewComments: async () => [],
+        createIssueComment: async (owner, repo, number, body) => {
+          calls.push({ owner, repo, number, body });
+          return fakeGitHubIssueComment({ id: 33, body });
+        },
+        createReviewComment: async () => fakeGitHubReviewComment(),
+        replyToReviewComment: async () => fakeGitHubReviewComment(),
+      }),
+    });
+
+    const result = await Effect.runPromise(
+      addPullRequestCommentForUrl(
+        [
+          {
+            pluginId: plugin.id,
+            capability: plugin.capabilities!.pullRequestProvider!,
+          },
+        ],
+        'https://github.com/acme/widgets/pull/12',
+        { body: 'General comment' }
+      )
+    );
+
+    expect(calls).toEqual([
+      { owner: 'acme', repo: 'widgets', number: 12, body: 'General comment' },
+    ]);
+    expect(result.comment).toMatchObject({
+      id: 33,
+      kind: 'issue',
+      body: 'General comment',
+    });
+    expect(result.thread).toMatchObject({ id: 'issue-33' });
+  });
+
+  test('replies to an Azure DevOps pull request comment through a URL match', async () => {
+    const calls: unknown[] = [];
+    const plugin = createAzureDevOpsPlugin({
+      createClient: async () => ({
+        config: {
+          orgUrl: 'https://dev.azure.com/acme',
+          pat: 'token',
+          authMethod: 'pat',
+        },
+        client: {
+          listPullRequests: async () => ({ value: [] }),
+          getPullRequest: async () =>
+            fakeAzureDevOpsPullRequest({ pullRequestId: 42, title: 'Unused' }),
+          getPullRequestLabels: async () => ({ value: [] }),
+          getAllPullRequestChanges: async () => [],
+          getAllComments: async () => [],
+          createPullRequestThread: async () => fakeAzureDevOpsThread(),
+          createThreadComment: async (
+            project,
+            repo,
+            number,
+            threadId,
+            content,
+            parentCommentId
+          ) => {
+            calls.push({
+              project,
+              repo,
+              number,
+              threadId,
+              content,
+              parentCommentId,
+            });
+            return fakeAzureDevOpsCreatedComment({
+              id: 44,
+              parentCommentId: parentCommentId ?? 0,
+              content,
+            });
+          },
+        },
+      }),
+    });
+
+    const result = await Effect.runPromise(
+      replyToPullRequestCommentForUrl(
+        [
+          {
+            pluginId: plugin.id,
+            capability: plugin.capabilities!.pullRequestProvider!,
+          },
+        ],
+        'https://dev.azure.com/acme/Platform/_git/widgets/pullrequest/42',
+        {
+          threadId: 10,
+          parentCommentId: 2,
+          body: 'Fixed',
+        }
+      )
+    );
+
+    expect(calls).toEqual([
+      {
+        project: 'Platform',
+        repo: 'widgets',
+        number: 42,
+        threadId: 10,
+        content: 'Fixed',
+        parentCommentId: 2,
+      },
+    ]);
+    expect(result.comment).toMatchObject({
+      id: 44,
+      kind: 'reply',
+      body: 'Fixed',
+      parentId: 2,
+    });
+    expect(result.thread).toMatchObject({
+      id: 10,
+      replies: [{ id: 44 }],
+    });
+  });
+
+  test('rejects providers that do not implement comment mutations', async () => {
+    const addError = await Effect.runPromise(
+      addPullRequestCommentForRemote(
+        [fakeProvider('gitlab-plugin', 'gitlab', 100)],
+        'matched-remote',
+        { pullRequest: { number: 1 }, body: 'hello' }
+      ).pipe(Effect.flip)
+    );
+    const replyError = await Effect.runPromise(
+      replyToPullRequestCommentForRepository(
+        [fakeProvider('gitlab-plugin', 'gitlab', 100)],
+        externalRepository('gitlab'),
+        {
+          pullRequest: { number: 1 },
+          threadId: 2,
+          body: 'hello',
+        }
+      ).pipe(Effect.flip)
+    );
+
+    expect(addError).toBeInstanceOf(
+      UnsupportedPullRequestProviderOperationError
+    );
+    expect(replyError).toBeInstanceOf(
+      UnsupportedPullRequestProviderOperationError
+    );
+    if (!(addError instanceof UnsupportedPullRequestProviderOperationError)) {
+      throw new Error('Expected unsupported provider operation error');
+    }
+    if (!(replyError instanceof UnsupportedPullRequestProviderOperationError)) {
+      throw new Error('Expected unsupported provider operation error');
+    }
+    expect(addError.operation).toBe('addPullRequestComment');
+    expect(replyError.operation).toBe('replyToPullRequestComment');
+  });
+
+  test('rejects comment mutations that do not return Effects', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+    const error = await Effect.runPromise(
+      replyToPullRequestCommentForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                replyToPullRequestComment: () => ({}) as never,
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        {
+          pullRequest: { number: 1 },
+          threadId: 2,
+          body: 'hello',
+        }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.operation).toBe('replyToPullRequestComment');
+    expect(error.reason).toBe('operation must return an Effect');
+  });
+
+  test('rejects malformed mutation results', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+    const error = await Effect.runPromise(
+      addPullRequestCommentForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                addPullRequestComment: () =>
+                  Effect.succeed({
+                    repository: externalRepository('gitlab'),
+                    pullRequest: { number: 1 },
+                    comment: {
+                      id: 0,
+                      kind: 'issue',
+                      author: { displayName: 'Ada Lovelace' },
+                      body: 'Invalid',
+                      createdAt: '2026-01-01T00:00:00Z',
+                    },
+                  }) as never,
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 1 }, body: 'hello' }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.operation).toBe('addPullRequestComment');
+    expect(error.reason).toBe('invalid comment');
+  });
+
+  test('rejects mutation results for a different pull request id', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+    const error = await Effect.runPromise(
+      addPullRequestCommentForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                addPullRequestComment: () =>
+                  Effect.succeed({
+                    repository: externalRepository('gitlab'),
+                    pullRequest: { number: 2 },
+                    comment: {
+                      id: 1,
+                      kind: 'issue',
+                      author: { displayName: 'Ada Lovelace' },
+                      body: 'Wrong PR',
+                      createdAt: '2026-01-01T00:00:00Z',
+                    },
+                  }),
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 1 }, body: 'hello' }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.reason).toBe(
+      'pull request id does not match selected pull request'
+    );
+  });
+
+  test('rejects reply mutation results for a different thread id', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+    const error = await Effect.runPromise(
+      replyToPullRequestCommentForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                replyToPullRequestComment: () =>
+                  Effect.succeed({
+                    repository: externalRepository('gitlab'),
+                    pullRequest: { number: 1 },
+                    comment: {
+                      id: 1,
+                      kind: 'reply',
+                      author: { displayName: 'Ada Lovelace' },
+                      body: 'Wrong thread',
+                      createdAt: '2026-01-01T00:00:00Z',
+                    },
+                    thread: {
+                      id: 99,
+                      replies: [
+                        {
+                          id: 1,
+                          kind: 'reply',
+                          author: { displayName: 'Ada Lovelace' },
+                          body: 'Wrong thread',
+                          createdAt: '2026-01-01T00:00:00Z',
+                        },
+                      ],
+                    },
+                  }),
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 1 }, threadId: 2, body: 'hello' }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.reason).toBe('thread id does not match selected thread');
   });
 });
 
