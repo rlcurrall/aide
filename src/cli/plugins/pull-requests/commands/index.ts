@@ -5,11 +5,11 @@
  */
 
 import type { CommandModule } from 'yargs';
-import commentsCommandModule from '@cli/commands/pr/comments.js';
 import prCommentCommandModule from '@cli/commands/pr/pr-comment.js';
 import prCreateCommandModule from '@cli/commands/pr/pr-create.js';
 import prReplyCommandModule from '@cli/commands/pr/pr-reply.js';
 import prUpdateCommandModule from '@cli/commands/pr/pr-update.js';
+import commentsCommandModule from './comments.js';
 import diffCommandModule from './diff.js';
 import listCommandModule from './list.js';
 import viewCommandModule from './view.js';

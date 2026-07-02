@@ -365,6 +365,54 @@ export interface AidePullRequestDiffResult extends AidePullRequestViewResult {
   readonly files: readonly AidePullRequestDiffFile[];
 }
 
+export type AidePullRequestCommentKind =
+  | 'issue'
+  | 'review'
+  | 'reply'
+  | 'system'
+  | 'unknown';
+
+export interface AidePullRequestCommentAuthor {
+  readonly displayName: string;
+  readonly username?: string;
+  readonly email?: string;
+}
+
+export interface AidePullRequestComment {
+  readonly id: number;
+  readonly kind: AidePullRequestCommentKind;
+  readonly author: AidePullRequestCommentAuthor;
+  readonly body: string;
+  readonly createdAt: string;
+  readonly updatedAt?: string;
+  readonly url?: string;
+  readonly filePath?: string;
+  readonly lineNumber?: number;
+  readonly parentId?: number;
+  readonly providerType?: string;
+}
+
+export interface AidePullRequestCommentThread {
+  readonly id: number | string;
+  readonly status?: string;
+  readonly filePath?: string;
+  readonly lineNumber?: number;
+  readonly rootComment?: AidePullRequestComment;
+  readonly replies: readonly AidePullRequestComment[];
+}
+
+export interface AidePullRequestCommentsRequest {
+  readonly match: AidePullRequestProviderMatch;
+  readonly pullRequest: AidePullRequestRef;
+}
+
+export interface AidePullRequestCommentsResult {
+  readonly repository: AidePullRequestRepositoryRef;
+  readonly repositoryLabel?: string;
+  readonly pullRequest: AidePullRequestRef;
+  readonly threads: readonly AidePullRequestCommentThread[];
+}
+
 export interface AidePullRequestBranchLookupRequest {
   readonly match: AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch;
   readonly branch: string;
@@ -384,6 +432,9 @@ export interface AidePullRequestProviderOperations {
   readonly getPullRequestDiff?: (
     request: AidePullRequestDiffRequest
   ) => Effect.Effect<AidePullRequestDiffResult, unknown, never>;
+  readonly listPullRequestComments?: (
+    request: AidePullRequestCommentsRequest
+  ) => Effect.Effect<AidePullRequestCommentsResult, unknown, never>;
   readonly findPullRequestForBranch?: (
     request: AidePullRequestBranchLookupRequest
   ) => Effect.Effect<AidePullRequestBranchLookupResult, unknown, never>;

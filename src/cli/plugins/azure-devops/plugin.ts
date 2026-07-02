@@ -7,6 +7,11 @@ import {
   type AideAuthLoginRequest,
   type AidePullRequestBranchLookupRequest,
   type AidePullRequestBranchLookupResult,
+  type AidePullRequestComment,
+  type AidePullRequestCommentKind,
+  type AidePullRequestCommentThread,
+  type AidePullRequestCommentsRequest,
+  type AidePullRequestCommentsResult,
   type AidePullRequestDiffFileStatus,
   type AidePullRequestDiffRequest,
   type AidePullRequestDiffResult,
@@ -30,6 +35,7 @@ import type {
   AzureDevOpsChangeType,
   AzureDevOpsPRChange,
   AzureDevOpsPullRequest,
+  AdoFlattenedComment,
 } from '@lib/types.js';
 import {
   StoredAdoSchema,
@@ -52,6 +58,7 @@ type AzureDevOpsPullRequestClient = Pick<
   | 'getPullRequest'
   | 'getPullRequestLabels'
   | 'getAllPullRequestChanges'
+  | 'getAllComments'
 >;
 type CreateAzureDevOpsClient = () => Promise<{
   readonly client: AzureDevOpsPullRequestClient;
@@ -359,6 +366,42 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
       catch: (error) => error,
     });
 
+  const listPullRequestComments = (
+    request: AidePullRequestCommentsRequest
+  ): Effect.Effect<AidePullRequestCommentsResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot list pull request comments for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient();
+        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
+        if (configuredOrg !== null && configuredOrg !== repository.org) {
+          throw new Error(
+            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
+          );
+        }
+
+        const comments = await client.getAllComments(
+          repository.project,
+          repository.repo,
+          request.pullRequest.number
+        );
+
+        return {
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: { number: request.pullRequest.number },
+          threads: azureDevOpsCommentsToThreads(comments),
+        };
+      },
+      catch: (error) => error,
+    });
+
   const findPullRequestForBranch = (
     request: AidePullRequestBranchLookupRequest
   ): Effect.Effect<AidePullRequestBranchLookupResult, unknown, never> =>
@@ -520,6 +563,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           listPullRequests,
           getPullRequest,
           getPullRequestDiff,
+          listPullRequestComments,
           findPullRequestForBranch,
         },
       },
@@ -604,6 +648,126 @@ function azureDevOpsPullRequestChangeToDiffFile(entry: AzureDevOpsPRChange) {
     providerStatus: entry.changeType,
     ...(previousPath === undefined ? {} : { previousPath }),
   } as const;
+}
+
+function azureDevOpsCommentKind(
+  comment: AdoFlattenedComment
+): AidePullRequestCommentKind {
+  if (comment.comment.commentType === 'system') {
+    return 'system';
+  }
+  if (comment.comment.parentCommentId > 0) {
+    return 'reply';
+  }
+  return comment.filePath === undefined ? 'issue' : 'review';
+}
+
+function azureDevOpsCommentToComment(
+  comment: AdoFlattenedComment
+): AidePullRequestComment {
+  return {
+    id: comment.comment.id,
+    kind: azureDevOpsCommentKind(comment),
+    author: {
+      displayName: comment.comment.author.displayName,
+      ...(comment.comment.author.uniqueName === undefined
+        ? {}
+        : { email: comment.comment.author.uniqueName }),
+    },
+    body: comment.comment.content ?? '[deleted comment]',
+    createdAt: comment.comment.publishedDate,
+    updatedAt: comment.comment.lastUpdatedDate,
+    ...(comment.filePath === undefined ? {} : { filePath: comment.filePath }),
+    ...(comment.lineNumber === undefined
+      ? {}
+      : { lineNumber: comment.lineNumber }),
+    ...(comment.comment.parentCommentId <= 0
+      ? {}
+      : { parentId: comment.comment.parentCommentId }),
+    providerType: comment.comment.commentType,
+  };
+}
+
+function azureDevOpsCommentsToThreads(
+  comments: readonly AdoFlattenedComment[]
+): readonly AidePullRequestCommentThread[] {
+  const threads = new Map<
+    number,
+    {
+      readonly id: number;
+      readonly status: string;
+      readonly filePath?: string;
+      readonly lineNumber?: number;
+      rootComment?: AidePullRequestComment;
+      replies: AidePullRequestComment[];
+    }
+  >();
+
+  for (const comment of comments) {
+    let thread = threads.get(comment.threadId);
+    if (thread === undefined) {
+      thread = {
+        id: comment.threadId,
+        status: comment.threadStatus,
+        ...(comment.filePath === undefined
+          ? {}
+          : { filePath: comment.filePath }),
+        ...(comment.lineNumber === undefined
+          ? {}
+          : { lineNumber: comment.lineNumber }),
+        replies: [],
+      };
+      threads.set(comment.threadId, thread);
+    }
+
+    const normalized = azureDevOpsCommentToComment(comment);
+    if (comment.comment.parentCommentId === 0) {
+      if (
+        thread.rootComment === undefined ||
+        normalized.id < thread.rootComment.id
+      ) {
+        if (thread.rootComment !== undefined) {
+          thread.replies.push(thread.rootComment);
+        }
+        thread.rootComment = normalized;
+      } else {
+        thread.replies.push(normalized);
+      }
+    } else {
+      thread.replies.push(normalized);
+    }
+  }
+
+  return Object.freeze(
+    [...threads.values()]
+      .map((thread) =>
+        Object.freeze({
+          id: thread.id,
+          status: thread.status,
+          ...(thread.filePath === undefined
+            ? {}
+            : { filePath: thread.filePath }),
+          ...(thread.lineNumber === undefined
+            ? {}
+            : { lineNumber: thread.lineNumber }),
+          ...(thread.rootComment === undefined
+            ? {}
+            : { rootComment: thread.rootComment }),
+          replies: Object.freeze(
+            [...thread.replies].sort((a, b) => a.id - b.id)
+          ),
+        })
+      )
+      .sort((a, b) => latestCommentThreadDate(b) - latestCommentThreadDate(a))
+  );
+}
+
+function latestCommentThreadDate(thread: AidePullRequestCommentThread): number {
+  const dates = [
+    ...(thread.rootComment === undefined ? [] : [thread.rootComment.createdAt]),
+    ...thread.replies.map((reply) => reply.createdAt),
+  ];
+  return Math.max(...dates.map((date) => new Date(date).getTime()));
 }
 
 function azureDevOpsDiffFileStatus(

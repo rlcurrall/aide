@@ -782,6 +782,7 @@ function snapshotPullRequestProviderOperations(
   const listPullRequests = operations.listPullRequests;
   const getPullRequest = operations.getPullRequest;
   const getPullRequestDiff = operations.getPullRequestDiff;
+  const listPullRequestComments = operations.listPullRequestComments;
   const findPullRequestForBranch = operations.findPullRequestForBranch;
   if (
     listPullRequests !== undefined &&
@@ -805,6 +806,14 @@ function snapshotPullRequestProviderOperations(
     );
   }
   if (
+    listPullRequestComments !== undefined &&
+    typeof listPullRequestComments !== 'function'
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' pull request provider '${providerId}' operation 'listPullRequestComments' must be a function`
+    );
+  }
+  if (
     findPullRequestForBranch !== undefined &&
     typeof findPullRequestForBranch !== 'function'
   ) {
@@ -817,6 +826,7 @@ function snapshotPullRequestProviderOperations(
     listPullRequests === undefined &&
     getPullRequest === undefined &&
     getPullRequestDiff === undefined &&
+    listPullRequestComments === undefined &&
     findPullRequestForBranch === undefined
   ) {
     return Object.freeze({});
@@ -840,6 +850,12 @@ function snapshotPullRequestProviderOperations(
       : {
           getPullRequestDiff:
             getPullRequestDiff as AidePullRequestProviderOperations['getPullRequestDiff'],
+        }),
+    ...(listPullRequestComments === undefined
+      ? {}
+      : {
+          listPullRequestComments:
+            listPullRequestComments as AidePullRequestProviderOperations['listPullRequestComments'],
         }),
     ...(findPullRequestForBranch === undefined
       ? {}

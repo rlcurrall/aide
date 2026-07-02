@@ -7,6 +7,10 @@ import {
   type AideAuthLoginRequest,
   type AidePullRequestBranchLookupRequest,
   type AidePullRequestBranchLookupResult,
+  type AidePullRequestComment,
+  type AidePullRequestCommentThread,
+  type AidePullRequestCommentsRequest,
+  type AidePullRequestCommentsResult,
   type AidePullRequestDiffFileStatus,
   type AidePullRequestDiffRequest,
   type AidePullRequestDiffResult,
@@ -26,9 +30,11 @@ import {
 import { isGhCliAvailable } from '@lib/gh-utils.js';
 import { GitHubClient } from '@lib/github-client.js';
 import type {
+  GitHubIssueComment,
   GitHubListPROptions,
   GitHubPRFile,
   GitHubPullRequest,
+  GitHubReviewComment,
 } from '@lib/github-types.js';
 import {
   getGitHubPRStatus,
@@ -48,7 +54,11 @@ import {
 type ProbeGithubConfig = () => Promise<ConfigStatus<GithubConfigValue>>;
 type GitHubPullRequestClient = Pick<
   GitHubClient,
-  'listPullRequests' | 'getPullRequest' | 'getPullRequestFiles'
+  | 'listPullRequests'
+  | 'getPullRequest'
+  | 'getPullRequestFiles'
+  | 'getIssueComments'
+  | 'getReviewComments'
 >;
 type CreateGitHubClient = (options: {
   readonly host: string;
@@ -294,6 +304,42 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
       catch: (error) => error,
     });
 
+  const listPullRequestComments = (
+    request: AidePullRequestCommentsRequest
+  ): Effect.Effect<AidePullRequestCommentsResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'github') {
+          throw new Error(
+            `GitHub provider cannot list pull request comments for '${repository.kind}' repository refs`
+          );
+        }
+
+        const client = await createClient({ host: repository.host });
+        const [issueComments, reviewComments] = await Promise.all([
+          client.getIssueComments(
+            repository.owner,
+            repository.repo,
+            request.pullRequest.number
+          ),
+          client.getReviewComments(
+            repository.owner,
+            repository.repo,
+            request.pullRequest.number
+          ),
+        ]);
+
+        return {
+          repository,
+          repositoryLabel: `${repository.host}/${repository.owner}/${repository.repo}`,
+          pullRequest: { number: request.pullRequest.number },
+          threads: githubCommentsToThreads(issueComments, reviewComments),
+        };
+      },
+      catch: (error) => error,
+    });
+
   const findPullRequestForBranch = (
     request: AidePullRequestBranchLookupRequest
   ): Effect.Effect<AidePullRequestBranchLookupResult, unknown, never> =>
@@ -426,6 +472,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           listPullRequests,
           getPullRequest,
           getPullRequestDiff,
+          listPullRequestComments,
           findPullRequestForBranch,
         },
       },
@@ -507,6 +554,146 @@ function githubPullRequestFileToDiffFile(file: GitHubPRFile) {
       : { previousPath: file.previous_filename }),
     ...(file.patch === undefined ? {} : { patch: file.patch }),
   } as const;
+}
+
+function githubIssueCommentToComment(
+  comment: GitHubIssueComment
+): AidePullRequestComment {
+  return {
+    id: comment.id,
+    kind: 'issue',
+    author: {
+      displayName: comment.user.login,
+      username: comment.user.login,
+    },
+    body: comment.body,
+    createdAt: comment.created_at,
+    updatedAt: comment.updated_at,
+    url: comment.html_url,
+  };
+}
+
+function githubReviewCommentToComment(
+  comment: GitHubReviewComment,
+  kind: 'review' | 'reply'
+): AidePullRequestComment {
+  const lineNumber = comment.line ?? comment.original_line ?? undefined;
+  return {
+    id: comment.id,
+    kind,
+    author: {
+      displayName: comment.user.login,
+      username: comment.user.login,
+    },
+    body: comment.body,
+    createdAt: comment.created_at,
+    updatedAt: comment.updated_at,
+    url: comment.html_url,
+    filePath: comment.path,
+    ...(lineNumber === undefined ? {} : { lineNumber }),
+    ...(comment.in_reply_to_id === undefined
+      ? {}
+      : { parentId: comment.in_reply_to_id }),
+  };
+}
+
+function githubCommentsToThreads(
+  issueComments: readonly GitHubIssueComment[],
+  reviewComments: readonly GitHubReviewComment[]
+): readonly AidePullRequestCommentThread[] {
+  const reviewRoots = new Map<
+    number,
+    {
+      readonly id: number;
+      readonly filePath: string;
+      readonly lineNumber?: number;
+      readonly rootComment: AidePullRequestComment;
+      readonly replies: AidePullRequestComment[];
+    }
+  >();
+  const commentIdToRootId = new Map<number, number>();
+  const replies: GitHubReviewComment[] = [];
+
+  for (const comment of reviewComments) {
+    if (comment.in_reply_to_id !== undefined) {
+      replies.push(comment);
+      continue;
+    }
+
+    const lineNumber = comment.line ?? comment.original_line ?? undefined;
+    const thread = {
+      id: comment.id,
+      filePath: comment.path,
+      ...(lineNumber === undefined ? {} : { lineNumber }),
+      rootComment: githubReviewCommentToComment(comment, 'review'),
+      replies: [],
+    };
+    reviewRoots.set(comment.id, thread);
+    commentIdToRootId.set(comment.id, comment.id);
+  }
+
+  for (const reply of replies) {
+    const parentId = reply.in_reply_to_id;
+    const rootId =
+      parentId === undefined ? undefined : commentIdToRootId.get(parentId);
+    const parentThread =
+      rootId === undefined ? undefined : reviewRoots.get(rootId);
+    if (rootId === undefined || parentThread === undefined) {
+      const lineNumber = reply.line ?? reply.original_line ?? undefined;
+      const orphanThread = {
+        id: reply.id,
+        filePath: reply.path,
+        ...(lineNumber === undefined ? {} : { lineNumber }),
+        rootComment: githubReviewCommentToComment(reply, 'review'),
+        replies: [],
+      };
+      reviewRoots.set(reply.id, orphanThread);
+      commentIdToRootId.set(reply.id, reply.id);
+      continue;
+    }
+
+    parentThread.replies.push(githubReviewCommentToComment(reply, 'reply'));
+    commentIdToRootId.set(reply.id, rootId);
+  }
+
+  const issueThreads = issueComments.map((comment) =>
+    Object.freeze({
+      id: `issue-${comment.id}`,
+      rootComment: githubIssueCommentToComment(comment),
+      replies: Object.freeze([]),
+    })
+  );
+
+  return Object.freeze(
+    [
+      ...[...reviewRoots.values()].map((thread) =>
+        Object.freeze({
+          id: thread.id,
+          filePath: thread.filePath,
+          ...(thread.lineNumber === undefined
+            ? {}
+            : { lineNumber: thread.lineNumber }),
+          rootComment: thread.rootComment,
+          replies: Object.freeze(
+            [...thread.replies].sort(
+              (a, b) =>
+                new Date(a.createdAt).getTime() -
+                new Date(b.createdAt).getTime()
+            )
+          ),
+        })
+      ),
+      ...issueThreads,
+    ].sort((a, b) => latestThreadDate(b) - latestThreadDate(a))
+  );
+}
+
+function latestThreadDate(thread: AidePullRequestCommentThread): number {
+  const dates = [
+    ...(thread.rootComment === undefined ? [] : [thread.rootComment.createdAt]),
+    ...thread.replies.map((reply) => reply.createdAt),
+  ];
+  return Math.max(...dates.map((date) => new Date(date).getTime()));
 }
 
 function githubDiffFileStatus(

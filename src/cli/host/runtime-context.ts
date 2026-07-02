@@ -10,6 +10,8 @@ import type {
   AidePrimeContributionCapability,
   AidePullRequestBranchLookupRequest,
   AidePullRequestBranchLookupResult,
+  AidePullRequestCommentsRequest,
+  AidePullRequestCommentsResult,
   AidePullRequestDiffRequest,
   AidePullRequestDiffResult,
   AidePullRequestListRequest,
@@ -35,6 +37,9 @@ import {
   getPullRequestForRemote,
   getPullRequestForRepository,
   getPullRequestForUrl,
+  listPullRequestCommentsForRemote,
+  listPullRequestCommentsForRepository,
+  listPullRequestCommentsForUrl,
   listPullRequestsForRemote,
   listPullRequestsForRepository,
   type PullRequestProviderOperationInvocationError,
@@ -159,6 +164,29 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestDiffResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly listPullRequestCommentsForRemote: (
+    remoteUrl: string,
+    request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestCommentsResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly listPullRequestCommentsForRepository: (
+    repository: AidePullRequestRepositoryRef,
+    request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestCommentsResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly listPullRequestCommentsForUrl: (
+    url: string,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestCommentsResult,
     PullRequestProviderOperationInvocationError
   >;
   readonly findPullRequestForBranchForRemote: (
@@ -384,6 +412,32 @@ export function createAideHostServices(
       url: string,
       options: PullRequestProviderOperationOptions = {}
     ) => getPullRequestDiffForUrl(pullRequestProviders, url, options),
+    listPullRequestCommentsForRemote: (
+      remoteUrl: string,
+      request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      listPullRequestCommentsForRemote(
+        pullRequestProviders,
+        remoteUrl,
+        request,
+        options
+      ),
+    listPullRequestCommentsForRepository: (
+      repository: AidePullRequestRepositoryRef,
+      request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      listPullRequestCommentsForRepository(
+        pullRequestProviders,
+        repository,
+        request,
+        options
+      ),
+    listPullRequestCommentsForUrl: (
+      url: string,
+      options: PullRequestProviderOperationOptions = {}
+    ) => listPullRequestCommentsForUrl(pullRequestProviders, url, options),
     findPullRequestForBranchForRemote: (
       remoteUrl: string,
       request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,

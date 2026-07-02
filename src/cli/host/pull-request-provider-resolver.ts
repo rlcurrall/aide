@@ -8,6 +8,12 @@ import type {
   AidePullRequestProviderCapability,
   AidePullRequestBranchLookupRequest,
   AidePullRequestBranchLookupResult,
+  AidePullRequestComment,
+  AidePullRequestCommentAuthor,
+  AidePullRequestCommentKind,
+  AidePullRequestCommentThread,
+  AidePullRequestCommentsRequest,
+  AidePullRequestCommentsResult,
   AidePullRequestDiffFile,
   AidePullRequestDiffFileStatus,
   AidePullRequestDiffRequest,
@@ -83,6 +89,16 @@ export interface PullRequestProviderOperationContext<
     options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
   ) => Effect.Effect<
     AidePullRequestDiffResult,
+    | UnsupportedPullRequestProviderOperationError
+    | InvalidPullRequestProviderOperationResultError
+    | PullRequestProviderOperationError
+    | PullRequestProviderOperationTimeoutError
+  >;
+  readonly listPullRequestComments: (
+    request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
+    options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
+  ) => Effect.Effect<
+    AidePullRequestCommentsResult,
     | UnsupportedPullRequestProviderOperationError
     | InvalidPullRequestProviderOperationResultError
     | PullRequestProviderOperationError
@@ -602,6 +618,175 @@ function snapshotPullRequestDiffFile(
   });
 }
 
+function isPullRequestCommentKind(
+  value: unknown
+): value is AidePullRequestCommentKind {
+  return (
+    value === 'issue' ||
+    value === 'review' ||
+    value === 'reply' ||
+    value === 'system' ||
+    value === 'unknown'
+  );
+}
+
+function snapshotPullRequestCommentAuthor(
+  value: unknown
+): AidePullRequestCommentAuthor | null {
+  if (!isRecord(value) || !isNonEmptyString(value.displayName)) {
+    return null;
+  }
+
+  const username = value.username;
+  const email = value.email;
+  if (username !== undefined && typeof username !== 'string') {
+    return null;
+  }
+  if (email !== undefined && typeof email !== 'string') {
+    return null;
+  }
+
+  return Object.freeze({
+    displayName: value.displayName,
+    ...(username === undefined ? {} : { username }),
+    ...(email === undefined ? {} : { email }),
+  });
+}
+
+function snapshotPullRequestComment(
+  value: unknown
+): AidePullRequestComment | null {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== 'number' ||
+    !Number.isSafeInteger(value.id) ||
+    value.id <= 0 ||
+    !isPullRequestCommentKind(value.kind) ||
+    typeof value.body !== 'string' ||
+    !isNonEmptyString(value.createdAt) ||
+    !isValidDateString(value.createdAt)
+  ) {
+    return null;
+  }
+
+  const author = snapshotPullRequestCommentAuthor(value.author);
+  if (author === null) {
+    return null;
+  }
+
+  const updatedAt = value.updatedAt;
+  const url = value.url;
+  const filePath = value.filePath;
+  const lineNumber = value.lineNumber;
+  const parentId = value.parentId;
+  const providerType = value.providerType;
+  if (
+    updatedAt !== undefined &&
+    (typeof updatedAt !== 'string' || !isValidDateString(updatedAt))
+  ) {
+    return null;
+  }
+  if (url !== undefined && typeof url !== 'string') {
+    return null;
+  }
+  if (filePath !== undefined && typeof filePath !== 'string') {
+    return null;
+  }
+  if (lineNumber !== undefined && !isNonNegativeSafeInteger(lineNumber)) {
+    return null;
+  }
+  if (
+    parentId !== undefined &&
+    (typeof parentId !== 'number' ||
+      !Number.isSafeInteger(parentId) ||
+      parentId <= 0)
+  ) {
+    return null;
+  }
+  if (providerType !== undefined && typeof providerType !== 'string') {
+    return null;
+  }
+
+  return Object.freeze({
+    id: value.id,
+    kind: value.kind,
+    author,
+    body: value.body,
+    createdAt: value.createdAt,
+    ...(updatedAt === undefined ? {} : { updatedAt }),
+    ...(url === undefined ? {} : { url }),
+    ...(filePath === undefined ? {} : { filePath }),
+    ...(lineNumber === undefined ? {} : { lineNumber }),
+    ...(parentId === undefined ? {} : { parentId }),
+    ...(providerType === undefined ? {} : { providerType }),
+  });
+}
+
+function snapshotPullRequestCommentThread(
+  value: unknown
+): AidePullRequestCommentThread | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = value.id;
+  if (
+    !(
+      (typeof id === 'number' && Number.isSafeInteger(id) && id > 0) ||
+      isNonEmptyString(id)
+    )
+  ) {
+    return null;
+  }
+
+  const status = value.status;
+  const filePath = value.filePath;
+  const lineNumber = value.lineNumber;
+  const rootComment = value.rootComment;
+  if (status !== undefined && typeof status !== 'string') {
+    return null;
+  }
+  if (filePath !== undefined && typeof filePath !== 'string') {
+    return null;
+  }
+  if (lineNumber !== undefined && !isNonNegativeSafeInteger(lineNumber)) {
+    return null;
+  }
+
+  const root =
+    rootComment === undefined
+      ? undefined
+      : snapshotPullRequestComment(rootComment);
+  if (root === null) {
+    return null;
+  }
+  if (!Array.isArray(value.replies)) {
+    return null;
+  }
+
+  const replies: AidePullRequestComment[] = [];
+  for (const reply of value.replies) {
+    const snapshot = snapshotPullRequestComment(reply);
+    if (snapshot === null) {
+      return null;
+    }
+    replies.push(snapshot);
+  }
+
+  if (root === undefined && replies.length === 0) {
+    return null;
+  }
+
+  return Object.freeze({
+    id,
+    ...(status === undefined ? {} : { status }),
+    ...(filePath === undefined ? {} : { filePath }),
+    ...(lineNumber === undefined ? {} : { lineNumber }),
+    ...(root === undefined ? {} : { rootComment: root }),
+    replies: Object.freeze(replies),
+  });
+}
+
 function validatePullRequestListResult(
   provider: ResolvedPullRequestProviderCandidate<
     AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
@@ -773,6 +958,72 @@ function validatePullRequestDiffResult(
       ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
       pullRequest,
       files: Object.freeze(files),
+    })
+  );
+}
+
+function validatePullRequestCommentsResult(
+  provider: ResolvedPullRequestProviderCandidate,
+  request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
+  result: unknown
+): Effect.Effect<
+  AidePullRequestCommentsResult,
+  InvalidPullRequestProviderOperationResultError
+> {
+  const invalid = (reason: string) =>
+    Effect.fail(
+      new InvalidPullRequestProviderOperationResultError({
+        pluginId: provider.pluginId,
+        providerId: provider.providerId,
+        operation: 'listPullRequestComments',
+        reason,
+      })
+    );
+
+  if (!isRecord(result)) {
+    return invalid('result must be an object');
+  }
+
+  const repository = snapshotRepositoryRef(result.repository);
+  if (repository === null) {
+    return invalid('invalid repository ref');
+  }
+  if (!repositoryRefsMatch(repository, provider.match.repository)) {
+    return invalid('repository ref does not match selected provider match');
+  }
+
+  const repositoryLabel = result.repositoryLabel;
+  if (repositoryLabel !== undefined && typeof repositoryLabel !== 'string') {
+    return invalid('repositoryLabel must be a string');
+  }
+
+  const pullRequest = snapshotPullRequestRef(result.pullRequest);
+  if (pullRequest === null) {
+    return invalid('invalid pull request ref');
+  }
+  if (pullRequest.number !== request.pullRequest.number) {
+    return invalid('pull request id does not match selected pull request');
+  }
+
+  if (!Array.isArray(result.threads)) {
+    return invalid('threads must be an array');
+  }
+
+  const threads: AidePullRequestCommentThread[] = [];
+  for (const thread of result.threads) {
+    const snapshot = snapshotPullRequestCommentThread(thread);
+    if (snapshot === null) {
+      return invalid('invalid comment thread');
+    }
+    threads.push(snapshot);
+  }
+
+  return Effect.succeed(
+    Object.freeze({
+      repository,
+      ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
+      pullRequest,
+      threads: Object.freeze(threads),
     })
   );
 }
@@ -1167,6 +1418,13 @@ function bindProviderOperationContext<
         'operationTimeout'
       > = {}
     ) => getPullRequestDiffWithProvider(provider, request, options),
+    listPullRequestComments: (
+      request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
+      options: Pick<
+        PullRequestProviderOperationOptions,
+        'operationTimeout'
+      > = {}
+    ) => listPullRequestCommentsWithProvider(provider, request, options),
   });
 }
 
@@ -1529,6 +1787,36 @@ export function getPullRequestDiffWithProvider(
   );
 }
 
+export function listPullRequestCommentsWithProvider(
+  provider: ResolvedPullRequestProviderCandidate,
+  request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+): Effect.Effect<
+  AidePullRequestCommentsResult,
+  | UnsupportedPullRequestProviderOperationError
+  | InvalidPullRequestProviderOperationResultError
+  | PullRequestProviderOperationError
+  | PullRequestProviderOperationTimeoutError
+> {
+  const operationRequest = Object.freeze({
+    match: provider.match,
+    pullRequest: Object.freeze({
+      number: request.pullRequest.number,
+    }),
+  });
+  return invokePullRequestProviderOperation(
+    provider,
+    'listPullRequestComments',
+    provider.capability.operations?.listPullRequestComments,
+    operationRequest,
+    options
+  ).pipe(
+    Effect.flatMap((result) =>
+      validatePullRequestCommentsResult(provider, operationRequest, result)
+    )
+  );
+}
+
 export function findPullRequestForBranchWithProvider(
   provider: ResolvedPullRequestProviderCandidate<
     AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
@@ -1851,6 +2139,52 @@ export function getPullRequestDiffForRepository(
   );
 }
 
+export function listPullRequestCommentsForRemote(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  remoteUrl: string,
+  request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestCommentsResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'git-remote',
+    remoteUrl,
+    (provider) => provider.matchRemote(remoteUrl),
+    (provider) =>
+      provider.capability.operations?.listPullRequestComments !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      listPullRequestCommentsWithProvider(provider, request, options)
+    )
+  );
+}
+
+export function listPullRequestCommentsForRepository(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestCommentsResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForRepositoryOperation(
+    providers,
+    repository,
+    (provider) =>
+      provider.capability.operations?.listPullRequestComments !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      listPullRequestCommentsWithProvider(provider, request, options)
+    )
+  );
+}
+
 export function getPullRequestForUrl(
   providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
   url: string,
@@ -1927,6 +2261,33 @@ export function getPullRequestDiffForUrl(
   ).pipe(
     Effect.flatMap((provider) =>
       getPullRequestDiffWithProvider(
+        provider,
+        { pullRequest: provider.match.pullRequest },
+        options
+      )
+    )
+  );
+}
+
+export function listPullRequestCommentsForUrl(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  url: string,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestCommentsResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'pull-request-url',
+    url,
+    (provider) => provider.matchPullRequestUrl(url),
+    (provider) =>
+      provider.capability.operations?.listPullRequestComments !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      listPullRequestCommentsWithProvider(
         provider,
         { pullRequest: provider.match.pullRequest },
         options
