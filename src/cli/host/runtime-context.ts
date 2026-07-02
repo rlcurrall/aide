@@ -14,6 +14,8 @@ import type {
   AidePullRequestCommentMutationResult,
   AidePullRequestCommentsRequest,
   AidePullRequestCommentsResult,
+  AidePullRequestCreateRequest,
+  AidePullRequestCreateResult,
   AidePullRequestDiffRequest,
   AidePullRequestDiffResult,
   AidePullRequestListRequest,
@@ -32,6 +34,8 @@ import {
   addPullRequestCommentForRemote,
   addPullRequestCommentForRepository,
   addPullRequestCommentForUrl,
+  createPullRequestForRemote,
+  createPullRequestForRepository,
   findPullRequestForBranchContextForRemote,
   findPullRequestForBranchContextForRepository,
   findPullRequestForBranchForRemote,
@@ -123,6 +127,22 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestViewResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly createPullRequestForRemote: (
+    remoteUrl: string,
+    request: Omit<AidePullRequestCreateRequest, 'match'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestCreateResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly createPullRequestForRepository: (
+    repository: AidePullRequestRepositoryRef,
+    request: Omit<AidePullRequestCreateRequest, 'match'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestCreateResult,
     PullRequestProviderOperationInvocationError
   >;
   readonly updatePullRequestForRemote: (
@@ -441,6 +461,28 @@ export function createAideHostServices(
       options: PullRequestProviderOperationOptions = {}
     ) =>
       getPullRequestForRepository(
+        pullRequestProviders,
+        repository,
+        request,
+        options
+      ),
+    createPullRequestForRemote: (
+      remoteUrl: string,
+      request: Omit<AidePullRequestCreateRequest, 'match'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      createPullRequestForRemote(
+        pullRequestProviders,
+        remoteUrl,
+        request,
+        options
+      ),
+    createPullRequestForRepository: (
+      repository: AidePullRequestRepositoryRef,
+      request: Omit<AidePullRequestCreateRequest, 'match'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      createPullRequestForRepository(
         pullRequestProviders,
         repository,
         request,

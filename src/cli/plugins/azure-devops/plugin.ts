@@ -14,6 +14,8 @@ import {
   type AidePullRequestCommentThread,
   type AidePullRequestCommentsRequest,
   type AidePullRequestCommentsResult,
+  type AidePullRequestCreateRequest,
+  type AidePullRequestCreateResult,
   type AidePullRequestDiffFileStatus,
   type AidePullRequestDiffRequest,
   type AidePullRequestDiffResult,
@@ -73,6 +75,7 @@ type AzureDevOpsPullRequestClient = Pick<
   Partial<
     Pick<
       AzureDevOpsClient,
+      | 'createPullRequest'
       | 'createPullRequestThread'
       | 'createThreadComment'
       | 'updatePullRequest'
@@ -328,6 +331,98 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
               .filter((label) => label.active)
               .map((label) => label.name)
           ),
+        };
+      },
+      catch: (error) => error,
+    });
+
+  const createPullRequest = (
+    request: AidePullRequestCreateRequest
+  ): Effect.Effect<AidePullRequestCreateResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot create pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient();
+        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
+        if (configuredOrg !== null && configuredOrg !== repository.org) {
+          throw new Error(
+            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
+          );
+        }
+        if (client.createPullRequest === undefined) {
+          throw new Error(
+            'Azure DevOps client does not support creating pull requests'
+          );
+        }
+
+        const warnings: string[] = [];
+        const pr = await client.createPullRequest(
+          repository.project,
+          repository.repo,
+          ensureRefPrefix(request.sourceBranch),
+          ensureRefPrefix(request.targetBranch),
+          request.title,
+          request.description ?? '',
+          { isDraft: request.draft ?? false }
+        );
+
+        const addedLabels: string[] = [];
+        for (const labelName of request.labels ?? []) {
+          if (client.addPullRequestLabel === undefined) {
+            warnings.push(
+              `Failed to add tag '${labelName}': Azure DevOps client does not support labels`
+            );
+            continue;
+          }
+          try {
+            await client.addPullRequestLabel(
+              repository.project,
+              repository.repo,
+              pr.pullRequestId,
+              labelName
+            );
+            addedLabels.push(labelName);
+          } catch (error) {
+            warnings.push(
+              `Failed to add tag '${labelName}': ${errorMessage(error)}`
+            );
+          }
+        }
+
+        let labels = addedLabels;
+        try {
+          const labelsResponse = await client.getPullRequestLabels(
+            repository.project,
+            repository.repo,
+            pr.pullRequestId
+          );
+          labels = labelsResponse.value
+            .filter((label) => label.active)
+            .map((label) => label.name);
+        } catch (error) {
+          warnings.push(`Failed to refresh labels: ${errorMessage(error)}`);
+        }
+        const url = buildPrUrl(
+          {
+            org: repository.org,
+            project: repository.project,
+            repo: repository.repo,
+          },
+          pr.pullRequestId,
+          config.orgUrl
+        );
+
+        return {
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: azureDevOpsPullRequestToViewItem(pr, labels, url),
+          ...(warnings.length === 0 ? {} : { warnings }),
         };
       },
       catch: (error) => error,
@@ -828,6 +923,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
         operations: {
           listPullRequests,
           getPullRequest,
+          createPullRequest,
           updatePullRequest,
           getPullRequestDiff,
           listPullRequestComments,

@@ -55,6 +55,8 @@ export type {
   AidePullRequestCommentThread,
   AidePullRequestCommentsRequest,
   AidePullRequestCommentsResult,
+  AidePullRequestCreateRequest,
+  AidePullRequestCreateResult,
   AidePullRequestDiffFile,
   AidePullRequestDiffFileStatus,
   AidePullRequestDiffRequest,

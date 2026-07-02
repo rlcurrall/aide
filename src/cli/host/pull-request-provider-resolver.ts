@@ -17,6 +17,8 @@ import type {
   AidePullRequestCommentThread,
   AidePullRequestCommentsRequest,
   AidePullRequestCommentsResult,
+  AidePullRequestCreateRequest,
+  AidePullRequestCreateResult,
   AidePullRequestDiffFile,
   AidePullRequestDiffFileStatus,
   AidePullRequestDiffRequest,
@@ -944,6 +946,68 @@ function validatePullRequestViewResult(
       repository,
       ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
       pullRequest,
+    })
+  );
+}
+
+function validatePullRequestCreateResult(
+  provider: ResolvedPullRequestProviderCandidate<
+    AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
+  >,
+  result: unknown
+): Effect.Effect<
+  AidePullRequestCreateResult,
+  InvalidPullRequestProviderOperationResultError
+> {
+  const invalid = (reason: string) =>
+    Effect.fail(
+      new InvalidPullRequestProviderOperationResultError({
+        pluginId: provider.pluginId,
+        providerId: provider.providerId,
+        operation: 'createPullRequest',
+        reason,
+      })
+    );
+
+  if (!isRecord(result)) {
+    return invalid('result must be an object');
+  }
+
+  const repository = snapshotRepositoryRef(result.repository);
+  if (repository === null) {
+    return invalid('invalid repository ref');
+  }
+  if (!repositoryRefsMatch(repository, provider.match.repository)) {
+    return invalid('repository ref does not match selected provider match');
+  }
+
+  const repositoryLabel = result.repositoryLabel;
+  if (repositoryLabel !== undefined && typeof repositoryLabel !== 'string') {
+    return invalid('repositoryLabel must be a string');
+  }
+
+  const pullRequest = snapshotPullRequestViewItem(result.pullRequest);
+  if (pullRequest === null) {
+    return invalid('invalid pull request item');
+  }
+
+  const warnings = result.warnings;
+  if (
+    warnings !== undefined &&
+    (!Array.isArray(warnings) ||
+      warnings.some((warning) => typeof warning !== 'string'))
+  ) {
+    return invalid('warnings must be an array of strings');
+  }
+
+  return Effect.succeed(
+    Object.freeze({
+      repository,
+      ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
+      pullRequest,
+      ...(warnings === undefined
+        ? {}
+        : { warnings: Object.freeze([...warnings]) }),
     })
   );
 }
@@ -1930,6 +1994,45 @@ export function listPullRequestsWithProvider(
   );
 }
 
+export function createPullRequestWithProvider(
+  provider: ResolvedPullRequestProviderCandidate<
+    AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
+  >,
+  request: Omit<AidePullRequestCreateRequest, 'match'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+): Effect.Effect<
+  AidePullRequestCreateResult,
+  | UnsupportedPullRequestProviderOperationError
+  | InvalidPullRequestProviderOperationResultError
+  | PullRequestProviderOperationError
+  | PullRequestProviderOperationTimeoutError
+> {
+  const operationRequest = Object.freeze({
+    match: provider.match,
+    title: request.title,
+    ...(request.description === undefined
+      ? {}
+      : { description: request.description }),
+    sourceBranch: request.sourceBranch,
+    targetBranch: request.targetBranch,
+    ...(request.draft === undefined ? {} : { draft: request.draft }),
+    ...(request.labels === undefined
+      ? {}
+      : { labels: snapshotStringArray(request.labels) }),
+  });
+  return invokePullRequestProviderOperation(
+    provider,
+    'createPullRequest',
+    provider.capability.operations?.createPullRequest,
+    operationRequest,
+    options
+  ).pipe(
+    Effect.flatMap((result) =>
+      validatePullRequestCreateResult(provider, result)
+    )
+  );
+}
+
 export function getPullRequestWithProvider(
   provider: ResolvedPullRequestProviderCandidate,
   request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
@@ -2216,6 +2319,52 @@ export function listPullRequestsForRepository(
   ).pipe(
     Effect.flatMap((provider) =>
       listPullRequestsWithProvider(provider, request, options)
+    )
+  );
+}
+
+export function createPullRequestForRemote(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  remoteUrl: string,
+  request: Omit<AidePullRequestCreateRequest, 'match'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestCreateResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'git-remote',
+    remoteUrl,
+    (provider) => provider.matchRemote(remoteUrl),
+    (provider) =>
+      provider.capability.operations?.createPullRequest !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      createPullRequestWithProvider(provider, request, options)
+    )
+  );
+}
+
+export function createPullRequestForRepository(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  request: Omit<AidePullRequestCreateRequest, 'match'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestCreateResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForRepositoryOperation(
+    providers,
+    repository,
+    (provider) =>
+      provider.capability.operations?.createPullRequest !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      createPullRequestWithProvider(provider, request, options)
     )
   );
 }

@@ -336,6 +336,20 @@ export interface AidePullRequestViewResult {
   readonly pullRequest: AidePullRequestViewItem;
 }
 
+export interface AidePullRequestCreateRequest {
+  readonly match: AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch;
+  readonly title: string;
+  readonly description?: string;
+  readonly sourceBranch: string;
+  readonly targetBranch: string;
+  readonly draft?: boolean;
+  readonly labels?: readonly string[];
+}
+
+export interface AidePullRequestCreateResult extends AidePullRequestViewResult {
+  readonly warnings?: readonly string[];
+}
+
 export type AidePullRequestUpdateStatus = 'active' | 'abandoned';
 
 export interface AidePullRequestUpdateRequest {
@@ -476,6 +490,9 @@ export interface AidePullRequestProviderOperations {
   readonly getPullRequest?: (
     request: AidePullRequestViewRequest
   ) => Effect.Effect<AidePullRequestViewResult, unknown, never>;
+  readonly createPullRequest?: (
+    request: AidePullRequestCreateRequest
+  ) => Effect.Effect<AidePullRequestCreateResult, unknown, never>;
   readonly updatePullRequest?: (
     request: AidePullRequestUpdateRequest
   ) => Effect.Effect<AidePullRequestUpdateResult, unknown, never>;

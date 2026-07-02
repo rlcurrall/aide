@@ -13,6 +13,8 @@ import {
   type AidePullRequestCommentThread,
   type AidePullRequestCommentsRequest,
   type AidePullRequestCommentsResult,
+  type AidePullRequestCreateRequest,
+  type AidePullRequestCreateResult,
   type AidePullRequestDiffFileStatus,
   type AidePullRequestDiffRequest,
   type AidePullRequestDiffResult,
@@ -68,6 +70,7 @@ type GitHubPullRequestClient = Pick<
   Partial<
     Pick<
       GitHubClient,
+      | 'createPullRequest'
       | 'createIssueComment'
       | 'createReviewComment'
       | 'replyToReviewComment'
@@ -281,6 +284,79 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           repository,
           repositoryLabel: `${repository.host}/${repository.owner}/${repository.repo}`,
           pullRequest: githubPullRequestToViewItem(pr),
+        };
+      },
+      catch: (error) => error,
+    });
+
+  const createPullRequest = (
+    request: AidePullRequestCreateRequest
+  ): Effect.Effect<AidePullRequestCreateResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'github') {
+          throw new Error(
+            `GitHub provider cannot create pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const client = await createClient({ host: repository.host });
+        if (client.createPullRequest === undefined) {
+          throw new Error(
+            'GitHub client does not support creating pull requests'
+          );
+        }
+
+        const warnings: string[] = [];
+        const created = await client.createPullRequest(
+          repository.owner,
+          repository.repo,
+          request.sourceBranch,
+          request.targetBranch,
+          request.title,
+          request.description ?? '',
+          { draft: request.draft ?? false }
+        );
+
+        let pr = created;
+        const labels = request.labels ?? [];
+        if (labels.length > 0) {
+          if (client.addLabels === undefined) {
+            warnings.push(
+              'Failed to add labels: GitHub client does not support labels'
+            );
+          } else {
+            try {
+              await client.addLabels(
+                repository.owner,
+                repository.repo,
+                created.number,
+                [...labels]
+              );
+            } catch (error) {
+              warnings.push(`Failed to add labels: ${errorMessage(error)}`);
+            }
+          }
+
+          if (warnings.length === 0) {
+            try {
+              pr = await client.getPullRequest(
+                repository.owner,
+                repository.repo,
+                created.number
+              );
+            } catch (error) {
+              warnings.push(`Failed to refresh labels: ${errorMessage(error)}`);
+            }
+          }
+        }
+
+        return {
+          repository,
+          repositoryLabel: `${repository.host}/${repository.owner}/${repository.repo}`,
+          pullRequest: githubPullRequestToViewItem(pr),
+          ...(warnings.length === 0 ? {} : { warnings }),
         };
       },
       catch: (error) => error,
@@ -731,6 +807,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         operations: {
           listPullRequests,
           getPullRequest,
+          createPullRequest,
           updatePullRequest,
           getPullRequestDiff,
           listPullRequestComments,
