@@ -23,6 +23,8 @@ import type {
   AidePullRequestRepositoryRef,
   AidePullRequestReplyCommentRequest,
   AidePullRequestUrlMatch,
+  AidePullRequestUpdateRequest,
+  AidePullRequestUpdateResult,
   AidePullRequestViewRequest,
   AidePullRequestViewResult,
 } from './plugin-descriptor.js';
@@ -51,6 +53,9 @@ import {
   replyToPullRequestCommentForRemote,
   replyToPullRequestCommentForRepository,
   replyToPullRequestCommentForUrl,
+  updatePullRequestForRemote,
+  updatePullRequestForRepository,
+  updatePullRequestForUrl,
   type PullRequestProviderOperationInvocationError,
   type PullRequestProviderOperationContext,
   resolvePullRequestProviderForRemote,
@@ -118,6 +123,30 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestViewResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly updatePullRequestForRemote: (
+    remoteUrl: string,
+    request: Omit<AidePullRequestUpdateRequest, 'match'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestUpdateResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly updatePullRequestForRepository: (
+    repository: AidePullRequestRepositoryRef,
+    request: Omit<AidePullRequestUpdateRequest, 'match'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestUpdateResult,
+    PullRequestProviderOperationInvocationError
+  >;
+  readonly updatePullRequestForUrl: (
+    url: string,
+    request: Omit<AidePullRequestUpdateRequest, 'match' | 'pullRequest'>,
+    options?: PullRequestProviderOperationOptions
+  ) => Effect.Effect<
+    AidePullRequestUpdateResult,
     PullRequestProviderOperationInvocationError
   >;
   readonly getPullRequestContextForRemote: (
@@ -417,6 +446,33 @@ export function createAideHostServices(
         request,
         options
       ),
+    updatePullRequestForRemote: (
+      remoteUrl: string,
+      request: Omit<AidePullRequestUpdateRequest, 'match'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      updatePullRequestForRemote(
+        pullRequestProviders,
+        remoteUrl,
+        request,
+        options
+      ),
+    updatePullRequestForRepository: (
+      repository: AidePullRequestRepositoryRef,
+      request: Omit<AidePullRequestUpdateRequest, 'match'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) =>
+      updatePullRequestForRepository(
+        pullRequestProviders,
+        repository,
+        request,
+        options
+      ),
+    updatePullRequestForUrl: (
+      url: string,
+      request: Omit<AidePullRequestUpdateRequest, 'match' | 'pullRequest'>,
+      options: PullRequestProviderOperationOptions = {}
+    ) => updatePullRequestForUrl(pullRequestProviders, url, request, options),
     getPullRequestContextForRemote: (
       remoteUrl: string,
       request: Pick<AidePullRequestViewRequest, 'pullRequest'>,

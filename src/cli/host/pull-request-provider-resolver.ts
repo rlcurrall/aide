@@ -34,6 +34,8 @@ import type {
   AidePullRequestRepositoryMatch,
   AidePullRequestRepositoryRef,
   AidePullRequestUrlMatch,
+  AidePullRequestUpdateRequest,
+  AidePullRequestUpdateResult,
   AidePullRequestViewItem,
   AidePullRequestViewRequest,
   AidePullRequestViewResult,
@@ -93,6 +95,16 @@ export interface PullRequestProviderOperationContext<
     options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
   ) => Effect.Effect<
     AidePullRequestDiffResult,
+    | UnsupportedPullRequestProviderOperationError
+    | InvalidPullRequestProviderOperationResultError
+    | PullRequestProviderOperationError
+    | PullRequestProviderOperationTimeoutError
+  >;
+  readonly updatePullRequest: (
+    request: Omit<AidePullRequestUpdateRequest, 'match'>,
+    options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
+  ) => Effect.Effect<
+    AidePullRequestUpdateResult,
     | UnsupportedPullRequestProviderOperationError
     | InvalidPullRequestProviderOperationResultError
     | PullRequestProviderOperationError
@@ -823,6 +835,10 @@ function snapshotPullRequestCommentPosition(
   });
 }
 
+function snapshotStringArray(value: readonly string[]): readonly string[] {
+  return Object.freeze([...value]);
+}
+
 function validatePullRequestListResult(
   provider: ResolvedPullRequestProviderCandidate<
     AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
@@ -929,6 +945,60 @@ function validatePullRequestViewResult(
       ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
       pullRequest,
     })
+  );
+}
+
+function validatePullRequestUpdateResult(
+  provider: ResolvedPullRequestProviderCandidate,
+  request: Pick<AidePullRequestUpdateRequest, 'pullRequest'>,
+  result: unknown
+): Effect.Effect<
+  AidePullRequestUpdateResult,
+  InvalidPullRequestProviderOperationResultError
+> {
+  const invalid = (reason: string) =>
+    Effect.fail(
+      new InvalidPullRequestProviderOperationResultError({
+        pluginId: provider.pluginId,
+        providerId: provider.providerId,
+        operation: 'updatePullRequest',
+        reason,
+      })
+    );
+
+  return validatePullRequestViewResult(provider, request, result).pipe(
+    Effect.flatMap((viewResult) => {
+      if (!isRecord(result)) {
+        return invalid('result must be an object');
+      }
+
+      const warnings = result.warnings;
+      if (
+        warnings !== undefined &&
+        (!Array.isArray(warnings) ||
+          warnings.some((warning) => typeof warning !== 'string'))
+      ) {
+        return invalid('warnings must be an array of strings');
+      }
+
+      return Effect.succeed(
+        Object.freeze({
+          ...viewResult,
+          ...(warnings === undefined
+            ? {}
+            : { warnings: Object.freeze([...warnings]) }),
+        })
+      );
+    }),
+    Effect.mapError(
+      (error) =>
+        new InvalidPullRequestProviderOperationResultError({
+          pluginId: error.pluginId,
+          providerId: error.providerId,
+          operation: 'updatePullRequest',
+          reason: error.reason,
+        })
+    )
   );
 }
 
@@ -1530,6 +1600,13 @@ function bindProviderOperationContext<
         'operationTimeout'
       > = {}
     ) => getPullRequestDiffWithProvider(provider, request, options),
+    updatePullRequest: (
+      request: Omit<AidePullRequestUpdateRequest, 'match'>,
+      options: Pick<
+        PullRequestProviderOperationOptions,
+        'operationTimeout'
+      > = {}
+    ) => updatePullRequestWithProvider(provider, request, options),
     listPullRequestComments: (
       request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
       options: Pick<
@@ -1879,6 +1956,51 @@ export function getPullRequestWithProvider(
   ).pipe(
     Effect.flatMap((result) =>
       validatePullRequestViewResult(provider, operationRequest, result)
+    )
+  );
+}
+
+export function updatePullRequestWithProvider(
+  provider: ResolvedPullRequestProviderCandidate,
+  request: Omit<AidePullRequestUpdateRequest, 'match'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+): Effect.Effect<
+  AidePullRequestUpdateResult,
+  | UnsupportedPullRequestProviderOperationError
+  | InvalidPullRequestProviderOperationResultError
+  | PullRequestProviderOperationError
+  | PullRequestProviderOperationTimeoutError
+> {
+  const operationRequest = Object.freeze({
+    match: provider.match,
+    pullRequest: Object.freeze({
+      number: request.pullRequest.number,
+    }),
+    ...(request.title === undefined ? {} : { title: request.title }),
+    ...(request.description === undefined
+      ? {}
+      : { description: request.description }),
+    ...(request.targetBranch === undefined
+      ? {}
+      : { targetBranch: request.targetBranch }),
+    ...(request.draft === undefined ? {} : { draft: request.draft }),
+    ...(request.status === undefined ? {} : { status: request.status }),
+    ...(request.labelsToAdd === undefined
+      ? {}
+      : { labelsToAdd: snapshotStringArray(request.labelsToAdd) }),
+    ...(request.labelsToRemove === undefined
+      ? {}
+      : { labelsToRemove: snapshotStringArray(request.labelsToRemove) }),
+  });
+  return invokePullRequestProviderOperation(
+    provider,
+    'updatePullRequest',
+    provider.capability.operations?.updatePullRequest,
+    operationRequest,
+    options
+  ).pipe(
+    Effect.flatMap((result) =>
+      validatePullRequestUpdateResult(provider, operationRequest, result)
     )
   );
 }
@@ -2240,6 +2362,83 @@ export function getPullRequestForRepository(
   ).pipe(
     Effect.flatMap((provider) =>
       getPullRequestWithProvider(provider, request, options)
+    )
+  );
+}
+
+export function updatePullRequestForRemote(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  remoteUrl: string,
+  request: Omit<AidePullRequestUpdateRequest, 'match'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestUpdateResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'git-remote',
+    remoteUrl,
+    (provider) => provider.matchRemote(remoteUrl),
+    (provider) =>
+      provider.capability.operations?.updatePullRequest !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      updatePullRequestWithProvider(provider, request, options)
+    )
+  );
+}
+
+export function updatePullRequestForRepository(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  repository: AidePullRequestRepositoryRef,
+  request: Omit<AidePullRequestUpdateRequest, 'match'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestUpdateResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForRepositoryOperation(
+    providers,
+    repository,
+    (provider) =>
+      provider.capability.operations?.updatePullRequest !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      updatePullRequestWithProvider(provider, request, options)
+    )
+  );
+}
+
+export function updatePullRequestForUrl(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  url: string,
+  request: Omit<AidePullRequestUpdateRequest, 'match' | 'pullRequest'>,
+  options: PullRequestProviderOperationOptions = {}
+): Effect.Effect<
+  AidePullRequestUpdateResult,
+  PullRequestProviderOperationInvocationError
+> {
+  return selectProviderCandidateForOperation(
+    providers,
+    'pull-request-url',
+    url,
+    (provider) => provider.matchPullRequestUrl(url),
+    (provider) =>
+      provider.capability.operations?.updatePullRequest !== undefined,
+    options
+  ).pipe(
+    Effect.flatMap((provider) =>
+      updatePullRequestWithProvider(
+        provider,
+        {
+          ...request,
+          pullRequest: provider.match.pullRequest,
+        },
+        options
+      )
     )
   );
 }

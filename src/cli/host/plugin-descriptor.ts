@@ -336,6 +336,24 @@ export interface AidePullRequestViewResult {
   readonly pullRequest: AidePullRequestViewItem;
 }
 
+export type AidePullRequestUpdateStatus = 'active' | 'abandoned';
+
+export interface AidePullRequestUpdateRequest {
+  readonly match: AidePullRequestProviderMatch;
+  readonly pullRequest: AidePullRequestRef;
+  readonly title?: string;
+  readonly description?: string;
+  readonly targetBranch?: string;
+  readonly draft?: boolean;
+  readonly status?: AidePullRequestUpdateStatus;
+  readonly labelsToAdd?: readonly string[];
+  readonly labelsToRemove?: readonly string[];
+}
+
+export interface AidePullRequestUpdateResult extends AidePullRequestViewResult {
+  readonly warnings?: readonly string[];
+}
+
 export type AidePullRequestDiffFileStatus =
   | 'added'
   | 'modified'
@@ -458,6 +476,9 @@ export interface AidePullRequestProviderOperations {
   readonly getPullRequest?: (
     request: AidePullRequestViewRequest
   ) => Effect.Effect<AidePullRequestViewResult, unknown, never>;
+  readonly updatePullRequest?: (
+    request: AidePullRequestUpdateRequest
+  ) => Effect.Effect<AidePullRequestUpdateResult, unknown, never>;
   readonly getPullRequestDiff?: (
     request: AidePullRequestDiffRequest
   ) => Effect.Effect<AidePullRequestDiffResult, unknown, never>;

@@ -20,6 +20,8 @@ import {
   type AidePullRequestListResult,
   type AidePullRequestListItemStatus,
   type AidePullRequestReplyCommentRequest,
+  type AidePullRequestUpdateRequest,
+  type AidePullRequestUpdateResult,
   type AidePullRequestViewRequest,
   type AidePullRequestViewResult,
   type AidePluginAuthStatus,
@@ -66,7 +68,14 @@ type GitHubPullRequestClient = Pick<
   Partial<
     Pick<
       GitHubClient,
-      'createIssueComment' | 'createReviewComment' | 'replyToReviewComment'
+      | 'createIssueComment'
+      | 'createReviewComment'
+      | 'replyToReviewComment'
+      | 'updatePullRequest'
+      | 'publishDraftPR'
+      | 'convertToDraft'
+      | 'addLabels'
+      | 'removeLabel'
     >
   >;
 type CreateGitHubClient = (options: {
@@ -272,6 +281,128 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           repository,
           repositoryLabel: `${repository.host}/${repository.owner}/${repository.repo}`,
           pullRequest: githubPullRequestToViewItem(pr),
+        };
+      },
+      catch: (error) => error,
+    });
+
+  const updatePullRequest = (
+    request: AidePullRequestUpdateRequest
+  ): Effect.Effect<AidePullRequestUpdateResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'github') {
+          throw new Error(
+            `GitHub provider cannot update pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const client = await createClient({ host: repository.host });
+        const warnings: string[] = [];
+        const updates = {
+          ...(request.title === undefined ? {} : { title: request.title }),
+          ...(request.description === undefined
+            ? {}
+            : { body: request.description }),
+          ...(request.targetBranch === undefined
+            ? {}
+            : { base: request.targetBranch }),
+          ...(request.status === undefined
+            ? {}
+            : { state: githubUpdateStatusToState(request.status) }),
+        };
+
+        if (Object.keys(updates).length > 0) {
+          if (client.updatePullRequest === undefined) {
+            throw new Error(
+              'GitHub client does not support updating pull requests'
+            );
+          }
+          await client.updatePullRequest(
+            repository.owner,
+            repository.repo,
+            request.pullRequest.number,
+            updates
+          );
+        }
+
+        if (request.draft === true) {
+          if (client.convertToDraft === undefined) {
+            throw new Error(
+              'GitHub client does not support converting pull requests to draft'
+            );
+          }
+          await client.convertToDraft(
+            repository.owner,
+            repository.repo,
+            request.pullRequest.number
+          );
+        } else if (request.draft === false) {
+          if (client.publishDraftPR === undefined) {
+            throw new Error(
+              'GitHub client does not support publishing draft pull requests'
+            );
+          }
+          await client.publishDraftPR(
+            repository.owner,
+            repository.repo,
+            request.pullRequest.number
+          );
+        }
+
+        const labelsToAdd = request.labelsToAdd ?? [];
+        if (labelsToAdd.length > 0) {
+          if (client.addLabels === undefined) {
+            warnings.push(
+              'Failed to add labels: GitHub client does not support labels'
+            );
+          } else {
+            try {
+              await client.addLabels(
+                repository.owner,
+                repository.repo,
+                request.pullRequest.number,
+                [...labelsToAdd]
+              );
+            } catch (error) {
+              warnings.push(`Failed to add labels: ${errorMessage(error)}`);
+            }
+          }
+        }
+
+        for (const label of request.labelsToRemove ?? []) {
+          if (client.removeLabel === undefined) {
+            warnings.push(
+              `Failed to remove label '${label}': GitHub client does not support labels`
+            );
+            continue;
+          }
+          try {
+            await client.removeLabel(
+              repository.owner,
+              repository.repo,
+              request.pullRequest.number,
+              label
+            );
+          } catch (error) {
+            warnings.push(
+              `Failed to remove label '${label}': ${errorMessage(error)}`
+            );
+          }
+        }
+
+        const pr = await client.getPullRequest(
+          repository.owner,
+          repository.repo,
+          request.pullRequest.number
+        );
+
+        return {
+          repository,
+          repositoryLabel: `${repository.host}/${repository.owner}/${repository.repo}`,
+          pullRequest: githubPullRequestToViewItem(pr),
+          ...(warnings.length === 0 ? {} : { warnings }),
         };
       },
       catch: (error) => error,
@@ -600,6 +731,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         operations: {
           listPullRequests,
           getPullRequest,
+          updatePullRequest,
           getPullRequestDiff,
           listPullRequestComments,
           addPullRequestComment,
@@ -670,6 +802,19 @@ function githubPullRequestToViewItem(pr: GitHubPullRequest) {
     targetBranch: pr.base.ref,
     labels: pr.labels.map((label) => label.name),
   } as const;
+}
+
+function githubUpdateStatusToState(status: 'active' | 'abandoned') {
+  switch (status) {
+    case 'active':
+      return 'open' as const;
+    case 'abandoned':
+      return 'closed' as const;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function githubPullRequestFileToDiffFile(file: GitHubPRFile) {

@@ -21,19 +21,21 @@ import {
   type AidePullRequestListResult,
   type AidePullRequestRepositoryRef,
   type AidePullRequestReplyCommentRequest,
+  type AidePullRequestUpdateRequest,
+  type AidePullRequestUpdateResult,
   type AidePullRequestViewRequest,
   type AidePullRequestViewResult,
   type AidePluginAuthStatus,
 } from '@cli/host/plugin-descriptor.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
-import { parseGitRemote, parsePRUrl } from '@lib/ado-utils.js';
+import { buildPrUrl, parseGitRemote, parsePRUrl } from '@lib/ado-utils.js';
 import {
   loadAzureDevOpsConfig,
   probeAdoConfig,
   readAdoEnvForMigration,
   type ConfigStatus,
 } from '@lib/config.js';
-import { extractBranchName } from '@lib/git-utils.js';
+import { ensureRefPrefix, extractBranchName } from '@lib/git-utils.js';
 import { deleteSecret, setSecret } from '@lib/secrets.js';
 import type {
   AzureDevOpsChangeType,
@@ -43,6 +45,7 @@ import type {
   AzureDevOpsPullRequest,
   AdoFlattenedComment,
   CreateThreadResponse,
+  PullRequestUpdateOptions,
 } from '@lib/types.js';
 import {
   StoredAdoSchema,
@@ -68,7 +71,14 @@ type AzureDevOpsPullRequestClient = Pick<
   | 'getAllComments'
 > &
   Partial<
-    Pick<AzureDevOpsClient, 'createPullRequestThread' | 'createThreadComment'>
+    Pick<
+      AzureDevOpsClient,
+      | 'createPullRequestThread'
+      | 'createThreadComment'
+      | 'updatePullRequest'
+      | 'addPullRequestLabel'
+      | 'removePullRequestLabel'
+    >
   >;
 type CreateAzureDevOpsClient = () => Promise<{
   readonly client: AzureDevOpsPullRequestClient;
@@ -318,6 +328,155 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
               .filter((label) => label.active)
               .map((label) => label.name)
           ),
+        };
+      },
+      catch: (error) => error,
+    });
+
+  const updatePullRequest = (
+    request: AidePullRequestUpdateRequest
+  ): Effect.Effect<AidePullRequestUpdateResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async () => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot update pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient();
+        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
+        if (configuredOrg !== null && configuredOrg !== repository.org) {
+          throw new Error(
+            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
+          );
+        }
+
+        const warnings: string[] = [];
+        const updates: PullRequestUpdateOptions = {};
+        if (request.title !== undefined) {
+          updates.title = request.title;
+        }
+        if (request.description !== undefined) {
+          updates.description = request.description;
+        }
+        if (request.targetBranch !== undefined) {
+          updates.targetRefName = ensureRefPrefix(request.targetBranch);
+        }
+        if (request.draft !== undefined) {
+          updates.isDraft = request.draft;
+        }
+        if (request.status !== undefined) {
+          updates.status = request.status;
+        }
+
+        let pr: AzureDevOpsPullRequest;
+        if (Object.keys(updates).length > 0) {
+          if (client.updatePullRequest === undefined) {
+            throw new Error(
+              'Azure DevOps client does not support updating pull requests'
+            );
+          }
+          pr = await client.updatePullRequest(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number,
+            updates
+          );
+        } else {
+          pr = await client.getPullRequest(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number
+          );
+        }
+
+        const labelsToRemove = request.labelsToRemove ?? [];
+        if (labelsToRemove.length > 0) {
+          const labelsResponse = await client.getPullRequestLabels(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number
+          );
+          for (const labelName of labelsToRemove) {
+            const label = labelsResponse.value.find(
+              (entry) => entry.name.toLowerCase() === labelName.toLowerCase()
+            );
+            if (label === undefined) {
+              warnings.push(
+                `Tag '${labelName}' not found on PR #${request.pullRequest.number}`
+              );
+              continue;
+            }
+            if (client.removePullRequestLabel === undefined) {
+              warnings.push(
+                `Failed to remove tag '${labelName}': Azure DevOps client does not support labels`
+              );
+              continue;
+            }
+            try {
+              await client.removePullRequestLabel(
+                repository.project,
+                repository.repo,
+                request.pullRequest.number,
+                label.id
+              );
+            } catch (error) {
+              warnings.push(
+                `Failed to remove tag '${labelName}': ${errorMessage(error)}`
+              );
+            }
+          }
+        }
+
+        for (const labelName of request.labelsToAdd ?? []) {
+          if (client.addPullRequestLabel === undefined) {
+            warnings.push(
+              `Failed to add tag '${labelName}': Azure DevOps client does not support labels`
+            );
+            continue;
+          }
+          try {
+            await client.addPullRequestLabel(
+              repository.project,
+              repository.repo,
+              request.pullRequest.number,
+              labelName
+            );
+          } catch (error) {
+            warnings.push(
+              `Failed to add tag '${labelName}': ${errorMessage(error)}`
+            );
+          }
+        }
+
+        const labelsResponse = await client.getPullRequestLabels(
+          repository.project,
+          repository.repo,
+          request.pullRequest.number
+        );
+        const url = buildPrUrl(
+          {
+            org: repository.org,
+            project: repository.project,
+            repo: repository.repo,
+          },
+          request.pullRequest.number,
+          config.orgUrl
+        );
+
+        return {
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: azureDevOpsPullRequestToViewItem(
+            pr,
+            labelsResponse.value
+              .filter((label) => label.active)
+              .map((label) => label.name),
+            url
+          ),
+          ...(warnings.length === 0 ? {} : { warnings }),
         };
       },
       catch: (error) => error,
@@ -669,6 +828,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
         operations: {
           listPullRequests,
           getPullRequest,
+          updatePullRequest,
           getPullRequestDiff,
           listPullRequestComments,
           addPullRequestComment,
@@ -735,7 +895,8 @@ function selectAzureDevOpsPullRequestForBranch(
 
 function azureDevOpsPullRequestToViewItem(
   pr: AzureDevOpsPullRequest,
-  labels: readonly string[]
+  labels: readonly string[],
+  url?: string
 ) {
   return {
     ...azureDevOpsPullRequestToListItem(pr),
@@ -745,8 +906,13 @@ function azureDevOpsPullRequestToViewItem(
     ...(pr.targetRefName === undefined
       ? {}
       : { targetBranch: extractBranchName(pr.targetRefName) }),
+    ...(url === undefined ? {} : { url }),
     labels,
   } as const;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function azureDevOpsPullRequestChangeToDiffFile(entry: AzureDevOpsPRChange) {

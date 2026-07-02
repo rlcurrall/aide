@@ -69,6 +69,8 @@ import {
   resolvePullRequestProviderForUrl,
   resolvePullRequestProviderFromRegistryForRemote,
   resolvePullRequestProviderFromRegistryForUrl,
+  updatePullRequestForRemote,
+  updatePullRequestForRepository,
 } from './provider-resolver.js';
 
 function externalRepository(
@@ -1890,6 +1892,500 @@ describe('pull request provider view operations', () => {
     }
     expect(error.reason).toBe(
       'repository ref does not match selected provider match'
+    );
+  });
+});
+
+describe('pull request provider update operations', () => {
+  test('binds updates to the provider selected for pull request metadata', async () => {
+    const calls: string[] = [];
+    const primaryProvider = fakeProvider('primary-plugin', 'primary', 200);
+    const fallbackProvider = fakeProvider('fallback-plugin', 'fallback', 100);
+
+    const context = await Effect.runPromise(
+      getPullRequestContextForRemote(
+        [
+          {
+            ...primaryProvider,
+            capability: {
+              ...primaryProvider.capability,
+              operations: {
+                getPullRequest: () => {
+                  calls.push('primary:getPullRequest');
+                  return Effect.succeed({
+                    repository: externalRepository('primary'),
+                    pullRequest: {
+                      id: 5,
+                      title: 'Primary provider PR',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Ada Lovelace' },
+                    },
+                  });
+                },
+              },
+            },
+          },
+          {
+            ...fallbackProvider,
+            capability: {
+              ...fallbackProvider.capability,
+              operations: {
+                updatePullRequest: () => {
+                  calls.push('fallback:updatePullRequest');
+                  return Effect.succeed({
+                    repository: externalRepository('fallback'),
+                    pullRequest: {
+                      id: 5,
+                      title: 'Wrong provider',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Grace Hopper' },
+                    },
+                  });
+                },
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 5 } }
+      )
+    );
+
+    const error = await Effect.runPromise(
+      context
+        .updatePullRequest({
+          pullRequest: { number: 5 },
+          title: 'Updated',
+        })
+        .pipe(Effect.flip)
+    );
+
+    expect(context.provider.providerId).toBe('primary');
+    expect(error).toBeInstanceOf(UnsupportedPullRequestProviderOperationError);
+    if (!(error instanceof UnsupportedPullRequestProviderOperationError)) {
+      throw new Error('Expected unsupported provider operation error');
+    }
+    expect(error.providerId).toBe('primary');
+    expect(error.operation).toBe('updatePullRequest');
+    expect(calls).toEqual(['primary:getPullRequest']);
+  });
+
+  test('updates a pull request for a repository ref through a fake provider', async () => {
+    const calls: unknown[] = [];
+    const repository = externalRepository('gitlab', { projectId: 10 });
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+
+    const result = await Effect.runPromise(
+      updatePullRequestForRepository(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                updatePullRequest: (request) => {
+                  calls.push(request);
+                  return Effect.succeed({
+                    repository,
+                    repositoryLabel: 'gitlab/acme/widgets',
+                    pullRequest: {
+                      id: 6,
+                      title: request.title ?? 'Repository update',
+                      status: request.status ?? 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Ada Lovelace' },
+                      description: request.description,
+                      targetBranch: request.targetBranch,
+                      labels: request.labelsToAdd,
+                    },
+                  });
+                },
+              },
+            },
+          },
+        ],
+        repository,
+        {
+          pullRequest: { number: 6 },
+          title: 'Updated title',
+          description: 'Updated body',
+          targetBranch: 'main',
+          labelsToAdd: ['ready'],
+        }
+      )
+    );
+
+    expect(calls).toEqual([
+      {
+        match: { source: 'repository-ref', repository },
+        pullRequest: { number: 6 },
+        title: 'Updated title',
+        description: 'Updated body',
+        targetBranch: 'main',
+        labelsToAdd: ['ready'],
+      },
+    ]);
+    expect(result.pullRequest).toMatchObject({
+      id: 6,
+      title: 'Updated title',
+      targetBranch: 'main',
+      labels: ['ready'],
+    });
+  });
+
+  test('updates a GitHub pull request through a provider-owned operation', async () => {
+    const calls: unknown[] = [];
+    const plugin = createGitHubPlugin({
+      createClient: async ({ host }) => {
+        calls.push(host);
+        return {
+          listPullRequests: async () => [],
+          getPullRequest: async (owner, repo, number) => {
+            calls.push({ getPullRequest: { owner, repo, number } });
+            return fakeGitHubPullRequest({
+              number,
+              title: 'Updated GitHub PR',
+              body: 'Updated body',
+              base: { ref: 'develop', sha: 'def', label: 'acme:develop' },
+              labels: [{ id: 1, name: 'ready', color: '0f0' }],
+            });
+          },
+          getPullRequestFiles: async () => [],
+          getIssueComments: async () => [],
+          getReviewComments: async () => [],
+          updatePullRequest: async (owner, repo, number, updates) => {
+            calls.push({ updatePullRequest: { owner, repo, number, updates } });
+            return fakeGitHubPullRequest({ number, title: 'Intermediate' });
+          },
+          convertToDraft: async (owner, repo, number) => {
+            calls.push({ convertToDraft: { owner, repo, number } });
+          },
+          publishDraftPR: async () => {},
+          addLabels: async (owner, repo, number, labels) => {
+            calls.push({ addLabels: { owner, repo, number, labels } });
+            return [];
+          },
+          removeLabel: async (owner, repo, number, label) => {
+            calls.push({ removeLabel: { owner, repo, number, label } });
+          },
+        };
+      },
+    });
+
+    const result = await Effect.runPromise(
+      updatePullRequestForRemote(
+        [
+          {
+            pluginId: plugin.id,
+            capability: plugin.capabilities!.pullRequestProvider!,
+          },
+        ],
+        'git@github.com:acme/widgets.git',
+        {
+          pullRequest: { number: 12 },
+          title: 'Updated title',
+          description: 'Updated body',
+          targetBranch: 'develop',
+          status: 'abandoned',
+          draft: true,
+          labelsToAdd: ['ready'],
+          labelsToRemove: ['wip'],
+        }
+      )
+    );
+
+    expect(calls).toEqual([
+      'github.com',
+      {
+        updatePullRequest: {
+          owner: 'acme',
+          repo: 'widgets',
+          number: 12,
+          updates: {
+            title: 'Updated title',
+            body: 'Updated body',
+            base: 'develop',
+            state: 'closed',
+          },
+        },
+      },
+      { convertToDraft: { owner: 'acme', repo: 'widgets', number: 12 } },
+      {
+        addLabels: {
+          owner: 'acme',
+          repo: 'widgets',
+          number: 12,
+          labels: ['ready'],
+        },
+      },
+      {
+        removeLabel: {
+          owner: 'acme',
+          repo: 'widgets',
+          number: 12,
+          label: 'wip',
+        },
+      },
+      { getPullRequest: { owner: 'acme', repo: 'widgets', number: 12 } },
+    ]);
+    expect(result.pullRequest).toMatchObject({
+      id: 12,
+      title: 'Updated GitHub PR',
+      description: 'Updated body',
+      targetBranch: 'develop',
+      labels: ['ready'],
+    });
+  });
+
+  test('updates an Azure DevOps pull request and returns label warnings', async () => {
+    const calls: unknown[] = [];
+    const plugin = createAzureDevOpsPlugin({
+      createClient: async () => ({
+        config: {
+          orgUrl: 'https://dev.azure.com/acme',
+          pat: 'token',
+          authMethod: 'pat',
+        },
+        client: {
+          listPullRequests: async () => ({ value: [] }),
+          getPullRequest: async () =>
+            fakeAzureDevOpsPullRequest({ pullRequestId: 42, title: 'Unused' }),
+          getPullRequestLabels: async (project, repo, number) => {
+            calls.push({ labelsFor: { project, repo, number } });
+            return {
+              value: [
+                { id: 'label-1', name: 'ready', active: true, url: 'url' },
+              ],
+            };
+          },
+          getAllPullRequestChanges: async () => [],
+          getAllComments: async () => [],
+          updatePullRequest: async (project, repo, number, updates) => {
+            calls.push({
+              updatePullRequest: { project, repo, number, updates },
+            });
+            return fakeAzureDevOpsPullRequest({
+              pullRequestId: number,
+              title: updates.title ?? 'Updated ADO PR',
+              description: updates.description,
+              isDraft: updates.isDraft,
+              status: updates.status ?? 'active',
+              targetRefName: updates.targetRefName,
+            });
+          },
+          addPullRequestLabel: async (project, repo, number, name) => {
+            calls.push({
+              addPullRequestLabel: { project, repo, number, name },
+            });
+            throw new Error('label add denied');
+          },
+          removePullRequestLabel: async (project, repo, number, labelId) => {
+            calls.push({
+              removePullRequestLabel: { project, repo, number, labelId },
+            });
+          },
+        },
+      }),
+    });
+
+    const result = await Effect.runPromise(
+      updatePullRequestForRemote(
+        [
+          {
+            pluginId: plugin.id,
+            capability: plugin.capabilities!.pullRequestProvider!,
+          },
+        ],
+        'git@ssh.dev.azure.com:v3/acme/Platform/widgets',
+        {
+          pullRequest: { number: 42 },
+          title: 'Updated ADO PR',
+          description: 'Updated body',
+          targetBranch: 'develop',
+          draft: false,
+          status: 'active',
+          labelsToAdd: ['blocked'],
+          labelsToRemove: ['ready', 'missing'],
+        }
+      )
+    );
+
+    expect(calls).toEqual([
+      {
+        updatePullRequest: {
+          project: 'Platform',
+          repo: 'widgets',
+          number: 42,
+          updates: {
+            title: 'Updated ADO PR',
+            description: 'Updated body',
+            targetRefName: 'refs/heads/develop',
+            isDraft: false,
+            status: 'active',
+          },
+        },
+      },
+      { labelsFor: { project: 'Platform', repo: 'widgets', number: 42 } },
+      {
+        removePullRequestLabel: {
+          project: 'Platform',
+          repo: 'widgets',
+          number: 42,
+          labelId: 'label-1',
+        },
+      },
+      {
+        addPullRequestLabel: {
+          project: 'Platform',
+          repo: 'widgets',
+          number: 42,
+          name: 'blocked',
+        },
+      },
+      { labelsFor: { project: 'Platform', repo: 'widgets', number: 42 } },
+    ]);
+    expect(result.pullRequest).toMatchObject({
+      id: 42,
+      title: 'Updated ADO PR',
+      description: 'Updated body',
+      targetBranch: 'develop',
+      labels: ['ready'],
+      url: 'https://dev.azure.com/acme/Platform/_git/widgets/pullrequest/42',
+    });
+    expect(result.warnings).toEqual([
+      "Tag 'missing' not found on PR #42",
+      "Failed to add tag 'blocked': label add denied",
+    ]);
+  });
+
+  test('rejects providers that do not implement updatePullRequest', async () => {
+    const error = await Effect.runPromise(
+      updatePullRequestForRemote(
+        [fakeProvider('gitlab-plugin', 'gitlab', 100)],
+        'matched-remote',
+        { pullRequest: { number: 1 }, title: 'Updated' }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(UnsupportedPullRequestProviderOperationError);
+    if (!(error instanceof UnsupportedPullRequestProviderOperationError)) {
+      throw new Error('Expected unsupported provider operation error');
+    }
+    expect(error.operation).toBe('updatePullRequest');
+  });
+
+  test('rejects updatePullRequest operations that do not return Effects', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+    const error = await Effect.runPromise(
+      updatePullRequestForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                updatePullRequest: () => ({}) as never,
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 1 }, title: 'Updated' }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.operation).toBe('updatePullRequest');
+    expect(error.reason).toBe('operation must return an Effect');
+  });
+
+  test('rejects malformed updatePullRequest warnings', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+    const error = await Effect.runPromise(
+      updatePullRequestForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                updatePullRequest: () =>
+                  Effect.succeed({
+                    repository: externalRepository('gitlab'),
+                    pullRequest: {
+                      id: 1,
+                      title: 'Updated',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Ada Lovelace' },
+                    },
+                    warnings: [123],
+                  }) as never,
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 1 }, title: 'Updated' }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.operation).toBe('updatePullRequest');
+    expect(error.reason).toBe('warnings must be an array of strings');
+  });
+
+  test('rejects updatePullRequest results for a different pull request id', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+    const error = await Effect.runPromise(
+      updatePullRequestForRemote(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              operations: {
+                updatePullRequest: () =>
+                  Effect.succeed({
+                    repository: externalRepository('gitlab'),
+                    pullRequest: {
+                      id: 2,
+                      title: 'Wrong PR',
+                      status: 'active',
+                      createdAt: '2026-01-01T00:00:00Z',
+                      author: { displayName: 'Ada Lovelace' },
+                    },
+                  }),
+              },
+            },
+          },
+        ],
+        'matched-remote',
+        { pullRequest: { number: 1 }, title: 'Updated' }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(
+      InvalidPullRequestProviderOperationResultError
+    );
+    if (!(error instanceof InvalidPullRequestProviderOperationResultError)) {
+      throw new Error('Expected invalid provider operation result error');
+    }
+    expect(error.operation).toBe('updatePullRequest');
+    expect(error.reason).toBe(
+      'pull request id does not match selected pull request'
     );
   });
 });

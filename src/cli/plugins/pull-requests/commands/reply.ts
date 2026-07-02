@@ -9,17 +9,15 @@ import { logProgress } from '@lib/cli-utils.js';
 import { handleCommandError } from '@lib/errors.js';
 import { validateArgs } from '@lib/validation.js';
 import { PrReplyArgsSchema, type PrReplyArgs } from '@schemas/pr/pr-reply.js';
-import {
-  formatPullRequestCommentMutationOutput,
-  resolvePullRequestMutationContext,
-} from './comment.js';
+import { formatPullRequestCommentMutationOutput } from './comment.js';
+import { resolvePullRequestOperationContext } from './context.js';
 
 async function handler(argv: ArgumentsCamelCase<PrReplyArgs>): Promise<void> {
   try {
     const args = validateArgs(PrReplyArgsSchema, argv, 'pr-reply arguments');
     const { format, thread, parent, replyText } = args;
 
-    const resolved = await resolvePullRequestMutationContext(
+    const resolved = await resolvePullRequestOperationContext(
       argv,
       args,
       format

@@ -6,12 +6,12 @@
 
 import type { CommandModule } from 'yargs';
 import prCreateCommandModule from '@cli/commands/pr/pr-create.js';
-import prUpdateCommandModule from '@cli/commands/pr/pr-update.js';
 import commentCommandModule from './comment.js';
 import commentsCommandModule from './comments.js';
 import diffCommandModule from './diff.js';
 import listCommandModule from './list.js';
 import replyCommandModule from './reply.js';
+import prUpdateCommandModule from './update.js';
 import viewCommandModule from './view.js';
 
 const prExamples = [
