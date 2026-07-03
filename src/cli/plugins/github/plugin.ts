@@ -46,6 +46,7 @@ import type {
 import {
   getGitHubPRStatus,
   mapStatusToGitHubState,
+  normalizeGitHubHost,
   parseGitHubPRUrl,
   parseGitHubRemote,
 } from '@lib/github-utils.js';
@@ -198,6 +199,20 @@ function logoutGitHubAuth() {
       ],
     }))
   );
+}
+
+function explicitString(value: string | undefined): string | undefined {
+  return value === undefined || value.length === 0 ? undefined : value;
+}
+
+function explicitGitHubHost(
+  value: string | undefined
+): string | undefined | null {
+  const host = explicitString(value);
+  if (host === undefined) {
+    return undefined;
+  }
+  return normalizeGitHubHost(host);
 }
 
 export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
@@ -786,6 +801,50 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
             },
           };
         },
+        matchRepository: (request) =>
+          Effect.succeed(
+            (() => {
+              if (
+                request.providerId !== undefined &&
+                request.providerId !== 'github'
+              ) {
+                return null;
+              }
+
+              const repo = explicitString(request.repo);
+              if (repo === undefined) {
+                return null;
+              }
+
+              const host = explicitGitHubHost(request.host);
+              if (host === null) {
+                return null;
+              }
+
+              const owner =
+                explicitString(request.owner) ??
+                (request.providerId === 'github' || host !== undefined
+                  ? (explicitString(request.project) ??
+                    explicitString(request.org))
+                  : undefined);
+              if (owner === undefined) {
+                return null;
+              }
+
+              const repositoryHost = host ?? 'github.com';
+              return {
+                source: 'repository-ref' as const,
+                priority: 100,
+                detail: `${repositoryHost}/${owner}/${repo}`,
+                repository: {
+                  kind: 'github' as const,
+                  host: repositoryHost,
+                  owner,
+                  repo,
+                },
+              };
+            })()
+          ),
         matchPullRequestUrl: (url) => {
           const parsed = parseGitHubPRUrl(url);
           if (parsed === null) return null;

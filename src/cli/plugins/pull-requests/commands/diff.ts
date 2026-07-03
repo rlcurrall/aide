@@ -13,7 +13,6 @@ import type {
   AidePullRequestViewResult,
 } from '@cli/host/plugin-descriptor.js';
 import { getAideHostContext } from '@cli/host/runtime-context.js';
-import { validatePRId } from '@lib/ado-utils.js';
 import { logProgress } from '@lib/cli-utils.js';
 import { handleCommandError } from '@lib/errors.js';
 import {
@@ -31,7 +30,12 @@ import {
   type DiffArgs,
   type OutputFormat,
 } from '@schemas/pr/diff.js';
-import { resolveExplicitPullRequestRepositoryRef } from './repository-ref.js';
+import { validatePullRequestId } from './pr-id.js';
+import {
+  hasExplicitPullRequestRepositoryInput,
+  pullRequestRepositoryOptions,
+  resolveExplicitPullRequestRepositoryRef,
+} from './repository-ref.js';
 
 type DiffMode = 'full' | 'stat' | 'files' | 'file';
 type LocalBranchUnavailableReason =
@@ -418,7 +422,7 @@ export function formatPullRequestDiffJsonOutput(
   return JSON.stringify(
     {
       ...baseOutput,
-      files: formatJsonFiles(result, diffResult.files),
+      files: formatJsonFiles(diffResult.files),
     },
     null,
     2
@@ -426,33 +430,8 @@ export function formatPullRequestDiffJsonOutput(
 }
 
 function formatJsonFiles(
-  result: AidePullRequestViewResult,
   files: readonly AidePullRequestDiffFile[]
 ): readonly unknown[] {
-  if (result.repository.kind === 'github') {
-    return files.map((file) => ({
-      filename: file.path,
-      status: file.providerStatus ?? file.status,
-      additions: file.additions ?? 0,
-      deletions: file.deletions ?? 0,
-      changes: file.changes ?? (file.additions ?? 0) + (file.deletions ?? 0),
-      ...(file.previousPath === undefined
-        ? {}
-        : { previous_filename: file.previousPath }),
-      ...(file.patch === undefined ? {} : { patch: file.patch }),
-    }));
-  }
-
-  if (result.repository.kind === 'azure-devops') {
-    return files.map((file) => ({
-      path: file.path,
-      changeType: file.providerStatus ?? file.status,
-      ...(file.previousPath === undefined
-        ? {}
-        : { originalPath: file.previousPath }),
-    }));
-  }
-
   return files.map((file) => ({
     path: file.path,
     status: file.status,
@@ -491,7 +470,7 @@ async function handler(argv: ArgumentsCamelCase<DiffArgs>): Promise<void> {
       file: args.file,
     });
 
-    if (await printFileFallbackIfNeeded(resolved.result, diffResult, args)) {
+    if (await printFileFallbackIfNeeded(diffResult, args)) {
       return;
     }
 
@@ -537,9 +516,6 @@ async function resolvePullRequestDiff(
     throw new Error('Pull request provider services are unavailable.');
   }
 
-  const hasExplicitRepoContext =
-    args.project !== undefined || args.repo !== undefined;
-
   if (args.pr === undefined) {
     const branch = getCurrentBranch();
     if (!branch) {
@@ -549,12 +525,12 @@ async function resolvePullRequestDiff(
     }
 
     logProgress(`Searching for PR from branch '${branch}'...`, format);
-    const found = hasExplicitRepoContext
+    const found = hasExplicitPullRequestRepositoryInput(args)
       ? await (async () => {
           const { repository, autoDiscovered } =
             await resolveExplicitPullRequestRepositoryRef(
-              args.project,
-              args.repo
+              hostContext.services,
+              args
             );
           const context = await Effect.runPromise(
             hostContext.services.findPullRequestForBranchContextForRepository(
@@ -611,7 +587,7 @@ async function resolvePullRequestDiff(
     };
   }
 
-  const validation = validatePRId(args.pr);
+  const validation = validatePullRequestId(args.pr);
   if (!validation.valid || validation.value === undefined) {
     throw new Error(
       `Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
@@ -622,9 +598,9 @@ async function resolvePullRequestDiff(
   logProgress(`Fetching diff for PR #${prNumber}...`, format);
   logProgress('', format);
 
-  if (hasExplicitRepoContext) {
+  if (hasExplicitPullRequestRepositoryInput(args)) {
     const { repository, autoDiscovered } =
-      await resolveExplicitPullRequestRepositoryRef(args.project, args.repo);
+      await resolveExplicitPullRequestRepositoryRef(hostContext.services, args);
     const context = await Effect.runPromise(
       hostContext.services.getPullRequestContextForRepository(repository, {
         pullRequest: { number: prNumber },
@@ -665,14 +641,6 @@ async function ensureLocalBranches(
   args: DiffArgs,
   format: OutputFormat
 ): Promise<void> {
-  if (
-    args.file &&
-    result.repository.kind === 'azure-devops' &&
-    !isGitRepository()
-  ) {
-    throw new Error('Single file diff requires being in a git repository.');
-  }
-
   if (!isGitRepository()) {
     return;
   }
@@ -695,19 +663,11 @@ async function ensureLocalBranches(
 }
 
 async function printFileFallbackIfNeeded(
-  result: AidePullRequestViewResult,
   diffResult: DiffResult,
   args: DiffArgs
 ): Promise<boolean> {
   if (!args.file || diffResult.source !== 'api-fallback') {
     return false;
-  }
-
-  if (result.repository.kind === 'azure-devops') {
-    const sourceBranch = result.pullRequest.sourceBranch ?? 'unknown';
-    throw new Error(
-      `Single file diff requires branch to be available locally. Run: git fetch origin ${sourceBranch}`
-    );
   }
 
   const matchingFile = diffResult.files.find((file) => file.path === args.file);
@@ -733,14 +693,7 @@ export default {
       describe:
         'PR ID or full PR URL (auto-detected from current branch if omitted)',
     },
-    project: {
-      type: 'string',
-      describe: 'Project name (auto-discovered from git remote)',
-    },
-    repo: {
-      type: 'string',
-      describe: 'Repository name (auto-discovered from git remote)',
-    },
+    ...pullRequestRepositoryOptions,
     format: {
       type: 'string',
       choices: ['text', 'json', 'markdown'] as const,

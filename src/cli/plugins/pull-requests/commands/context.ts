@@ -4,21 +4,27 @@ import type { ArgumentsCamelCase } from 'yargs';
 import type {
   AidePullRequestAddCommentRequest,
   AidePullRequestCommentMutationResult,
+  AidePullRequestProviderFeatures,
   AidePullRequestReplyCommentRequest,
   AidePullRequestUpdateRequest,
   AidePullRequestUpdateResult,
   AidePullRequestViewResult,
 } from '@cli/host/plugin-descriptor.js';
 import { getAideHostContext } from '@cli/host/runtime-context.js';
-import { validatePRId } from '@lib/ado-utils.js';
 import { logProgress } from '@lib/cli-utils.js';
 import { getCurrentBranch, getGitRemoteUrl } from '@lib/git-utils.js';
 import type { OutputFormat } from '@schemas/common.js';
-import { resolveExplicitPullRequestRepositoryRef } from './repository-ref.js';
+import { validatePullRequestId } from './pr-id.js';
+import {
+  hasExplicitPullRequestRepositoryInput,
+  resolveExplicitPullRequestRepositoryRef,
+  type PullRequestRepositoryArgs,
+} from './repository-ref.js';
 
 export interface ProviderPullRequestContext {
   readonly provider: {
     readonly providerId: string;
+    readonly features: AidePullRequestProviderFeatures;
   };
   readonly result: AidePullRequestViewResult;
   readonly addPullRequestComment: (
@@ -37,10 +43,8 @@ export interface ResolvedPullRequestContext {
   readonly autoDiscovered: boolean;
 }
 
-export interface PullRequestContextArgs {
+export interface PullRequestContextArgs extends PullRequestRepositoryArgs {
   readonly pr?: string;
-  readonly project?: string;
-  readonly repo?: string;
 }
 
 export async function resolvePullRequestOperationContext(
@@ -53,9 +57,6 @@ export async function resolvePullRequestOperationContext(
     throw new Error('Pull request provider services are unavailable.');
   }
 
-  const hasExplicitRepoContext =
-    args.project !== undefined || args.repo !== undefined;
-
   if (args.pr === undefined) {
     const branch = getCurrentBranch();
     if (!branch) {
@@ -65,12 +66,12 @@ export async function resolvePullRequestOperationContext(
     }
 
     logProgress(`Searching for PR from branch '${branch}'...`, format);
-    const found = hasExplicitRepoContext
+    const found = hasExplicitPullRequestRepositoryInput(args)
       ? await (async () => {
           const { repository, autoDiscovered } =
             await resolveExplicitPullRequestRepositoryRef(
-              args.project,
-              args.repo
+              hostContext.services,
+              args
             );
           const context = await Effect.runPromise(
             hostContext.services.findPullRequestForBranchContextForRepository(
@@ -111,7 +112,7 @@ export async function resolvePullRequestOperationContext(
     return { context, autoDiscovered: false };
   }
 
-  const validation = validatePRId(args.pr);
+  const validation = validatePullRequestId(args.pr);
   if (!validation.valid || validation.value === undefined) {
     throw new Error(
       `Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
@@ -119,9 +120,9 @@ export async function resolvePullRequestOperationContext(
   }
   const prNumber = validation.value;
 
-  if (hasExplicitRepoContext) {
+  if (hasExplicitPullRequestRepositoryInput(args)) {
     const { repository, autoDiscovered } =
-      await resolveExplicitPullRequestRepositoryRef(args.project, args.repo);
+      await resolveExplicitPullRequestRepositoryRef(hostContext.services, args);
     const context = await Effect.runPromise(
       hostContext.services.getPullRequestContextForRepository(repository, {
         pullRequest: { number: prNumber },

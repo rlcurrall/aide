@@ -30,7 +30,13 @@ import {
   type AidePluginAuthStatus,
 } from '@cli/host/plugin-descriptor.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
-import { buildPrUrl, parseGitRemote, parsePRUrl } from '@lib/ado-utils.js';
+import {
+  MissingRepoContextError,
+  buildPrUrl,
+  parseGitRemote,
+  parsePRUrl,
+  resolveRepoContext,
+} from '@lib/ado-utils.js';
 import {
   loadAzureDevOpsConfig,
   probeAdoConfig,
@@ -902,6 +908,53 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
             },
           };
         },
+        matchRepository: (request) =>
+          Effect.tryPromise({
+            try: async () => {
+              if (
+                request.providerId !== undefined &&
+                request.providerId !== 'azure-devops'
+              ) {
+                return null;
+              }
+              if (request.owner !== undefined) {
+                return null;
+              }
+
+              const hostOrg = azureDevOpsOrgFromHost(request.host);
+              if (hostOrg === null) {
+                return null;
+              }
+
+              if (request.project === undefined && request.repo === undefined) {
+                return null;
+              }
+
+              const context = resolveRepoContext(request.project, request.repo);
+              const requestedOrg = request.org ?? context.org ?? hostOrg;
+              const org =
+                requestedOrg ??
+                azureDevOpsOrgFromUrl((await createClient()).config.orgUrl);
+              if (org === null) {
+                throw new MissingRepoContextError(
+                  'Could not determine Azure DevOps organization. Run this command from an Azure DevOps git repository, pass --org, or configure AZURE_DEVOPS_ORG_URL via `aide login ado`.'
+                );
+              }
+
+              return {
+                source: 'repository-ref' as const,
+                priority: 100,
+                detail: `${org}/${context.project}/${context.repo}`,
+                repository: {
+                  kind: 'azure-devops' as const,
+                  org,
+                  project: context.project,
+                  repo: context.repo,
+                },
+              };
+            },
+            catch: (error) => error,
+          }),
         matchPullRequestUrl: (url) => {
           const parsed = parsePRUrl(url);
           if (parsed === null) return null;
@@ -937,6 +990,24 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
 }
 
 export const azureDevOpsPlugin = createAzureDevOpsPlugin();
+
+function azureDevOpsOrgFromHost(
+  host: string | undefined
+): string | undefined | null {
+  if (host === undefined || host.length === 0) {
+    return undefined;
+  }
+
+  const normalizedHost = host.toLowerCase().replace(/^ssh\./, '');
+  if (normalizedHost === 'dev.azure.com') {
+    return undefined;
+  }
+  if (normalizedHost.endsWith('.visualstudio.com')) {
+    const org = normalizedHost.replace(/\.visualstudio\.com$/, '');
+    return org.length > 0 ? org : null;
+  }
+  return null;
+}
 
 function azureDevOpsOrgFromUrl(orgUrl: string): string | null {
   try {

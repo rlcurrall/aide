@@ -13,7 +13,6 @@ import { getAideHostContext } from '@cli/host/runtime-context.js';
 import { logProgress } from '@lib/cli-utils.js';
 import { handleCommandError } from '@lib/errors.js';
 import { getCurrentBranch, getGitRemoteUrl } from '@lib/git-utils.js';
-import { parseGitHubRemote } from '@lib/github-utils.js';
 import { validateArgs } from '@lib/validation.js';
 import {
   PrCreateArgsSchema,
@@ -21,7 +20,11 @@ import {
   type PrCreateArgs,
 } from '@schemas/pr/pr-create.js';
 import { resolvePullRequestBodyInput } from './body-input.js';
-import { resolveExplicitPullRequestRepositoryRef } from './repository-ref.js';
+import {
+  hasExplicitPullRequestRepositoryInput,
+  pullRequestRepositoryOptions,
+  resolveExplicitPullRequestRepositoryRef,
+} from './repository-ref.js';
 
 type PullRequestCreateOperationRequest = Omit<
   AidePullRequestCreateRequest,
@@ -45,13 +48,13 @@ function branchValue(value: string | undefined): string | undefined {
 }
 
 export function selectPullRequestCreateTarget(
-  args: Pick<PrCreateArgs, 'project' | 'repo'>,
+  args: Pick<
+    PrCreateArgs,
+    'provider' | 'host' | 'owner' | 'org' | 'project' | 'repo'
+  >,
   remoteUrl: string | null
 ): PullRequestCreateTarget {
-  if (remoteUrl !== null && parseGitHubRemote(remoteUrl) !== null) {
-    return { kind: 'remote', remoteUrl };
-  }
-  if (args.project !== undefined || args.repo !== undefined) {
+  if (hasExplicitPullRequestRepositoryInput(args)) {
     return { kind: 'repository' };
   }
   if (remoteUrl !== null) {
@@ -230,7 +233,10 @@ async function createPullRequest(
   switch (target.kind) {
     case 'repository': {
       const { repository, autoDiscovered } =
-        await resolveExplicitPullRequestRepositoryRef(args.project, args.repo);
+        await resolveExplicitPullRequestRepositoryRef(
+          hostContext.services,
+          args
+        );
       const result = await Effect.runPromise(
         hostContext.services.createPullRequestForRepository(repository, request)
       );
@@ -247,7 +253,7 @@ async function createPullRequest(
     }
     case 'missing':
       throw new Error(
-        'Could not determine repository context. Run this command from a git repository with a supported remote or specify --project and --repo.'
+        'Could not determine repository context. Run this command from a git repository with a supported remote or specify explicit repository options.'
       );
   }
 }
@@ -344,14 +350,7 @@ export default {
       string: true,
       describe: 'Add tag(s)/label(s) to the PR',
     },
-    project: {
-      type: 'string',
-      describe: 'Project name (auto-discovered from git remote)',
-    },
-    repo: {
-      type: 'string',
-      describe: 'Repository name (auto-discovered from git remote)',
-    },
+    ...pullRequestRepositoryOptions,
     format: {
       type: 'string',
       choices: ['text', 'json', 'markdown'] as const,

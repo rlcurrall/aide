@@ -33,6 +33,7 @@ import type {
   AidePullRequestRef,
   AidePullRequestReplyCommentRequest,
   AidePullRequestRemoteMatch,
+  AidePullRequestRepositoryInput,
   AidePullRequestRepositoryMatch,
   AidePullRequestRepositoryRef,
   AidePullRequestUrlMatch,
@@ -302,6 +303,19 @@ function repositoryRefValue(repository: AidePullRequestRepositoryRef): string {
   }
 }
 
+function repositoryInputValue(input: AidePullRequestRepositoryInput): string {
+  return [
+    input.providerId === undefined ? undefined : `provider=${input.providerId}`,
+    input.host === undefined ? undefined : `host=${input.host}`,
+    input.owner === undefined ? undefined : `owner=${input.owner}`,
+    input.org === undefined ? undefined : `org=${input.org}`,
+    input.project === undefined ? undefined : `project=${input.project}`,
+    input.repo === undefined ? undefined : `repo=${input.repo}`,
+  ]
+    .filter((part): part is string => part !== undefined)
+    .join(' ');
+}
+
 function repositoryRefProviderId(
   repository: AidePullRequestRepositoryRef
 ): string {
@@ -336,6 +350,45 @@ function hasOwn(
   property: string
 ): boolean {
   return Object.prototype.hasOwnProperty.call(value, property);
+}
+
+function optionalNonEmptyString(value: unknown): string | undefined | null {
+  if (value === undefined) return undefined;
+  return isNonEmptyString(value) ? value : null;
+}
+
+function snapshotRepositoryInput(
+  value: unknown
+): AidePullRequestRepositoryInput | null {
+  if (!isRecord(value)) return null;
+
+  const providerId = optionalNonEmptyString(value.providerId);
+  const host = optionalNonEmptyString(value.host);
+  const owner = optionalNonEmptyString(value.owner);
+  const org = optionalNonEmptyString(value.org);
+  const project = optionalNonEmptyString(value.project);
+  const repo = optionalNonEmptyString(value.repo);
+  if (
+    providerId === null ||
+    host === null ||
+    owner === null ||
+    org === null ||
+    project === null ||
+    repo === null
+  ) {
+    return null;
+  }
+
+  const snapshot = {
+    ...(providerId === undefined ? {} : { providerId }),
+    ...(host === undefined ? {} : { host }),
+    ...(owner === undefined ? {} : { owner }),
+    ...(org === undefined ? {} : { org }),
+    ...(project === undefined ? {} : { project }),
+    ...(repo === undefined ? {} : { repo }),
+  };
+
+  return Object.keys(snapshot).length === 0 ? null : Object.freeze(snapshot);
 }
 
 function snapshotRepositoryMetadata(
@@ -1738,6 +1791,199 @@ function selectProviderCandidateForOperation<
   );
 }
 
+function invokeRepositoryMatcher(
+  pluginId: string,
+  capability: AidePullRequestProviderCapability,
+  request: AidePullRequestRepositoryInput,
+  value: string,
+  options: Pick<
+    PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch>,
+    'matcherTimeout'
+  > = {}
+): Effect.Effect<
+  AidePullRequestRepositoryMatch | null,
+  | InvalidPullRequestProviderMatchError
+  | PullRequestProviderInvocationError
+  | PullRequestProviderTimeoutError
+> {
+  const matchRepository = capability.matchRepository;
+  if (matchRepository === undefined) {
+    return Effect.succeed(null);
+  }
+
+  return Effect.suspend(
+    (): Effect.Effect<
+      AidePullRequestRepositoryMatch | null,
+      InvalidPullRequestProviderMatchError | PullRequestProviderInvocationError,
+      never
+    > => {
+      let matcherResult: unknown;
+      try {
+        matcherResult = matchRepository(request);
+      } catch (cause) {
+        return Effect.fail(
+          new PullRequestProviderInvocationError({
+            source: 'repository-ref',
+            value,
+            pluginId,
+            providerId: capability.providerId,
+            cause,
+          })
+        );
+      }
+
+      if (!Effect.isEffect(matcherResult)) {
+        return Effect.fail(
+          new InvalidPullRequestProviderMatchError({
+            source: 'repository-ref',
+            value,
+            pluginId,
+            providerId: capability.providerId,
+            reason: 'matchRepository must return an Effect',
+          })
+        );
+      }
+
+      return (
+        matcherResult as Effect.Effect<
+          AidePullRequestRepositoryMatch | null,
+          unknown,
+          never
+        >
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new PullRequestProviderInvocationError({
+              source: 'repository-ref',
+              value,
+              pluginId,
+              providerId: capability.providerId,
+              cause,
+            })
+        )
+      );
+    }
+  ).pipe(
+    Effect.timeoutFail({
+      duration: options.matcherTimeout ?? defaultMatcherTimeout,
+      onTimeout: () =>
+        new PullRequestProviderTimeoutError({
+          source: 'repository-ref',
+          value,
+          pluginId,
+          providerId: capability.providerId,
+        }),
+    })
+  );
+}
+
+function collectRepositoryInputMatches(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  input: AidePullRequestRepositoryInput,
+  options: Pick<
+    PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch>,
+    'matcherTimeout'
+  > = {}
+): Effect.Effect<
+  ResolvedPullRequestProviderCandidate<AidePullRequestRepositoryMatch>[],
+  | InvalidPullRequestProviderMatchError
+  | PullRequestProviderInvocationError
+  | PullRequestProviderTimeoutError
+> {
+  const request = snapshotRepositoryInput(input);
+  const value =
+    request === null
+      ? 'invalid repository input'
+      : repositoryInputValue(request);
+  if (request === null) {
+    return Effect.fail(
+      new InvalidPullRequestProviderMatchError({
+        source: 'repository-ref',
+        value,
+        pluginId: 'host',
+        providerId: 'unknown',
+        reason: 'invalid repository input',
+      })
+    );
+  }
+
+  return Effect.forEach(
+    providers,
+    ({ pluginId, capability }) => {
+      if (
+        request.providerId !== undefined &&
+        capability.providerId !== request.providerId
+      ) {
+        return Effect.succeed([]);
+      }
+
+      return invokeRepositoryMatcher(
+        pluginId,
+        capability,
+        request,
+        value,
+        options
+      ).pipe(
+        Effect.flatMap((matchResult) => {
+          if (matchResult === null) {
+            return Effect.succeed([]);
+          }
+
+          return validateProviderMatchSafely<AidePullRequestRepositoryMatch>(
+            pluginId,
+            capability,
+            'repository-ref',
+            value,
+            matchResult
+          ).pipe(
+            Effect.flatMap((validMatch) =>
+              validateProviderPrioritySafely(
+                pluginId,
+                capability,
+                'repository-ref',
+                value,
+                validMatch
+              ).pipe(
+                Effect.map((priority) => [
+                  {
+                    pluginId,
+                    providerId: capability.providerId,
+                    capability,
+                    features: capability.features,
+                    match: validMatch,
+                    priority,
+                  },
+                ])
+              )
+            )
+          );
+        })
+      );
+    },
+    { concurrency: 'unbounded' }
+  ).pipe(Effect.map((matches) => matches.flat()));
+}
+
+function selectProviderCandidateForRepositoryInput(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  input: AidePullRequestRepositoryInput,
+  options: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch> = {}
+): Effect.Effect<
+  ResolvedPullRequestProviderCandidate<AidePullRequestRepositoryMatch>,
+  PullRequestProviderResolutionError
+> {
+  const request = snapshotRepositoryInput(input);
+  const value =
+    request === null
+      ? 'invalid repository input'
+      : repositoryInputValue(request);
+  return collectRepositoryInputMatches(providers, input, options).pipe(
+    Effect.flatMap((matches) =>
+      selectProvider(matches, 'repository-ref', value, options)
+    )
+  );
+}
+
 function collectRepositoryRefMatches(
   providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
   repositoryRef: AidePullRequestRepositoryRef
@@ -1885,6 +2131,21 @@ export function resolvePullRequestProviderForRepository(
   return selectProviderCandidateForRepository(
     providers,
     repository,
+    options
+  ).pipe(Effect.map(stripProviderCapability));
+}
+
+export function resolvePullRequestProviderForRepositoryInput(
+  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  input: AidePullRequestRepositoryInput,
+  options: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch> = {}
+): Effect.Effect<
+  ResolvedPullRequestProvider<AidePullRequestRepositoryMatch>,
+  PullRequestProviderResolutionError
+> {
+  return selectProviderCandidateForRepositoryInput(
+    providers,
+    input,
     options
   ).pipe(Effect.map(stripProviderCapability));
 }
@@ -3033,5 +3294,18 @@ export function resolvePullRequestProviderFromRegistryForRepository(
   return resolvePullRequestProviderForRepository(
     registry.capabilities.pullRequestProviders(),
     repository
+  );
+}
+
+export function resolvePullRequestProviderFromRegistryForRepositoryInput(
+  registry: CommandRegistry,
+  input: AidePullRequestRepositoryInput
+): Effect.Effect<
+  ResolvedPullRequestProvider<AidePullRequestRepositoryMatch>,
+  PullRequestProviderResolutionError
+> {
+  return resolvePullRequestProviderForRepositoryInput(
+    registry.capabilities.pullRequestProviders(),
+    input
   );
 }

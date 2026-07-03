@@ -11,6 +11,7 @@ import { validateArgs } from '@lib/validation.js';
 import { PrReplyArgsSchema, type PrReplyArgs } from '@schemas/pr/pr-reply.js';
 import { formatPullRequestCommentMutationOutput } from './comment.js';
 import { resolvePullRequestOperationContext } from './context.js';
+import { pullRequestRepositoryOptions } from './repository-ref.js';
 
 async function handler(argv: ArgumentsCamelCase<PrReplyArgs>): Promise<void> {
   try {
@@ -35,12 +36,12 @@ async function handler(argv: ArgumentsCamelCase<PrReplyArgs>): Promise<void> {
 
     const prNumber = resolved.context.result.pullRequest.id;
     if (
-      resolved.context.provider.providerId === 'github' &&
+      resolved.context.provider.features.threadedComments !== true &&
       parent !== undefined &&
       parent > 0
     ) {
       console.warn(
-        'Warning: --parent is ignored on GitHub. GitHub review comment threads only support one level of nesting.'
+        'Warning: --parent may be ignored by this provider. The selected pull request provider does not advertise nested comment replies.'
       );
     }
 
@@ -100,14 +101,7 @@ export default {
         describe:
           'Parent comment ID to reply to a specific comment (optional, 0 or omit for root-level reply)',
       })
-      .option('project', {
-        type: 'string',
-        describe: 'Project name (auto-discovered from git remote)',
-      })
-      .option('repo', {
-        type: 'string',
-        describe: 'Repository name (auto-discovered from git remote)',
-      })
+      .options(pullRequestRepositoryOptions)
       .option('format', {
         type: 'string',
         choices: ['text', 'json', 'markdown'] as const,

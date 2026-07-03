@@ -23,6 +23,10 @@ export const PrCreateArgsSchema = v.object({
   base: v.optional(v.string()), // --base (gh), --target (az alias)
   draft: v.optional(v.boolean(), false),
   tag: v.optional(v.array(v.string()), []),
+  provider: v.optional(v.string()),
+  host: v.optional(v.string()),
+  owner: v.optional(v.string()),
+  org: v.optional(v.string()),
   project: v.optional(v.string()),
   repo: v.optional(v.string()),
   format: v.optional(OutputFormatSchema, 'text'),

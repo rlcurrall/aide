@@ -17,7 +17,11 @@ import {
   type ListArgs,
   type OutputFormat,
 } from '@schemas/pr/list.js';
-import { resolveExplicitPullRequestRepositoryRef } from './repository-ref.js';
+import {
+  hasExplicitPullRequestRepositoryInput,
+  pullRequestRepositoryOptions,
+  resolveExplicitPullRequestRepositoryRef,
+} from './repository-ref.js';
 
 // ============================================================================
 // Provider-neutral Formatting
@@ -121,18 +125,15 @@ async function resolvePullRequestList(
     throw new Error('Pull request provider services are unavailable.');
   }
 
-  const hasExplicitRepoContext =
-    args.project !== undefined || args.repo !== undefined;
-
   const request = {
     status: args.status,
     limit: args.limit,
     createdBy: args.createdBy ?? args.author,
   };
 
-  if (hasExplicitRepoContext) {
+  if (hasExplicitPullRequestRepositoryInput(args)) {
     const { repository, autoDiscovered } =
-      await resolveExplicitPullRequestRepositoryRef(args.project, args.repo);
+      await resolveExplicitPullRequestRepositoryRef(hostContext.services, args);
     const result = await Effect.runPromise(
       hostContext.services.listPullRequestsForRepository(repository, request)
     );
@@ -142,7 +143,7 @@ async function resolvePullRequestList(
   const remoteUrl = getGitRemoteUrl();
   if (remoteUrl === null) {
     throw new Error(
-      'Could not determine repository context. Run this command from a git repository with a supported remote or specify --project and --repo.'
+      'Could not determine repository context. Run this command from a git repository with a supported remote or specify explicit repository options.'
     );
   }
 
@@ -167,14 +168,7 @@ export default {
   command: 'list',
   describe: 'List pull requests',
   builder: {
-    project: {
-      type: 'string',
-      describe: 'Project name (auto-discovered from git remote)',
-    },
-    repo: {
-      type: 'string',
-      describe: 'Repository name (auto-discovered from git remote)',
-    },
+    ...pullRequestRepositoryOptions,
     format: {
       type: 'string',
       choices: ['text', 'json', 'markdown'] as const,

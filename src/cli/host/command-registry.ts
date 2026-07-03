@@ -965,6 +965,14 @@ function snapshotPullRequestProviderCapability(
     'matchPullRequestUrl',
     capability.matchPullRequestUrl
   );
+  if (
+    capability.matchRepository !== undefined &&
+    typeof capability.matchRepository !== 'function'
+  ) {
+    throw new Error(
+      `Plugin '${pluginId}' pull request provider '${capability.providerId}' field 'matchRepository' must be a function`
+    );
+  }
   assertFunction(
     pluginId,
     'pull request provider',
@@ -986,6 +994,12 @@ function snapshotPullRequestProviderCapability(
     ),
     matchRemote:
       capability.matchRemote as AidePullRequestProviderCapability['matchRemote'],
+    ...(capability.matchRepository === undefined
+      ? {}
+      : {
+          matchRepository:
+            capability.matchRepository as AidePullRequestProviderCapability['matchRepository'],
+        }),
     matchPullRequestUrl:
       capability.matchPullRequestUrl as AidePullRequestProviderCapability['matchPullRequestUrl'],
     authStatus:

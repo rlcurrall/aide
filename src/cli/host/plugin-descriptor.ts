@@ -238,6 +238,15 @@ export type AidePullRequestRepositoryRef =
       readonly metadata?: Readonly<Record<string, string | number | boolean>>;
     };
 
+export interface AidePullRequestRepositoryInput {
+  readonly providerId?: string;
+  readonly host?: string;
+  readonly owner?: string;
+  readonly org?: string;
+  readonly project?: string;
+  readonly repo?: string;
+}
+
 export interface AidePullRequestRef {
   readonly number: number;
 }
@@ -520,6 +529,9 @@ export interface AidePullRequestProviderCapability {
   readonly matchRemote: (
     remoteUrl: string
   ) => AidePullRequestRemoteMatch | null;
+  readonly matchRepository?: (
+    request: AidePullRequestRepositoryInput
+  ) => Effect.Effect<AidePullRequestRepositoryMatch | null, unknown, never>;
   readonly matchPullRequestUrl: (url: string) => AidePullRequestUrlMatch | null;
   readonly operations?: AidePullRequestProviderOperations;
   readonly authStatus: () => Effect.Effect<

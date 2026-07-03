@@ -19,6 +19,7 @@ import {
 } from '@schemas/pr/pr-update.js';
 import { resolvePullRequestBodyInput } from './body-input.js';
 import { resolvePullRequestOperationContext } from './context.js';
+import { pullRequestRepositoryOptions } from './repository-ref.js';
 
 type PullRequestUpdateOperationRequest = Omit<
   AidePullRequestUpdateRequest,
@@ -269,14 +270,7 @@ export default {
       describe:
         'PR ID or full PR URL (auto-detected from current branch if omitted)',
     },
-    project: {
-      type: 'string',
-      describe: 'Project name (auto-discovered from git remote)',
-    },
-    repo: {
-      type: 'string',
-      describe: 'Repository name (auto-discovered from git remote)',
-    },
+    ...pullRequestRepositoryOptions,
     format: {
       type: 'string',
       choices: ['text', 'json', 'markdown'] as const,

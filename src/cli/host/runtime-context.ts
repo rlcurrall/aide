@@ -21,6 +21,7 @@ import type {
   AidePullRequestListRequest,
   AidePullRequestListResult,
   AidePullRequestRemoteMatch,
+  AidePullRequestRepositoryInput,
   AidePullRequestRepositoryMatch,
   AidePullRequestRepositoryRef,
   AidePullRequestReplyCommentRequest,
@@ -64,6 +65,7 @@ import {
   type PullRequestProviderOperationContext,
   resolvePullRequestProviderForRemote,
   resolvePullRequestProviderForRepository,
+  resolvePullRequestProviderForRepositoryInput,
   resolvePullRequestProviderForUrl,
   type PullRequestProviderResolutionError,
   type PullRequestProviderOperationOptions,
@@ -92,6 +94,13 @@ export interface AideHostServices {
   >;
   readonly resolvePullRequestProviderForRepository: (
     repository: AidePullRequestRepositoryRef,
+    options?: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch>
+  ) => Effect.Effect<
+    ResolvedPullRequestProvider<AidePullRequestRepositoryMatch>,
+    PullRequestProviderResolutionError
+  >;
+  readonly resolvePullRequestProviderForRepositoryInput: (
+    input: AidePullRequestRepositoryInput,
     options?: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch>
   ) => Effect.Effect<
     ResolvedPullRequestProvider<AidePullRequestRepositoryMatch>,
@@ -420,6 +429,15 @@ export function createAideHostServices(
       resolvePullRequestProviderForRepository(
         pullRequestProviders,
         repository,
+        options
+      ),
+    resolvePullRequestProviderForRepositoryInput: (
+      input: AidePullRequestRepositoryInput,
+      options: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch> = {}
+    ) =>
+      resolvePullRequestProviderForRepositoryInput(
+        pullRequestProviders,
+        input,
         options
       ),
     listPullRequestsForRemote: (

@@ -15,6 +15,7 @@ import {
   type PrCommentArgs,
 } from '@schemas/pr/pr-comment.js';
 import { resolvePullRequestOperationContext } from './context.js';
+import { pullRequestRepositoryOptions } from './repository-ref.js';
 
 export function formatPullRequestCommentMutationOutput(
   result: AidePullRequestCommentMutationResult,
@@ -223,14 +224,7 @@ export default {
           'PR ID or full PR URL (auto-detected from current branch if omitted)',
         coerce: (val: unknown) => (val !== undefined ? String(val) : undefined),
       })
-      .option('project', {
-        type: 'string',
-        describe: 'Project name (auto-discovered from git remote)',
-      })
-      .option('repo', {
-        type: 'string',
-        describe: 'Repository name (auto-discovered from git remote)',
-      })
+      .options(pullRequestRepositoryOptions)
       .option('format', {
         type: 'string',
         choices: ['text', 'json', 'markdown'] as const,

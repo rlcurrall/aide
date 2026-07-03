@@ -137,16 +137,13 @@ describe('buildPullRequestCreateOperationRequest', () => {
 });
 
 describe('selectPullRequestCreateTarget', () => {
-  test('prefers GitHub remote discovery even when explicit repo flags are present', () => {
+  test('uses explicit repository flags even when a remote is present', () => {
     expect(
       selectPullRequestCreateTarget(
         { project: 'Platform', repo: 'widgets' },
         'git@github.com:acme/widgets.git'
       )
-    ).toEqual({
-      kind: 'remote',
-      remoteUrl: 'git@github.com:acme/widgets.git',
-    });
+    ).toEqual({ kind: 'repository' });
   });
 
   test('uses explicit repository flags for non-GitHub remotes', () => {

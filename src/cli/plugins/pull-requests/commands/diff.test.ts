@@ -37,7 +37,7 @@ const githubDiffResult: AidePullRequestDiffResult = {
 };
 
 describe('formatPullRequestDiffJsonOutput', () => {
-  test('preserves GitHub-compatible API fallback file fields', () => {
+  test('renders provider-neutral API fallback file fields', () => {
     const output = JSON.parse(
       formatPullRequestDiffJsonOutput(
         githubDiffResult,
@@ -63,8 +63,9 @@ describe('formatPullRequestDiffJsonOutput', () => {
       mode: 'full',
       files: [
         {
-          filename: 'src/index.ts',
+          path: 'src/index.ts',
           status: 'modified',
+          providerStatus: 'modified',
           additions: 2,
           deletions: 1,
           changes: 3,

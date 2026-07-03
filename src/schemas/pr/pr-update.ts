@@ -13,6 +13,10 @@ export type { OutputFormat };
  */
 export const PrUpdateArgsSchema = v.object({
   pr: v.optional(v.string()),
+  provider: v.optional(v.string()),
+  host: v.optional(v.string()),
+  owner: v.optional(v.string()),
+  org: v.optional(v.string()),
   project: v.optional(v.string()),
   repo: v.optional(v.string()),
   format: v.optional(OutputFormatSchema, 'text'),

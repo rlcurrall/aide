@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import type { Options } from 'yargs';
 import yargs from 'yargs/yargs';
 
-import prCreateCommand from './pr-create.js';
-import prUpdateCommand from './pr-update.js';
+import prCreateCommand from './create.js';
+import prUpdateCommand from './update.js';
 import {
   decodePullRequestBodyChunks,
   normalizePullRequestBodyText,

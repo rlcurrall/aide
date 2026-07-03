@@ -68,8 +68,10 @@ import {
   replyToPullRequestCommentForUrl,
   resolvePullRequestProviderForRemote,
   resolvePullRequestProviderForRepository,
+  resolvePullRequestProviderForRepositoryInput,
   resolvePullRequestProviderForUrl,
   resolvePullRequestProviderFromRegistryForRemote,
+  resolvePullRequestProviderFromRegistryForRepositoryInput,
   resolvePullRequestProviderFromRegistryForUrl,
   updatePullRequestForRemote,
   updatePullRequestForRepository,
@@ -464,6 +466,245 @@ describe('pull request provider resolution', () => {
       },
     });
     expect(Object.isFrozen(result.match)).toBe(true);
+  });
+
+  test('resolves repository input through provider-owned matchRepository', async () => {
+    const calls: unknown[] = [];
+    const repository = externalRepository('gitlab', { projectId: 10 });
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+
+    const result = await Effect.runPromise(
+      resolvePullRequestProviderForRepositoryInput(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              matchRepository: (request) => {
+                calls.push(request);
+                return Effect.succeed({
+                  source: 'repository-ref',
+                  priority: 125,
+                  detail: 'gitlab/acme/widgets',
+                  repository,
+                });
+              },
+            },
+          },
+        ],
+        { providerId: 'gitlab', project: 'acme', repo: 'widgets' }
+      )
+    );
+
+    expect(calls).toEqual([
+      { providerId: 'gitlab', project: 'acme', repo: 'widgets' },
+    ]);
+    expect(result).toEqual({
+      pluginId: 'gitlab-plugin',
+      providerId: 'gitlab',
+      priority: 125,
+      features: {},
+      match: {
+        source: 'repository-ref',
+        priority: 125,
+        detail: 'gitlab/acme/widgets',
+        repository,
+      },
+    });
+  });
+
+  test('rejects repository matchers that do not return Effects', async () => {
+    const provider = fakeProvider('gitlab-plugin', 'gitlab', 100);
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRepositoryInput(
+        [
+          {
+            ...provider,
+            capability: {
+              ...provider.capability,
+              matchRepository: () =>
+                ({
+                  source: 'repository-ref',
+                  repository: externalRepository('gitlab'),
+                }) as never,
+            },
+          },
+        ],
+        { providerId: 'gitlab', project: 'acme', repo: 'widgets' }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error.reason).toBe('matchRepository must return an Effect');
+  });
+
+  test('resolves GitHub repository input through the GitHub provider', async () => {
+    const registry = createBuiltinCommandRegistry();
+
+    const result = await Effect.runPromise(
+      resolvePullRequestProviderFromRegistryForRepositoryInput(registry, {
+        providerId: 'github',
+        project: 'acme',
+        repo: 'widgets',
+      })
+    );
+
+    expect(result.pluginId).toBe('github');
+    expect(result.providerId).toBe('github');
+    expect(result.match).toEqual({
+      source: 'repository-ref',
+      priority: 100,
+      detail: 'github.com/acme/widgets',
+      repository: {
+        kind: 'github',
+        host: 'github.com',
+        owner: 'acme',
+        repo: 'widgets',
+      },
+    });
+  });
+
+  test('resolves Azure DevOps repository input through the Azure DevOps provider', async () => {
+    const registry = createCommandRegistry().registerPlugin(
+      createAzureDevOpsPlugin({
+        createClient: async () => ({
+          client: {} as unknown as AzureDevOpsClient,
+          config: {
+            orgUrl: 'https://dev.azure.com/acme',
+            pat: 'token',
+            authMethod: 'pat',
+          },
+        }),
+      })
+    );
+
+    const result = await Effect.runPromise(
+      resolvePullRequestProviderFromRegistryForRepositoryInput(registry, {
+        project: 'Platform',
+        repo: 'widgets',
+      })
+    );
+
+    expect(result.pluginId).toBe('azure-devops');
+    expect(result.providerId).toBe('azure-devops');
+    expect(result.match).toEqual({
+      source: 'repository-ref',
+      priority: 100,
+      detail: 'acme/Platform/widgets',
+      repository: {
+        kind: 'azure-devops',
+        org: 'acme',
+        project: 'Platform',
+        repo: 'widgets',
+      },
+    });
+  });
+
+  test('uses explicit GitHub host input to avoid Azure DevOps ambiguity', async () => {
+    const registry = createCommandRegistry()
+      .registerPlugin(createGitHubPlugin())
+      .registerPlugin(
+        createAzureDevOpsPlugin({
+          createClient: async () => ({
+            client: {} as unknown as AzureDevOpsClient,
+            config: {
+              orgUrl: 'https://dev.azure.com/acme',
+              pat: 'token',
+              authMethod: 'pat',
+            },
+          }),
+        })
+      );
+
+    const result = await Effect.runPromise(
+      resolvePullRequestProviderFromRegistryForRepositoryInput(registry, {
+        host: 'github.com',
+        owner: 'acme',
+        repo: 'widgets',
+      })
+    );
+
+    expect(result.pluginId).toBe('github');
+    expect(result.providerId).toBe('github');
+    expect(result.match.repository).toEqual({
+      kind: 'github',
+      host: 'github.com',
+      owner: 'acme',
+      repo: 'widgets',
+    });
+  });
+
+  test('uses explicit Azure DevOps host input to avoid GitHub ambiguity', async () => {
+    const registry = createCommandRegistry()
+      .registerPlugin(createGitHubPlugin())
+      .registerPlugin(
+        createAzureDevOpsPlugin({
+          createClient: async () => ({
+            client: {} as unknown as AzureDevOpsClient,
+            config: {
+              orgUrl: 'https://dev.azure.com/acme',
+              pat: 'token',
+              authMethod: 'pat',
+            },
+          }),
+        })
+      );
+
+    const result = await Effect.runPromise(
+      resolvePullRequestProviderFromRegistryForRepositoryInput(registry, {
+        host: 'dev.azure.com',
+        org: 'acme',
+        project: 'Platform',
+        repo: 'widgets',
+      })
+    );
+
+    expect(result.pluginId).toBe('azure-devops');
+    expect(result.providerId).toBe('azure-devops');
+    expect(result.match.repository).toEqual({
+      kind: 'azure-devops',
+      org: 'acme',
+      project: 'Platform',
+      repo: 'widgets',
+    });
+  });
+
+  test('treats owner as a GitHub repository signal and org/project as Azure DevOps signals', async () => {
+    const registry = createCommandRegistry()
+      .registerPlugin(createGitHubPlugin())
+      .registerPlugin(
+        createAzureDevOpsPlugin({
+          createClient: async () => ({
+            client: {} as unknown as AzureDevOpsClient,
+            config: {
+              orgUrl: 'https://dev.azure.com/acme',
+              pat: 'token',
+              authMethod: 'pat',
+            },
+          }),
+        })
+      );
+
+    const githubResult = await Effect.runPromise(
+      resolvePullRequestProviderFromRegistryForRepositoryInput(registry, {
+        owner: 'acme',
+        repo: 'widgets',
+      })
+    );
+    const azureDevOpsResult = await Effect.runPromise(
+      resolvePullRequestProviderFromRegistryForRepositoryInput(registry, {
+        org: 'acme',
+        project: 'Platform',
+        repo: 'widgets',
+      })
+    );
+
+    expect(githubResult.providerId).toBe('github');
+    expect(azureDevOpsResult.providerId).toBe('azure-devops');
   });
 
   test('fails with a typed unsupported-provider error when no provider owns a repository ref', async () => {

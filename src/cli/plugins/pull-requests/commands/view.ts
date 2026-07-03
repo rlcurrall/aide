@@ -8,7 +8,6 @@ import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 import type { AidePullRequestViewResult } from '@cli/host/plugin-descriptor.js';
 import { getAideHostContext } from '@cli/host/runtime-context.js';
-import { validatePRId } from '@lib/ado-utils.js';
 import { logProgress } from '@lib/cli-utils.js';
 import { handleCommandError } from '@lib/errors.js';
 import { getCurrentBranch, getGitRemoteUrl } from '@lib/git-utils.js';
@@ -18,7 +17,12 @@ import {
   type OutputFormat,
   type ViewArgs,
 } from '@schemas/pr/view.js';
-import { resolveExplicitPullRequestRepositoryRef } from './repository-ref.js';
+import { validatePullRequestId } from './pr-id.js';
+import {
+  hasExplicitPullRequestRepositoryInput,
+  pullRequestRepositoryOptions,
+  resolveExplicitPullRequestRepositoryRef,
+} from './repository-ref.js';
 
 // ============================================================================
 // Provider-neutral Formatting
@@ -133,9 +137,6 @@ async function resolvePullRequestView(
     throw new Error('Pull request provider services are unavailable.');
   }
 
-  const hasExplicitRepoContext =
-    args.project !== undefined || args.repo !== undefined;
-
   if (args.pr === undefined) {
     const branch = getCurrentBranch();
     if (!branch) {
@@ -145,12 +146,14 @@ async function resolvePullRequestView(
     }
 
     logProgress(`Searching for PR from branch '${branch}'...`, format);
-    const { result, autoDiscovered } = hasExplicitRepoContext
+    const { result, autoDiscovered } = hasExplicitPullRequestRepositoryInput(
+      args
+    )
       ? await (async () => {
           const { repository, autoDiscovered } =
             await resolveExplicitPullRequestRepositoryRef(
-              args.project,
-              args.repo
+              hostContext.services,
+              args
             );
           const result = await Effect.runPromise(
             hostContext.services.findPullRequestForBranchForRepository(
@@ -192,16 +195,16 @@ async function resolvePullRequestView(
     return { result, autoDiscovered: false };
   }
 
-  const validation = validatePRId(args.pr);
+  const validation = validatePullRequestId(args.pr);
   if (!validation.valid || validation.value === undefined) {
     throw new Error(
       `Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
     );
   }
 
-  if (hasExplicitRepoContext) {
+  if (hasExplicitPullRequestRepositoryInput(args)) {
     const { repository, autoDiscovered } =
-      await resolveExplicitPullRequestRepositoryRef(args.project, args.repo);
+      await resolveExplicitPullRequestRepositoryRef(hostContext.services, args);
     const result = await Effect.runPromise(
       hostContext.services.getPullRequestForRepository(repository, {
         pullRequest: { number: validation.value },
@@ -234,14 +237,7 @@ export default {
       describe:
         'PR ID or full PR URL (auto-detected from current branch if omitted)',
     },
-    project: {
-      type: 'string',
-      describe: 'Project name (auto-discovered from git remote)',
-    },
-    repo: {
-      type: 'string',
-      describe: 'Repository name (auto-discovered from git remote)',
-    },
+    ...pullRequestRepositoryOptions,
     format: {
       type: 'string',
       choices: ['text', 'json', 'markdown'] as const,

@@ -1,51 +1,96 @@
-import type { AidePullRequestRepositoryRef } from '@cli/host/plugin-descriptor.js';
-import { MissingRepoContextError, resolveRepoContext } from '@lib/ado-utils.js';
-import { loadAzureDevOpsConfig } from '@lib/config.js';
+import { Effect } from 'effect';
+import type { Options } from 'yargs';
+
+import type {
+  AidePullRequestRepositoryInput,
+  AidePullRequestRepositoryRef,
+} from '@cli/host/plugin-descriptor.js';
+import type { AideHostServices } from '@cli/host/runtime-context.js';
+
+export interface PullRequestRepositoryArgs {
+  readonly provider?: string;
+  readonly host?: string;
+  readonly owner?: string;
+  readonly org?: string;
+  readonly project?: string;
+  readonly repo?: string;
+}
 
 export interface ResolvedPullRequestRepositoryRef {
   readonly repository: AidePullRequestRepositoryRef;
   readonly autoDiscovered: boolean;
 }
 
+export const pullRequestRepositoryOptions = Object.freeze({
+  provider: {
+    type: 'string',
+    describe: 'PR provider for explicit repository context',
+  },
+  host: {
+    type: 'string',
+    describe: 'Repository host for explicit repository context',
+  },
+  owner: {
+    type: 'string',
+    describe: 'Repository owner for explicit repository context',
+  },
+  org: {
+    type: 'string',
+    describe: 'Organization for explicit repository context',
+  },
+  project: {
+    type: 'string',
+    describe: 'Project name for explicit repository context',
+  },
+  repo: {
+    type: 'string',
+    describe: 'Repository name for explicit repository context',
+  },
+} satisfies Record<string, Options>);
+
+export function hasExplicitPullRequestRepositoryInput(
+  args: PullRequestRepositoryArgs
+): boolean {
+  return (
+    args.provider !== undefined ||
+    args.host !== undefined ||
+    args.owner !== undefined ||
+    args.org !== undefined ||
+    args.project !== undefined ||
+    args.repo !== undefined
+  );
+}
+
 export async function resolveExplicitPullRequestRepositoryRef(
-  project: string | undefined,
-  repo: string | undefined
+  services: AideHostServices,
+  args: PullRequestRepositoryArgs
 ): Promise<ResolvedPullRequestRepositoryRef> {
-  const context = resolveRepoContext(project, repo);
-  const org = context.org ?? (await configuredAzureDevOpsOrg());
-  if (org === null) {
-    throw new MissingRepoContextError(
-      'Could not determine Azure DevOps organization. Run this command from an Azure DevOps git repository or configure AZURE_DEVOPS_ORG_URL via `aide login ado`.'
-    );
-  }
+  const input = buildPullRequestRepositoryInput(args);
+  const provider = await Effect.runPromise(
+    services.resolvePullRequestProviderForRepositoryInput(input)
+  );
 
   return {
-    repository: {
-      kind: 'azure-devops',
-      org,
-      project: context.project,
-      repo: context.repo,
-    },
-    autoDiscovered: context.autoDiscovered,
+    repository: provider.match.repository,
+    autoDiscovered: false,
   };
 }
 
-async function configuredAzureDevOpsOrg(): Promise<string | null> {
-  const { config } = await loadAzureDevOpsConfig();
-  return azureDevOpsOrgFromUrl(config.orgUrl);
+function buildPullRequestRepositoryInput(
+  args: PullRequestRepositoryArgs
+): AidePullRequestRepositoryInput {
+  return {
+    ...(args.provider === undefined
+      ? {}
+      : { providerId: normalizePullRequestProviderId(args.provider) }),
+    ...(args.host === undefined ? {} : { host: args.host }),
+    ...(args.owner === undefined ? {} : { owner: args.owner }),
+    ...(args.org === undefined ? {} : { org: args.org }),
+    ...(args.project === undefined ? {} : { project: args.project }),
+    ...(args.repo === undefined ? {} : { repo: args.repo }),
+  };
 }
 
-function azureDevOpsOrgFromUrl(orgUrl: string): string | null {
-  try {
-    const url = new URL(orgUrl);
-    if (url.hostname === 'dev.azure.com') {
-      return url.pathname.split('/').filter(Boolean)[0] ?? null;
-    }
-    if (url.hostname.endsWith('.visualstudio.com')) {
-      return url.hostname.replace(/\.visualstudio\.com$/, '');
-    }
-    return null;
-  } catch {
-    return null;
-  }
+function normalizePullRequestProviderId(provider: string): string {
+  return provider === 'ado' ? 'azure-devops' : provider;
 }
