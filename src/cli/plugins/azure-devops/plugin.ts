@@ -3,6 +3,7 @@ import * as v from 'valibot';
 
 import {
   defineAidePlugin,
+  type AideAuthAccount,
   type AideAuthInputField,
   type AideAuthLoginRequest,
   type AidePullRequestAddCommentRequest,
@@ -165,6 +166,42 @@ function mapAzureDevOpsAuthStatus(
   }
 }
 
+function azureDevOpsAuthAccounts(
+  status: ConfigStatus<AzureDevOpsConfig>
+): readonly AideAuthAccount[] {
+  if (status.kind !== 'env' && status.kind !== 'keyring') return [];
+
+  const sourceKind = status.kind;
+  const org = azureDevOpsOrgFromUrl(status.value.orgUrl);
+  const host = new URL(status.value.orgUrl).host;
+  const metadata = {
+    authMethod: status.value.authMethod,
+    ...(status.value.defaultProject === undefined
+      ? {}
+      : { defaultProject: status.value.defaultProject }),
+  };
+
+  return [
+    {
+      id: org ?? status.value.orgUrl,
+      providerId: 'azure-devops',
+      label: org ?? status.value.orgUrl,
+      detail: `${status.value.orgUrl} (${status.value.authMethod}, ${sourceKind})`,
+      sourceKind,
+      metadata,
+      scope: {
+        id: status.value.orgUrl,
+        providerId: 'azure-devops',
+        host,
+        ...(org === null ? {} : { org }),
+        label: status.value.orgUrl,
+        sourceKind,
+        metadata,
+      },
+    },
+  ];
+}
+
 function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
   return Effect.gen(function* () {
     if (request.fromEnv) {
@@ -243,6 +280,11 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
       try: () => probeConfig(),
       catch: (error) => error,
     }).pipe(Effect.map(mapAzureDevOpsAuthStatus));
+  const authAccounts = () =>
+    Effect.tryPromise({
+      try: () => probeConfig(),
+      catch: (error) => error,
+    }).pipe(Effect.map(azureDevOpsAuthAccounts));
 
   const listPullRequests = (
     request: AidePullRequestListRequest
@@ -864,6 +906,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           summary: 'Remove Azure DevOps credentials',
         },
         status: authStatus,
+        accounts: authAccounts,
         operations: {
           login: loginAzureDevOpsAuth,
           logout: logoutAzureDevOpsAuth,

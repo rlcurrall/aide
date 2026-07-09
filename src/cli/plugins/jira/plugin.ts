@@ -4,6 +4,7 @@ import * as v from 'valibot';
 import { jiraCommands } from '@cli/commands/jira/index.js';
 import {
   defineAidePlugin,
+  type AideAuthAccount,
   type AideAuthInputField,
   type AideAuthLoginRequest,
   type AidePluginAuthStatus,
@@ -137,6 +138,39 @@ function mapJiraAuthStatus(
   }
 }
 
+function jiraAuthAccounts(
+  status: ConfigStatus<JiraConfig>
+): readonly AideAuthAccount[] {
+  if (status.kind !== 'env' && status.kind !== 'keyring') return [];
+
+  const sourceKind = status.kind;
+  const host = new URL(status.value.url).host;
+  const metadata =
+    status.value.defaultProject === undefined
+      ? undefined
+      : { defaultProject: status.value.defaultProject };
+
+  return [
+    {
+      id: `${host}:${status.value.email}`,
+      providerId: 'jira',
+      label: status.value.email,
+      detail: `${status.value.url} (${sourceKind})`,
+      sourceKind,
+      ...(metadata === undefined ? {} : { metadata }),
+      scope: {
+        id: status.value.url,
+        providerId: 'jira',
+        host,
+        account: status.value.email,
+        label: status.value.url,
+        sourceKind,
+        ...(metadata === undefined ? {} : { metadata }),
+      },
+    },
+  ];
+}
+
 function loginJiraAuth(request: AideAuthLoginRequest) {
   return Effect.gen(function* () {
     if (request.fromEnv) {
@@ -208,6 +242,11 @@ export function createJiraPlugin(opts: JiraPluginOptions = {}) {
       try: () => probeConfig(),
       catch: (error) => error,
     }).pipe(Effect.map(mapJiraAuthStatus));
+  const authAccounts = () =>
+    Effect.tryPromise({
+      try: () => probeConfig(),
+      catch: (error) => error,
+    }).pipe(Effect.map(jiraAuthAccounts));
 
   return defineAidePlugin({
     id: 'jira',
@@ -238,6 +277,7 @@ export function createJiraPlugin(opts: JiraPluginOptions = {}) {
           summary: 'Remove Jira credentials',
         },
         status: authStatus,
+        accounts: authAccounts,
         operations: {
           login: loginJiraAuth,
           logout: logoutJiraAuth,

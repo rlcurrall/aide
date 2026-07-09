@@ -1,11 +1,18 @@
 import { Data, Effect, type Duration } from 'effect';
 
 import type {
+  AideAuthAccount,
+  AideAuthAccountDiscoveryRequest,
   AideAuthLoginRequest,
   AideAuthLoginResult,
+  AideAuthLogoutRequest,
   AideAuthLogoutResult,
+  AideAuthScope,
+  AideAuthSourceKind,
+  AideAuthStatusRequest,
   AideAuthProviderCapability,
   AideDiscoveredCapability,
+  AidePluginAuthStatus,
 } from './plugin-descriptor.js';
 
 export class UnsupportedAuthProviderOperationError extends Data.TaggedError(
@@ -73,16 +80,80 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null;
 }
 
+function isOperationOptions(
+  value: AideAuthLogoutRequest | AuthProviderOperationOptions
+): value is AuthProviderOperationOptions {
+  return isRecord(value) && 'operationTimeout' in value && !('scope' in value);
+}
+
+const authSourceKinds = Object.freeze([
+  'env',
+  'keyring',
+  'external',
+  'unknown',
+] as const);
+
+function isAuthSourceKind(value: unknown): value is AideAuthSourceKind {
+  return (
+    typeof value === 'string' &&
+    authSourceKinds.includes(value as AideAuthSourceKind)
+  );
+}
+
+function snapshotScope(
+  scope: AideAuthScope | undefined
+): AideAuthScope | undefined {
+  if (scope === undefined) return undefined;
+  return Object.freeze({
+    id: scope.id,
+    providerId: scope.providerId,
+    host: scope.host,
+    org: scope.org,
+    account: scope.account,
+    label: scope.label,
+    sourceKind: scope.sourceKind,
+    metadata:
+      scope.metadata === undefined
+        ? undefined
+        : Object.freeze({ ...scope.metadata }),
+  });
+}
+
+function snapshotStatusRequest(
+  request: AideAuthStatusRequest = {}
+): AideAuthStatusRequest {
+  return Object.freeze({
+    scope: snapshotScope(request.scope),
+  });
+}
+
+function snapshotAccountDiscoveryRequest(
+  request: AideAuthAccountDiscoveryRequest = {}
+): AideAuthAccountDiscoveryRequest {
+  return Object.freeze({
+    scope: snapshotScope(request.scope),
+  });
+}
+
 function snapshotLoginRequest(
   request: AideAuthLoginRequest
 ): AideAuthLoginRequest {
   return Object.freeze({
+    scope: snapshotScope(request.scope),
     fromEnv: request.fromEnv,
     values:
       request.values === undefined
         ? undefined
         : Object.freeze({ ...request.values }),
     prompt: request.prompt,
+  });
+}
+
+function snapshotLogoutRequest(
+  request: AideAuthLogoutRequest = {}
+): AideAuthLogoutRequest {
+  return Object.freeze({
+    scope: snapshotScope(request.scope),
   });
 }
 
@@ -123,6 +194,180 @@ function snapshotMessages(
   }
 
   return Effect.succeed(Object.freeze([...messages]));
+}
+
+function validateOptionalString(
+  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  operation: string,
+  field: string,
+  value: unknown
+): Effect.Effect<string | undefined, InvalidAuthProviderOperationResultError> {
+  if (value === undefined) return Effect.succeed(undefined);
+  if (typeof value !== 'string') {
+    return Effect.fail(
+      invalidResult(provider, operation, `${field} must be a string`)
+    );
+  }
+  return Effect.succeed(value);
+}
+
+function validateNonEmptyString(
+  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  operation: string,
+  field: string,
+  value: unknown
+): Effect.Effect<string, InvalidAuthProviderOperationResultError> {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return Effect.fail(
+      invalidResult(provider, operation, `${field} must be a non-empty string`)
+    );
+  }
+  return Effect.succeed(value);
+}
+
+function validateSourceKind(
+  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  operation: string,
+  field: string,
+  value: unknown
+): Effect.Effect<
+  AideAuthSourceKind | undefined,
+  InvalidAuthProviderOperationResultError
+> {
+  if (value === undefined) return Effect.succeed(undefined);
+  if (!isAuthSourceKind(value)) {
+    return Effect.fail(
+      invalidResult(
+        provider,
+        operation,
+        `${field} must be one of: ${authSourceKinds.join(', ')}`
+      )
+    );
+  }
+  return Effect.succeed(value);
+}
+
+function validateMetadata(
+  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  operation: string,
+  field: string,
+  value: unknown
+): Effect.Effect<
+  Readonly<Record<string, string | number | boolean>> | undefined,
+  InvalidAuthProviderOperationResultError
+> {
+  if (value === undefined) return Effect.succeed(undefined);
+  if (!isRecord(value) || Array.isArray(value)) {
+    return Effect.fail(
+      invalidResult(provider, operation, `${field} must be an object`)
+    );
+  }
+
+  const snapshot: Record<string, string | number | boolean> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (
+      typeof entry !== 'string' &&
+      typeof entry !== 'boolean' &&
+      !(typeof entry === 'number' && Number.isFinite(entry))
+    ) {
+      return Effect.fail(
+        invalidResult(
+          provider,
+          operation,
+          `${field}.${key} must be a string, number, or boolean`
+        )
+      );
+    }
+    snapshot[key] = entry;
+  }
+
+  return Effect.succeed(Object.freeze(snapshot));
+}
+
+function validateResultScope(
+  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  operation: string,
+  field: string,
+  value: unknown
+): Effect.Effect<
+  AideAuthScope | undefined,
+  InvalidAuthProviderOperationResultError
+> {
+  if (value === undefined) return Effect.succeed(undefined);
+  if (!isRecord(value)) {
+    return Effect.fail(
+      invalidResult(provider, operation, `${field} must be an object`)
+    );
+  }
+
+  return Effect.all({
+    id: validateNonEmptyString(provider, operation, `${field}.id`, value.id),
+    providerId: validateOptionalString(
+      provider,
+      operation,
+      `${field}.providerId`,
+      value.providerId
+    ),
+    host: validateOptionalString(
+      provider,
+      operation,
+      `${field}.host`,
+      value.host
+    ),
+    org: validateOptionalString(provider, operation, `${field}.org`, value.org),
+    account: validateOptionalString(
+      provider,
+      operation,
+      `${field}.account`,
+      value.account
+    ),
+    label: validateOptionalString(
+      provider,
+      operation,
+      `${field}.label`,
+      value.label
+    ),
+    sourceKind: validateSourceKind(
+      provider,
+      operation,
+      `${field}.sourceKind`,
+      value.sourceKind
+    ),
+    metadata: validateMetadata(
+      provider,
+      operation,
+      `${field}.metadata`,
+      value.metadata
+    ),
+  }).pipe(
+    Effect.flatMap((scope) => {
+      const providerId = scope.providerId ?? provider.capability.providerId;
+      if (providerId !== provider.capability.providerId) {
+        return Effect.fail(
+          invalidResult(
+            provider,
+            operation,
+            `${field}.providerId must match provider id '${provider.capability.providerId}'`
+          )
+        );
+      }
+
+      return Effect.succeed(
+        Object.freeze({
+          id: scope.id,
+          providerId,
+          ...(scope.host === undefined ? {} : { host: scope.host }),
+          ...(scope.org === undefined ? {} : { org: scope.org }),
+          ...(scope.account === undefined ? {} : { account: scope.account }),
+          ...(scope.label === undefined ? {} : { label: scope.label }),
+          ...(scope.sourceKind === undefined
+            ? {}
+            : { sourceKind: scope.sourceKind }),
+          ...(scope.metadata === undefined ? {} : { metadata: scope.metadata }),
+        })
+      );
+    })
+  );
 }
 
 function validateLoginResult(
@@ -190,6 +435,155 @@ function validateLogoutResult(
       })
     )
   );
+}
+
+function validateAuthStatus(
+  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  operation: string,
+  result: unknown
+): Effect.Effect<
+  AidePluginAuthStatus,
+  InvalidAuthProviderOperationResultError
+> {
+  if (!isRecord(result)) {
+    return Effect.fail(
+      invalidResult(provider, operation, 'result must be an object')
+    );
+  }
+
+  const state = result.state;
+  if (
+    state !== 'configured' &&
+    state !== 'not-configured' &&
+    state !== 'misconfigured' &&
+    state !== 'unavailable'
+  ) {
+    return Effect.fail(
+      invalidResult(
+        provider,
+        operation,
+        "state must be 'configured', 'not-configured', 'misconfigured', or 'unavailable'"
+      )
+    );
+  }
+
+  return validateOptionalString(
+    provider,
+    operation,
+    'detail',
+    result.detail
+  ).pipe(
+    Effect.map((detail) =>
+      Object.freeze({
+        state,
+        ...(detail === undefined ? {} : { detail }),
+      })
+    )
+  );
+}
+
+function validateAccountResult(
+  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  operation: string,
+  account: unknown,
+  index: number
+): Effect.Effect<AideAuthAccount, InvalidAuthProviderOperationResultError> {
+  const field = `accounts[${index}]`;
+  if (!isRecord(account)) {
+    return Effect.fail(
+      invalidResult(provider, operation, `${field} must be an object`)
+    );
+  }
+
+  return Effect.all({
+    id: validateNonEmptyString(provider, operation, `${field}.id`, account.id),
+    providerId: validateOptionalString(
+      provider,
+      operation,
+      `${field}.providerId`,
+      account.providerId
+    ),
+    label: validateNonEmptyString(
+      provider,
+      operation,
+      `${field}.label`,
+      account.label
+    ),
+    detail: validateOptionalString(
+      provider,
+      operation,
+      `${field}.detail`,
+      account.detail
+    ),
+    sourceKind: validateSourceKind(
+      provider,
+      operation,
+      `${field}.sourceKind`,
+      account.sourceKind
+    ),
+    metadata: validateMetadata(
+      provider,
+      operation,
+      `${field}.metadata`,
+      account.metadata
+    ),
+    scope: validateResultScope(
+      provider,
+      operation,
+      `${field}.scope`,
+      account.scope
+    ),
+  }).pipe(
+    Effect.flatMap((snapshot) => {
+      const providerId = snapshot.providerId ?? provider.capability.providerId;
+      if (providerId !== provider.capability.providerId) {
+        return Effect.fail(
+          invalidResult(
+            provider,
+            operation,
+            `${field}.providerId must match provider id '${provider.capability.providerId}'`
+          )
+        );
+      }
+
+      return Effect.succeed(
+        Object.freeze({
+          id: snapshot.id,
+          providerId,
+          label: snapshot.label,
+          ...(snapshot.detail === undefined ? {} : { detail: snapshot.detail }),
+          ...(snapshot.sourceKind === undefined
+            ? {}
+            : { sourceKind: snapshot.sourceKind }),
+          ...(snapshot.metadata === undefined
+            ? {}
+            : { metadata: snapshot.metadata }),
+          ...(snapshot.scope === undefined ? {} : { scope: snapshot.scope }),
+        })
+      );
+    })
+  );
+}
+
+function validateAccountsResult(
+  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  result: unknown
+): Effect.Effect<
+  readonly AideAuthAccount[],
+  InvalidAuthProviderOperationResultError
+> {
+  const operation = 'accounts';
+  if (!Array.isArray(result)) {
+    return Effect.fail(
+      invalidResult(provider, operation, 'result must be an array')
+    );
+  }
+
+  return Effect.all(
+    result.map((account, index) =>
+      validateAccountResult(provider, operation, account, index)
+    )
+  ).pipe(Effect.map((accounts) => Object.freeze([...accounts])));
 }
 
 function invokeAuthProviderOperation<A>(
@@ -282,15 +676,80 @@ export function loginWithAuthProvider(
   ).pipe(Effect.flatMap((result) => validateLoginResult(provider, result)));
 }
 
+export function getAuthProviderStatus(
+  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  request: AideAuthStatusRequest = {},
+  options: AuthProviderOperationOptions = {}
+): Effect.Effect<AidePluginAuthStatus, AuthProviderOperationInvocationError> {
+  const operationRequest = snapshotStatusRequest(request);
+  const operation =
+    operationRequest.scope === undefined
+      ? () => provider.capability.status()
+      : () => provider.capability.status(operationRequest);
+  return invokeAuthProviderOperation(
+    provider,
+    'status',
+    operation,
+    options
+  ).pipe(
+    Effect.flatMap((result) => validateAuthStatus(provider, 'status', result))
+  );
+}
+
 export function logoutWithAuthProvider(
   provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  options?: AuthProviderOperationOptions
+): Effect.Effect<AideAuthLogoutResult, AuthProviderOperationInvocationError>;
+export function logoutWithAuthProvider(
+  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  request?: AideAuthLogoutRequest,
+  options?: AuthProviderOperationOptions
+): Effect.Effect<AideAuthLogoutResult, AuthProviderOperationInvocationError>;
+export function logoutWithAuthProvider(
+  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  requestOrOptions: AideAuthLogoutRequest | AuthProviderOperationOptions = {},
   options: AuthProviderOperationOptions = {}
 ): Effect.Effect<AideAuthLogoutResult, AuthProviderOperationInvocationError> {
+  const operationOptions = isOperationOptions(requestOrOptions)
+    ? requestOrOptions
+    : options;
+  const request = isOperationOptions(requestOrOptions) ? {} : requestOrOptions;
+  const operationRequest = snapshotLogoutRequest(request);
   const logout = provider.capability.operations?.logout;
+  const operation =
+    logout === undefined
+      ? undefined
+      : operationRequest.scope === undefined
+        ? () => logout()
+        : () => logout(operationRequest);
   return invokeAuthProviderOperation(
     provider,
     'logout',
-    logout === undefined ? undefined : () => logout(),
-    options
+    operation,
+    operationOptions
   ).pipe(Effect.flatMap((result) => validateLogoutResult(provider, result)));
+}
+
+export function listAuthProviderAccounts(
+  provider: AideDiscoveredCapability<AideAuthProviderCapability>,
+  request: AideAuthAccountDiscoveryRequest = {},
+  options: AuthProviderOperationOptions = {}
+): Effect.Effect<
+  readonly AideAuthAccount[],
+  AuthProviderOperationInvocationError
+> {
+  const operationRequest = snapshotAccountDiscoveryRequest(request);
+  const accounts = provider.capability.accounts;
+  const operation =
+    accounts === undefined
+      ? undefined
+      : operationRequest.scope === undefined
+        ? () => accounts()
+        : () => accounts(operationRequest);
+  return invokeAuthProviderOperation(
+    provider,
+    'accounts',
+    operation,
+    options
+  ).pipe(Effect.flatMap((result) => validateAccountsResult(provider, result)));
 }

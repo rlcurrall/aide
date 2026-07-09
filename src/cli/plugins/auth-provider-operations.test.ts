@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Effect } from 'effect';
 
 import type {
+  AideDiscoveredCapability,
   AideAuthPrompt,
   AideAuthPromptTextRequest,
   AideAuthProviderCapability,
 } from '@cli/host/plugin-descriptor.js';
+import { listAuthProviderAccounts } from '@cli/host/auth-provider-operations.js';
 import { createAzureDevOpsPlugin } from './azure-devops/plugin.js';
 import { createGitHubPlugin } from './github/plugin.js';
 import { createJiraPlugin } from './jira/plugin.js';
@@ -59,6 +61,18 @@ function authProvider(plugin: {
   const provider = plugin.capabilities?.authProvider;
   if (provider === undefined) throw new Error('missing auth provider');
   return provider;
+}
+
+function discoveredAuthProvider(plugin: {
+  readonly id: string;
+  readonly capabilities?: {
+    readonly authProvider?: AideAuthProviderCapability;
+  };
+}): AideDiscoveredCapability<AideAuthProviderCapability> {
+  return Object.freeze({
+    pluginId: plugin.id,
+    capability: authProvider(plugin),
+  });
 }
 
 describe('auth provider operations', () => {
@@ -159,6 +173,72 @@ describe('auth provider operations', () => {
       messages: ['Using gh CLI auth. Nothing to do.'],
     });
     expect(store.has('aide:github')).toBe(false);
+  });
+
+  test('built-in providers expose configured auth accounts', async () => {
+    Bun.env.JIRA_URL = 'https://example.atlassian.net';
+    Bun.env.JIRA_EMAIL = 'dev@example.com';
+    Bun.env.JIRA_API_TOKEN = 'jira-token';
+    store.set(
+      'aide:ado',
+      JSON.stringify({
+        orgUrl: 'https://dev.azure.com/example',
+        pat: 'ado-token',
+        authMethod: 'pat',
+      })
+    );
+
+    const jiraAccounts = await Effect.runPromise(
+      listAuthProviderAccounts(discoveredAuthProvider(createJiraPlugin()))
+    );
+    const adoAccounts = await Effect.runPromise(
+      listAuthProviderAccounts(
+        discoveredAuthProvider(createAzureDevOpsPlugin())
+      )
+    );
+    const githubAccounts = await Effect.runPromise(
+      listAuthProviderAccounts(
+        discoveredAuthProvider(createGitHubPlugin({ ghAvailable: () => true }))
+      )
+    );
+
+    expect(jiraAccounts).toMatchObject([
+      {
+        providerId: 'jira',
+        label: 'dev@example.com',
+        sourceKind: 'env',
+        scope: {
+          providerId: 'jira',
+          host: 'example.atlassian.net',
+          account: 'dev@example.com',
+        },
+      },
+    ]);
+    expect(adoAccounts).toMatchObject([
+      {
+        providerId: 'azure-devops',
+        label: 'example',
+        sourceKind: 'keyring',
+        metadata: { authMethod: 'pat' },
+        scope: {
+          providerId: 'azure-devops',
+          host: 'dev.azure.com',
+          org: 'example',
+        },
+      },
+    ]);
+    expect('account' in (adoAccounts[0]?.scope ?? {})).toBe(false);
+    expect(githubAccounts).toMatchObject([
+      {
+        providerId: 'github',
+        sourceKind: 'external',
+        metadata: { authSource: 'gh-cli' },
+        scope: {
+          providerId: 'github',
+          host: 'github.com',
+        },
+      },
+    ]);
   });
 
   test('provider logout removes only the matching stored credential', async () => {

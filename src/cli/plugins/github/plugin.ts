@@ -3,6 +3,7 @@ import * as v from 'valibot';
 
 import {
   defineAidePlugin,
+  type AideAuthAccount,
   type AideAuthInputField,
   type AideAuthLoginRequest,
   type AidePullRequestAddCommentRequest,
@@ -135,6 +136,45 @@ function mapGithubAuthStatus(
   }
 }
 
+function githubAuthAccounts(
+  status: ConfigStatus<GithubConfigValue>
+): readonly AideAuthAccount[] {
+  if (status.kind !== 'env' && status.kind !== 'keyring') return [];
+
+  const sourceKind =
+    status.kind === 'keyring'
+      ? 'keyring'
+      : status.value.source === 'gh-cli'
+        ? 'external'
+        : 'env';
+  const sourceLabel =
+    status.value.source === 'gh-cli'
+      ? 'gh CLI'
+      : status.value.source === 'stored'
+        ? 'stored token'
+        : 'environment token';
+  const metadata = { authSource: status.value.source };
+
+  return [
+    {
+      id: `github.com:${status.value.source}`,
+      providerId: 'github',
+      label: 'GitHub',
+      detail: `configured via ${sourceLabel}`,
+      sourceKind,
+      metadata,
+      scope: {
+        id: 'github.com',
+        providerId: 'github',
+        host: 'github.com',
+        label: 'github.com',
+        sourceKind,
+        metadata,
+      },
+    },
+  ];
+}
+
 function loginGitHubAuth(
   request: AideAuthLoginRequest,
   ghAvailable: () => boolean
@@ -227,6 +267,11 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
       try: () => probeConfig(),
       catch: (error) => error,
     }).pipe(Effect.map(mapGithubAuthStatus));
+  const authAccounts = () =>
+    Effect.tryPromise({
+      try: () => probeConfig(),
+      catch: (error) => error,
+    }).pipe(Effect.map(githubAuthAccounts));
 
   const listPullRequests = (
     request: AidePullRequestListRequest
@@ -756,6 +801,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           summary: 'Remove GitHub credentials',
         },
         status: authStatus,
+        accounts: authAccounts,
         operations: {
           login: (request) => loginGitHubAuth(request, ghAvailable),
           logout: logoutGitHubAuth,

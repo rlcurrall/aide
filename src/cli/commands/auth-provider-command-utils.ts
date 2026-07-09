@@ -1,16 +1,23 @@
 import { Effect } from 'effect';
 
 import {
+  getAuthProviderStatus,
+  listAuthProviderAccounts,
   loginWithAuthProvider,
   logoutWithAuthProvider,
 } from '@cli/host/auth-provider-operations.js';
 import type {
+  AideAuthAccount,
+  AideAuthAccountDiscoveryRequest,
   AideAuthLoginRequest,
   AideAuthLoginResult,
+  AideAuthLogoutRequest,
   AideAuthLogoutResult,
   AideAuthPrompt,
   AideAuthProviderCapability,
+  AideAuthStatusRequest,
   AideDiscoveredCapability,
+  AidePluginAuthStatus,
 } from '@cli/host/plugin-descriptor.js';
 import {
   TerminalPrompter,
@@ -145,9 +152,28 @@ export async function runAuthProviderLogin(
 }
 
 export async function runAuthProviderLogout(
-  provider: DiscoveredAuthProvider
+  provider: DiscoveredAuthProvider,
+  request: AideAuthLogoutRequest = {}
 ): Promise<AideAuthLogoutResult> {
-  const result = await runLegacyCommandEffect(logoutWithAuthProvider(provider));
+  const result = await runLegacyCommandEffect(
+    logoutWithAuthProvider(provider, request)
+  );
   printMessages(result.messages);
   return result;
+}
+
+export async function runAuthProviderStatus(
+  provider: DiscoveredAuthProvider,
+  request: AideAuthStatusRequest = {}
+): Promise<AidePluginAuthStatus> {
+  return await runLegacyCommandEffect(getAuthProviderStatus(provider, request));
+}
+
+export async function runAuthProviderAccounts(
+  provider: DiscoveredAuthProvider,
+  request: AideAuthAccountDiscoveryRequest = {}
+): Promise<readonly AideAuthAccount[]> {
+  return await runLegacyCommandEffect(
+    listAuthProviderAccounts(provider, request)
+  );
 }

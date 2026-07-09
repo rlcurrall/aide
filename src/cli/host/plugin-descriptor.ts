@@ -63,24 +63,40 @@ export interface AidePluginAuthStatus {
   readonly detail?: string;
 }
 
+export type AideAuthMetadataValue = string | number | boolean;
+export type AideAuthMetadata = Readonly<Record<string, AideAuthMetadataValue>>;
+export type AideAuthSourceKind = 'env' | 'keyring' | 'external' | 'unknown';
+
 export interface AidePluginAuthCapability {
   readonly status: () => Effect.Effect<AidePluginAuthStatus, unknown, never>;
 }
 
 export interface AideAuthScope {
   readonly id: string;
+  readonly providerId?: string;
+  readonly host?: string;
+  readonly org?: string;
+  readonly account?: string;
   readonly label?: string;
-  readonly metadata?: Readonly<Record<string, string | number | boolean>>;
+  readonly sourceKind?: AideAuthSourceKind;
+  readonly metadata?: AideAuthMetadata;
 }
 
 export interface AideAuthStatusRequest {
   readonly scope?: AideAuthScope;
 }
 
+export interface AideAuthAccountDiscoveryRequest {
+  readonly scope?: AideAuthScope;
+}
+
 export interface AideAuthAccount {
   readonly id: string;
+  readonly providerId?: string;
   readonly label: string;
   readonly detail?: string;
+  readonly sourceKind?: AideAuthSourceKind;
+  readonly metadata?: AideAuthMetadata;
   readonly scope?: AideAuthScope;
 }
 
@@ -146,6 +162,7 @@ export interface AideAuthPrompt {
 export type AideAuthInputValue = string | boolean | undefined;
 
 export interface AideAuthLoginRequest {
+  readonly scope?: AideAuthScope;
   readonly fromEnv?: boolean;
   readonly values?: Readonly<Record<string, AideAuthInputValue>>;
   readonly prompt?: AideAuthPrompt;
@@ -161,11 +178,17 @@ export interface AideAuthLogoutResult {
   readonly messages?: readonly string[];
 }
 
+export interface AideAuthLogoutRequest {
+  readonly scope?: AideAuthScope;
+}
+
 export interface AideAuthProviderOperations {
   readonly login?: (
     request: AideAuthLoginRequest
   ) => Effect.Effect<AideAuthLoginResult, unknown, never>;
-  readonly logout?: () => Effect.Effect<AideAuthLogoutResult, unknown, never>;
+  readonly logout?: (
+    request?: AideAuthLogoutRequest
+  ) => Effect.Effect<AideAuthLogoutResult, unknown, never>;
 }
 
 export interface AideAuthProviderCapability {
@@ -176,11 +199,9 @@ export interface AideAuthProviderCapability {
   readonly status: (
     request?: AideAuthStatusRequest
   ) => Effect.Effect<AidePluginAuthStatus, unknown, never>;
-  readonly accounts?: () => Effect.Effect<
-    readonly AideAuthAccount[],
-    unknown,
-    never
-  >;
+  readonly accounts?: (
+    request?: AideAuthAccountDiscoveryRequest
+  ) => Effect.Effect<readonly AideAuthAccount[], unknown, never>;
   readonly operations?: AideAuthProviderOperations;
 }
 
