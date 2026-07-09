@@ -43,6 +43,7 @@ const authScopeFlagKeys = [
   'scope-account',
   'scope-label',
 ] as const;
+const authScopeFlagSet = new Set<string>(authScopeFlagKeys);
 
 export interface AuthScopeArgv {
   readonly 'scope-id'?: unknown;
@@ -104,6 +105,19 @@ export function providerHasAuthOperation(
 }
 
 export const authFieldFlagName = authInputFieldFlagName;
+
+export function assertNoReservedAuthScopeFlags(
+  provider: DiscoveredAuthProvider
+): void {
+  for (const field of provider.capability.login?.fields ?? []) {
+    const flagName = authFieldFlagName(field);
+    if (authScopeFlagSet.has(flagName)) {
+      throw new Error(
+        `Auth provider '${provider.capability.providerId}' login field '${field.key}' conflicts with reserved auth scope option '--${flagName}'`
+      );
+    }
+  }
+}
 
 function normalizeScopeValue(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;

@@ -241,6 +241,92 @@ describe('dynamic auth provider commands', () => {
     expect(observedRequest?.values).toEqual({ apiToken: 'secret-token' });
   });
 
+  test('login with --scope-id only sets id and leaves other scope fields undefined', async () => {
+    const registry = createCommandRegistry();
+    let observedRequest: AideAuthLoginRequest | undefined;
+    const originalLog = console.log;
+    console.log = () => {};
+
+    registry.registerExternalPlugin(
+      definePublicAidePlugin({
+        id: 'external-auth-plugin',
+        summary: 'External auth provider',
+        commands: [],
+        capabilities: {
+          authProvider: {
+            providerId: 'external-auth',
+            label: 'External Auth',
+            login: {
+              command: {
+                name: 'external',
+              },
+              summary: 'Save External Auth credentials',
+              fields: [
+                {
+                  kind: 'secret',
+                  key: 'apiToken',
+                  label: 'External token',
+                  description: 'External token',
+                  required: true,
+                },
+              ],
+            },
+            status: () => Effect.succeed({ state: 'configured' }),
+            operations: {
+              login: (request) =>
+                Effect.sync(() => {
+                  observedRequest = request;
+                  return {
+                    status: 'stored' as const,
+                    messages: ['external login stored'],
+                  };
+                }),
+            },
+          },
+        },
+      }),
+      { manifest: externalManifest('external-auth-plugin') }
+    );
+    registry.registerPlugin(legacyAuthPlugin);
+
+    try {
+      await registerCommands(
+        yargs([
+          'login',
+          'external',
+          '--api-token',
+          'secret-token',
+          '--scope-id',
+          'tenant-123',
+        ])
+          .scriptName('aide')
+          .exitProcess(false),
+        registry
+      )
+        .strict()
+        .parseAsync();
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(observedRequest).toMatchObject({
+      scope: {
+        id: 'tenant-123',
+        providerId: 'external-auth',
+      },
+      values: { apiToken: 'secret-token' },
+    });
+    expect(observedRequest?.scope).toMatchObject({
+      id: 'tenant-123',
+      providerId: 'external-auth',
+      host: undefined,
+      org: undefined,
+      account: undefined,
+      label: undefined,
+    });
+    expect(Object.isFrozen(observedRequest?.scope)).toBe(true);
+  });
+
   test('logout receives frozen scope from --scope-* flags', async () => {
     const registry = createCommandRegistry();
     let observedRequest: AideAuthLogoutRequest | undefined;
@@ -441,5 +527,149 @@ describe('dynamic auth provider commands', () => {
     expect(observedRequest).toMatchObject({ fromEnv: true });
     expect(observedRequest?.scope).toBeUndefined();
     expect(observedRequest?.values).toBeUndefined();
+  });
+
+  test('login --from-env with scope flags passes scope and omits values', async () => {
+    const registry = createCommandRegistry();
+    let observedRequest: AideAuthLoginRequest | undefined;
+
+    registry.registerExternalPlugin(
+      definePublicAidePlugin({
+        id: 'external-auth-plugin',
+        summary: 'External auth provider',
+        commands: [],
+        capabilities: {
+          authProvider: {
+            providerId: 'external-auth',
+            label: 'External Auth',
+            login: {
+              command: {
+                name: 'external',
+              },
+              summary: 'Save External Auth credentials',
+              fields: [
+                {
+                  kind: 'select',
+                  key: 'mode',
+                  label: 'Mode',
+                  choices: [{ value: 'default' }],
+                  default: 'default',
+                },
+              ],
+              envMigration: {
+                description: 'Migrate EXTERNAL_TOKEN into the keyring',
+                variables: ['EXTERNAL_TOKEN'],
+              },
+            },
+            status: () => Effect.succeed({ state: 'configured' }),
+            operations: {
+              login: (request) =>
+                Effect.sync(() => {
+                  observedRequest = request;
+                  return {
+                    status: 'stored' as const,
+                  };
+                }),
+            },
+          },
+        },
+      }),
+      { manifest: externalManifest('external-auth-plugin') }
+    );
+    registry.registerPlugin(legacyAuthPlugin);
+
+    await registerCommands(
+      yargs([
+        'login',
+        'external',
+        '--from-env',
+        '--scope-host',
+        'example.atlassian.net',
+        '--scope-account',
+        'alice',
+      ])
+        .scriptName('aide')
+        .exitProcess(false),
+      registry
+    )
+      .strict()
+      .parseAsync();
+
+    expect(observedRequest).toMatchObject({
+      fromEnv: true,
+      scope: {
+        id: 'example.atlassian.net:alice',
+        providerId: 'external-auth',
+        host: 'example.atlassian.net',
+        account: 'alice',
+      },
+    });
+    expect(observedRequest?.scope).toMatchObject({
+      id: 'example.atlassian.net:alice',
+      providerId: 'external-auth',
+      host: 'example.atlassian.net',
+      account: 'alice',
+    });
+    expect(observedRequest?.values).toBeUndefined();
+    expect(Object.isFrozen(observedRequest?.scope)).toBe(true);
+  });
+
+  test('login rejects field flag names that collide with reserved scope flags', async () => {
+    const registry = createCommandRegistry();
+    registry.registerExternalPlugin(
+      definePublicAidePlugin({
+        id: 'external-auth-plugin',
+        summary: 'External auth provider',
+        commands: [],
+        capabilities: {
+          authProvider: {
+            providerId: 'external-auth',
+            label: 'External Auth',
+            login: {
+              command: {
+                name: 'external',
+              },
+              summary: 'Save External Auth credentials',
+              fields: [
+                {
+                  kind: 'secret',
+                  key: 'scope-host',
+                  label: 'Scope host',
+                  description: 'Reserved field',
+                  required: true,
+                },
+              ],
+            },
+            status: () => Effect.succeed({ state: 'configured' }),
+            operations: {
+              login: () =>
+                Effect.sync(() => ({
+                  status: 'stored' as const,
+                  messages: ['external login stored'],
+                })),
+            },
+          },
+        },
+      }),
+      { manifest: externalManifest('external-auth-plugin') }
+    );
+    registry.registerPlugin(legacyAuthPlugin);
+
+    let observedError: unknown;
+    try {
+      await registerCommands(
+        yargs(['login', 'external']).scriptName('aide').exitProcess(false),
+        registry
+      )
+        .strict()
+        .parseAsync();
+    } catch (error) {
+      observedError = error;
+    }
+
+    expect(observedError).toBeDefined();
+    expect(String(observedError)).toContain(
+      "Auth provider 'external-auth' login field 'scope-host' conflicts with reserved auth scope option '--scope-host'"
+    );
   });
 });

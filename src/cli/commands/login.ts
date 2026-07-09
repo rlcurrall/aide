@@ -17,6 +17,7 @@ import type { AideHostAwareCommandModule } from '@cli/host/yargs-adapter.js';
 import {
   authScopeFromArgs,
   configureAuthScopeOptions,
+  assertNoReservedAuthScopeFlags,
   authFieldFlagName,
   authProviderCommandRoutes,
   providerHasAuthOperation,
@@ -74,6 +75,8 @@ function configureLoginOptions(
   yargs: Argv<object>,
   provider: DiscoveredAuthProvider
 ): Argv<object> {
+  assertNoReservedAuthScopeFlags(provider);
+
   const metadata = provider.capability.login;
   const fields = metadata?.fields ?? [];
   let configured = yargs;
