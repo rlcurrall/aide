@@ -6,6 +6,7 @@ import {
   type AideAuthAccount,
   type AideAuthInputField,
   type AideAuthLoginRequest,
+  type AideAuthLogoutRequest,
   type AidePullRequestAddCommentRequest,
   type AidePullRequestBranchLookupRequest,
   type AidePullRequestBranchLookupResult,
@@ -46,6 +47,11 @@ import {
 } from '@lib/config.js';
 import { ensureRefPrefix, extractBranchName } from '@lib/git-utils.js';
 import { deleteSecret, setSecret } from '@lib/secrets.js';
+import {
+  authSecretTarget,
+  deleteAuthSecret,
+  writeAuthSecret,
+} from '@lib/auth-store.js';
 import type {
   AzureDevOpsChangeType,
   AzureDevOpsCreateCommentResponse,
@@ -239,10 +245,23 @@ function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
         }),
       catch: (error) => error,
     });
-    yield* Effect.tryPromise({
-      try: () => setSecret('ado', JSON.stringify(validated)),
-      catch: (error) => error,
-    });
+
+    const scopedTarget =
+      request.scope === undefined
+        ? null
+        : authSecretTarget('azure-devops', request.scope);
+    if (scopedTarget?.kind === 'scoped') {
+      yield* writeAuthSecret(
+        'azure-devops',
+        JSON.stringify(validated),
+        request.scope
+      );
+    } else {
+      yield* Effect.tryPromise({
+        try: () => setSecret('ado', JSON.stringify(validated)),
+        catch: (error) => error,
+      });
+    }
 
     return {
       status: 'stored' as const,
@@ -251,20 +270,36 @@ function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
   });
 }
 
-function logoutAzureDevOpsAuth() {
-  return Effect.tryPromise({
-    try: () => deleteSecret('ado'),
-    catch: (error) => error,
-  }).pipe(
-    Effect.map((removed) => ({
+function logoutAzureDevOpsAuth(request?: AideAuthLogoutRequest) {
+  return Effect.gen(function* () {
+    const scope = request?.scope;
+    const scopedTarget =
+      scope === undefined ? null : authSecretTarget('azure-devops', scope);
+    if (scope !== undefined && scopedTarget?.kind === 'scoped') {
+      const removed = yield* deleteAuthSecret('azure-devops', scope);
+      return {
+        status: removed ? ('removed' as const) : ('not-found' as const),
+        messages: [
+          removed
+            ? 'Removed stored credentials for ado.'
+            : 'No stored credentials for ado.',
+        ],
+      };
+    }
+
+    const removed = yield* Effect.tryPromise({
+      try: () => deleteSecret('ado'),
+      catch: (error) => error,
+    });
+    return {
       status: removed ? ('removed' as const) : ('not-found' as const),
       messages: [
         removed
           ? 'Removed stored credentials for ado.'
           : 'No stored credentials for ado.',
       ],
-    }))
-  );
+    };
+  });
 }
 
 export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {

@@ -7,6 +7,7 @@ import {
   type AideAuthAccount,
   type AideAuthInputField,
   type AideAuthLoginRequest,
+  type AideAuthLogoutRequest,
   type AidePluginAuthStatus,
   pluginCommandModule,
 } from '@cli/host/plugin-descriptor.js';
@@ -15,6 +16,11 @@ import {
   readJiraEnvForMigration,
   type ConfigStatus,
 } from '@lib/config.js';
+import {
+  authSecretTarget,
+  deleteAuthSecret,
+  writeAuthSecret,
+} from '@lib/auth-store.js';
 import { deleteSecret, setSecret } from '@lib/secrets.js';
 import { StoredJiraSchema, type JiraConfig } from '@schemas/config.js';
 import {
@@ -207,10 +213,19 @@ function loginJiraAuth(request: AideAuthLoginRequest) {
         }),
       catch: (error) => error,
     });
-    yield* Effect.tryPromise({
-      try: () => setSecret('jira', JSON.stringify(validated)),
-      catch: (error) => error,
-    });
+
+    const scopedTarget =
+      request.scope === undefined
+        ? null
+        : authSecretTarget('jira', request.scope);
+    if (scopedTarget?.kind === 'scoped') {
+      yield* writeAuthSecret('jira', JSON.stringify(validated), request.scope);
+    } else {
+      yield* Effect.tryPromise({
+        try: () => setSecret('jira', JSON.stringify(validated)),
+        catch: (error) => error,
+      });
+    }
 
     return {
       status: 'stored' as const,
@@ -219,20 +234,36 @@ function loginJiraAuth(request: AideAuthLoginRequest) {
   });
 }
 
-function logoutJiraAuth() {
-  return Effect.tryPromise({
-    try: () => deleteSecret('jira'),
-    catch: (error) => error,
-  }).pipe(
-    Effect.map((removed) => ({
+function logoutJiraAuth(request?: AideAuthLogoutRequest) {
+  return Effect.gen(function* () {
+    const scope = request?.scope;
+    const scopedTarget =
+      scope === undefined ? null : authSecretTarget('jira', scope);
+    if (scope !== undefined && scopedTarget?.kind === 'scoped') {
+      const removed = yield* deleteAuthSecret('jira', scope);
+      return {
+        status: removed ? ('removed' as const) : ('not-found' as const),
+        messages: [
+          removed
+            ? 'Removed stored credentials for jira.'
+            : 'No stored credentials for jira.',
+        ],
+      };
+    }
+
+    const removed = yield* Effect.tryPromise({
+      try: () => deleteSecret('jira'),
+      catch: (error) => error,
+    });
+    return {
       status: removed ? ('removed' as const) : ('not-found' as const),
       messages: [
         removed
           ? 'Removed stored credentials for jira.'
           : 'No stored credentials for jira.',
       ],
-    }))
-  );
+    };
+  });
 }
 
 export function createJiraPlugin(opts: JiraPluginOptions = {}) {

@@ -6,6 +6,7 @@ import {
   type AideAuthAccount,
   type AideAuthInputField,
   type AideAuthLoginRequest,
+  type AideAuthLogoutRequest,
   type AidePullRequestAddCommentRequest,
   type AidePullRequestBranchLookupRequest,
   type AidePullRequestBranchLookupResult,
@@ -52,6 +53,11 @@ import {
   parseGitHubRemote,
 } from '@lib/github-utils.js';
 import { deleteSecret, setSecret } from '@lib/secrets.js';
+import {
+  authSecretTarget,
+  deleteAuthSecret,
+  writeAuthSecret,
+} from '@lib/auth-store.js';
 import { StoredGithubSchema } from '@schemas/config.js';
 import {
   formatMigrationError,
@@ -213,10 +219,23 @@ function loginGitHubAuth(
       try: () => v.parse(StoredGithubSchema, { token }),
       catch: (error) => error,
     });
-    yield* Effect.tryPromise({
-      try: () => setSecret('github', JSON.stringify(validated)),
-      catch: (error) => error,
-    });
+
+    const scopedTarget =
+      request.scope === undefined
+        ? null
+        : authSecretTarget('github', request.scope);
+    if (scopedTarget?.kind === 'scoped') {
+      yield* writeAuthSecret(
+        'github',
+        JSON.stringify(validated),
+        request.scope
+      );
+    } else {
+      yield* Effect.tryPromise({
+        try: () => setSecret('github', JSON.stringify(validated)),
+        catch: (error) => error,
+      });
+    }
 
     return {
       status: 'stored' as const,
@@ -225,20 +244,36 @@ function loginGitHubAuth(
   });
 }
 
-function logoutGitHubAuth() {
-  return Effect.tryPromise({
-    try: () => deleteSecret('github'),
-    catch: (error) => error,
-  }).pipe(
-    Effect.map((removed) => ({
+function logoutGitHubAuth(request?: AideAuthLogoutRequest) {
+  return Effect.gen(function* () {
+    const scope = request?.scope;
+    const scopedTarget =
+      scope === undefined ? null : authSecretTarget('github', scope);
+    if (scope !== undefined && scopedTarget?.kind === 'scoped') {
+      const removed = yield* deleteAuthSecret('github', scope);
+      return {
+        status: removed ? ('removed' as const) : ('not-found' as const),
+        messages: [
+          removed
+            ? 'Removed stored credentials for github.'
+            : 'No stored credentials for github.',
+        ],
+      };
+    }
+
+    const removed = yield* Effect.tryPromise({
+      try: () => deleteSecret('github'),
+      catch: (error) => error,
+    });
+    return {
       status: removed ? ('removed' as const) : ('not-found' as const),
       messages: [
         removed
           ? 'Removed stored credentials for github.'
           : 'No stored credentials for github.',
       ],
-    }))
-  );
+    };
+  });
 }
 
 function explicitString(value: string | undefined): string | undefined {

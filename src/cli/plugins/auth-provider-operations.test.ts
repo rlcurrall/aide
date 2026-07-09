@@ -259,4 +259,202 @@ describe('auth provider operations', () => {
       messages: ['No stored credentials for github.'],
     });
   });
+
+  test('Jira scoped login writes auth:jira:host:... not legacy jira', async () => {
+    const provider = authProvider(createJiraPlugin());
+    const result = await Effect.runPromise(
+      provider.operations!.login!({
+        values: {
+          url: 'https://example.atlassian.net',
+          email: 'dev@example.com',
+          token: 'jira-token',
+        },
+        scope: {
+          id: 'example.atlassian.net:dev@example.com',
+          providerId: 'jira',
+          host: 'example.atlassian.net',
+          account: 'dev@example.com',
+        },
+      })
+    );
+
+    expect(result).toEqual({
+      status: 'stored',
+      messages: ['Saved credentials for jira.'],
+    });
+    expect(
+      JSON.parse(
+        store.get(
+          'aide:auth:jira:host:example.atlassian.net:account:dev%40example.com'
+        ) ?? '{}'
+      )
+    ).toEqual({
+      url: 'https://example.atlassian.net',
+      email: 'dev@example.com',
+      apiToken: 'jira-token',
+    });
+    expect(store.has('aide:jira')).toBe(false);
+  });
+
+  test('Jira no-scope login still writes legacy jira', async () => {
+    const provider = authProvider(createJiraPlugin());
+    await Effect.runPromise(
+      provider.operations!.login!({
+        values: {
+          url: 'https://example.atlassian.net',
+          email: 'dev@example.com',
+          token: 'jira-token',
+        },
+      })
+    );
+
+    expect(store.has('aide:jira')).toBe(true);
+    expect(
+      store.has(
+        'aide:auth:jira:host:example.atlassian.net:account:dev%40example.com'
+      )
+    ).toBe(false);
+  });
+
+  test('Jira scoped logout removes scoped key and leaves legacy jira', async () => {
+    store.set(
+      'aide:auth:jira:host:example.atlassian.net:account:dev%40example.com',
+      JSON.stringify({ url: 'https://example.atlassian.net' })
+    );
+    store.set('aide:jira', JSON.stringify({ url: 'https://legacy.jira.com' }));
+    const provider = authProvider(createJiraPlugin());
+
+    const removed = await Effect.runPromise(
+      provider.operations!.logout!({
+        scope: {
+          id: 'example.atlassian.net:dev@example.com',
+          providerId: 'jira',
+          host: 'example.atlassian.net',
+          account: 'dev@example.com',
+        },
+      })
+    );
+
+    expect(removed).toEqual({
+      status: 'removed',
+      messages: ['Removed stored credentials for jira.'],
+    });
+    expect(
+      store.has(
+        'aide:auth:jira:host:example.atlassian.net:account:dev%40example.com'
+      )
+    ).toBe(false);
+    expect(store.has('aide:jira')).toBe(true);
+  });
+
+  test('ADO scoped login writes auth:azure-devops:host:... not ado', async () => {
+    const provider = authProvider(createAzureDevOpsPlugin());
+    const result = await Effect.runPromise(
+      provider.operations!.login!({
+        values: {
+          orgUrl: 'https://dev.azure.com/example',
+          pat: 'ado-token',
+          authMethod: 'pat',
+        },
+        scope: {
+          id: 'dev.azure.com',
+          providerId: 'azure-devops',
+          host: 'dev.azure.com',
+          org: 'example',
+        },
+      })
+    );
+
+    expect(result).toEqual({
+      status: 'stored',
+      messages: ['Saved credentials for ado.'],
+    });
+    expect(
+      JSON.parse(
+        store.get('aide:auth:azure-devops:host:dev.azure.com:org:example') ??
+          '{}'
+      )
+    ).toEqual({
+      orgUrl: 'https://dev.azure.com/example',
+      pat: 'ado-token',
+      authMethod: 'pat',
+    });
+    expect(store.has('aide:ado')).toBe(false);
+  });
+
+  test('GitHub scoped login with gh unavailable writes auth:github:host:... not github', async () => {
+    const provider = authProvider(
+      createGitHubPlugin({ ghAvailable: () => false })
+    );
+    const result = await Effect.runPromise(
+      provider.operations!.login!({
+        values: { token: 'gh-token' },
+        scope: {
+          id: 'ghe.example.com',
+          providerId: 'github',
+          host: 'ghe.example.com',
+        },
+      })
+    );
+
+    expect(result).toEqual({
+      status: 'stored',
+      messages: ['Saved credentials for github.'],
+    });
+    expect(
+      JSON.parse(store.get('aide:auth:github:host:ghe.example.com') ?? '{}')
+    ).toEqual({
+      token: 'gh-token',
+    });
+    expect(store.has('aide:github')).toBe(false);
+  });
+
+  test('GitHub gh available external writes nothing', async () => {
+    const provider = authProvider(
+      createGitHubPlugin({ ghAvailable: () => true })
+    );
+
+    await Effect.runPromise(
+      provider.operations!.login!({
+        values: { token: 'ignored' },
+        scope: {
+          id: 'ghe.example.com',
+          providerId: 'github',
+          host: 'ghe.example.com',
+        },
+      })
+    );
+
+    expect(store.has('aide:auth:github:host:ghe.example.com')).toBe(false);
+    expect(store.has('aide:github')).toBe(false);
+  });
+
+  test('incomplete scope falls back to legacy key', async () => {
+    const provider = authProvider(createJiraPlugin());
+    const result = await Effect.runPromise(
+      provider.operations!.login!({
+        values: {
+          url: 'https://example.atlassian.net',
+          email: 'dev@example.com',
+          token: 'jira-token',
+        },
+        scope: {
+          id: 'example.atlassian.net',
+          providerId: 'jira',
+          host: 'example.atlassian.net',
+        },
+      })
+    );
+
+    expect(result).toEqual({
+      status: 'stored',
+      messages: ['Saved credentials for jira.'],
+    });
+    expect(JSON.parse(store.get('aide:jira') ?? '{}')).toEqual({
+      url: 'https://example.atlassian.net',
+      email: 'dev@example.com',
+      apiToken: 'jira-token',
+    });
+    expect(store.has('aide:auth:jira:host:example.atlassian.net')).toBe(false);
+  });
 });
