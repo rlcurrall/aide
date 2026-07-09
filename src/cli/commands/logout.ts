@@ -11,17 +11,25 @@ import type { AideHostServices } from '@cli/host/runtime-context.js';
 import { getAideHostContext } from '@cli/host/runtime-context.js';
 import type { AideHostAwareCommandModule } from '@cli/host/yargs-adapter.js';
 import {
+  authScopeFromArgs,
+  configureAuthScopeOptions,
   authProviderCommandRoutes,
   findAuthProviderByCommandName,
   providerHasAuthOperation,
   runAuthProviderLogout,
   type DiscoveredAuthProvider,
 } from './auth-provider-command-utils.js';
+import type { AideAuthScope } from '@cli/host/plugin-descriptor.js';
 
 export type LogoutResult = 'removed' | 'not-found';
 
 interface Args {
   service: string;
+  readonly 'scope-id'?: string;
+  readonly 'scope-host'?: string;
+  readonly 'scope-org'?: string;
+  readonly 'scope-account'?: string;
+  readonly 'scope-label'?: string;
 }
 
 function logoutProviders(
@@ -47,14 +55,28 @@ function allLogoutProviderCommandNames(
 
 async function logoutProvider(
   providers: readonly DiscoveredAuthProvider[],
-  service: string
+  service: string,
+  scopeArgv: Readonly<Record<string, unknown>> & {
+    readonly 'scope-id'?: unknown;
+    readonly 'scope-host'?: unknown;
+    readonly 'scope-org'?: unknown;
+    readonly 'scope-account'?: unknown;
+    readonly 'scope-label'?: unknown;
+  }
 ): Promise<LogoutResult> {
   const provider = findAuthProviderByCommandName(providers, service, 'logout');
   if (provider === null) {
     throw new Error(`Unknown auth provider '${service}'`);
   }
 
-  const result = await runAuthProviderLogout(provider);
+  const scope: AideAuthScope | undefined = authScopeFromArgs(
+    provider,
+    scopeArgv
+  );
+  const result = await runAuthProviderLogout(
+    provider,
+    scope === undefined ? undefined : { scope }
+  );
   return result.status;
 }
 
@@ -63,12 +85,14 @@ const command: AideHostAwareCommandModule<object, Args> = {
   describe: 'Remove stored credentials from the OS keyring',
   aideBuilder: (yargs, services) => {
     const providers = logoutProviders(services);
-    return yargs.positional('service', {
-      type: 'string',
-      choices: allLogoutProviderCommandNames(providers),
-      demandOption: true,
-      describe: 'Service to log out of',
-    });
+    return configureAuthScopeOptions(
+      yargs.positional('service', {
+        type: 'string',
+        choices: allLogoutProviderCommandNames(providers),
+        demandOption: true,
+        describe: 'Service to log out of',
+      })
+    );
   },
   handler: async (argv: ArgumentsCamelCase<Args>) => {
     const services = getAideHostContext(argv)?.services;
@@ -76,7 +100,7 @@ const command: AideHostAwareCommandModule<object, Args> = {
       throw new Error('Host services are unavailable for logout');
     }
     const contextProviders = logoutProviders(services);
-    await logoutProvider(contextProviders, argv.service);
+    await logoutProvider(contextProviders, argv.service, argv);
   },
 };
 

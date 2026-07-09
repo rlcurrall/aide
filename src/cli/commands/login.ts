@@ -15,6 +15,8 @@ import type {
 import type { AideHostServices } from '@cli/host/runtime-context.js';
 import type { AideHostAwareCommandModule } from '@cli/host/yargs-adapter.js';
 import {
+  authScopeFromArgs,
+  configureAuthScopeOptions,
   authFieldFlagName,
   authProviderCommandRoutes,
   providerHasAuthOperation,
@@ -25,6 +27,11 @@ import {
 
 interface DynamicLoginArgs {
   readonly 'from-env'?: boolean;
+  readonly 'scope-id'?: string;
+  readonly 'scope-host'?: string;
+  readonly 'scope-org'?: string;
+  readonly 'scope-account'?: string;
+  readonly 'scope-label'?: string;
   readonly [key: string]: unknown;
 }
 
@@ -75,6 +82,8 @@ function configureLoginOptions(
     configured = configureFieldOption(configured, field);
   }
 
+  configured = configureAuthScopeOptions(configured);
+
   if (metadata?.envMigration !== undefined) {
     configured = configured.option('from-env', {
       type: 'boolean',
@@ -109,9 +118,10 @@ async function loginRequestFromArgs(
   provider: DiscoveredAuthProvider,
   argv: ArgumentsCamelCase<DynamicLoginArgs>
 ): Promise<AideAuthLoginRequest> {
+  const scope = authScopeFromArgs(provider, argv);
   const fromEnv = argv['from-env'] === true;
   if (fromEnv) {
-    return { fromEnv: true };
+    return scope === undefined ? { fromEnv: true } : { fromEnv: true, scope };
   }
 
   const values: Record<string, AideAuthInputValue> = {};
@@ -131,6 +141,7 @@ async function loginRequestFromArgs(
 
   return {
     fromEnv,
+    ...(scope === undefined ? {} : { scope }),
     values,
   };
 }
