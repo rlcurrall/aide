@@ -20,7 +20,10 @@ function activeService(): string {
   return Bun.env.AIDE_SECRET_SERVICE_OVERRIDE ?? AIDE_SERVICE_DEFAULT;
 }
 
-export type SecretName = 'jira' | 'ado' | 'github';
+export type LegacySecretName = 'jira' | 'ado' | 'github';
+export type ScopedSecretName = `auth:${string}`;
+export type SecretName = LegacySecretName;
+export type StoredSecretName = LegacySecretName | ScopedSecretName;
 
 export class KeyringUnavailableError extends Error {
   override readonly cause: unknown;
@@ -38,7 +41,9 @@ export class KeyringUnavailableError extends Error {
   }
 }
 
-export async function getSecret(name: SecretName): Promise<string | null> {
+export async function getSecret(
+  name: StoredSecretName
+): Promise<string | null> {
   try {
     return await Bun.secrets.get({ service: activeService(), name });
   } catch (err) {
@@ -47,7 +52,7 @@ export async function getSecret(name: SecretName): Promise<string | null> {
 }
 
 export async function setSecret(
-  name: SecretName,
+  name: StoredSecretName,
   value: string
 ): Promise<void> {
   try {
@@ -57,7 +62,7 @@ export async function setSecret(
   }
 }
 
-export async function deleteSecret(name: SecretName): Promise<boolean> {
+export async function deleteSecret(name: StoredSecretName): Promise<boolean> {
   try {
     return await Bun.secrets.delete({ service: activeService(), name });
   } catch (err) {
