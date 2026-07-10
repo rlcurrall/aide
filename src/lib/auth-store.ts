@@ -1,3 +1,5 @@
+import { isProxy } from 'node:util/types';
+
 import { Effect } from 'effect';
 
 import {
@@ -9,6 +11,10 @@ import {
   type StoredSecretName,
 } from './secrets.js';
 import { canonicalizeAzureDevOpsAuthIdentity } from './azure-devops-auth-identity.js';
+import {
+  canonicalizeGitHubAuthAccount,
+  canonicalizeGitHubAuthHost,
+} from './github-auth.js';
 
 export const legacyAuthSecretNames = Object.freeze({
   jira: 'jira',
@@ -52,6 +58,7 @@ const providerAliases = Object.freeze({
 } as const);
 
 function normalizeNonEmpty(value: string | undefined): string | undefined {
+  if (value !== undefined && typeof value !== 'string') return undefined;
   const normalized = value?.trim().normalize('NFC');
   return normalized === undefined || normalized.length === 0
     ? undefined
@@ -107,18 +114,6 @@ function normalizeHost(host: string | undefined): string | undefined {
   }
 }
 
-function normalizeGitHubHostIdentity(
-  host: string | undefined
-): string | undefined {
-  const normalized = normalizeHost(host);
-  if (normalized === 'ssh.github.com') return 'github.com';
-
-  const dataResidencyAlias = /^ssh\.([a-z0-9][a-z0-9-]*\.ghe\.com)$/.exec(
-    normalized ?? ''
-  );
-  return dataResidencyAlias?.[1] ?? normalized;
-}
-
 // Key values are normalized by role, then URI-component encoded so ':' remains
 // a structural separator and exact key strings stay deterministic in tests.
 export function encodeAuthStoreKeySegment(value: string): string {
@@ -128,6 +123,64 @@ export function encodeAuthStoreKeySegment(value: string): string {
   );
 }
 
+type AuthScopePropertySnapshot =
+  | { readonly kind: 'data'; readonly value: string | undefined }
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'invalid' };
+
+function snapshotAuthScopeProperty(
+  scope: object,
+  name: string
+): AuthScopePropertySnapshot {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(scope, name);
+    if (descriptor === undefined) return { kind: 'absent' };
+    if (!Object.hasOwn(descriptor, 'value')) return { kind: 'invalid' };
+    return descriptor.value === undefined ||
+      typeof descriptor.value === 'string'
+      ? { kind: 'data', value: descriptor.value }
+      : { kind: 'invalid' };
+  } catch {
+    return { kind: 'invalid' };
+  }
+}
+
+type AuthScopeSnapshot = Readonly<
+  Record<'id' | 'providerId' | 'host' | 'org' | 'account', string | undefined>
+>;
+
+function snapshotAuthStoreScope(
+  scope: AuthStoreScope
+): AuthScopeSnapshot | null {
+  if (
+    typeof scope !== 'object' ||
+    scope === null ||
+    isProxy(scope) ||
+    Array.isArray(scope)
+  ) {
+    return null;
+  }
+
+  const fields = Object.create(null) as Record<
+    keyof AuthScopeSnapshot,
+    string | undefined
+  >;
+  for (const name of ['id', 'providerId', 'host', 'org', 'account'] as const) {
+    const property = snapshotAuthScopeProperty(scope, name);
+    if (property.kind === 'invalid') return null;
+    fields[name] = property.kind === 'data' ? property.value : undefined;
+  }
+  return Object.freeze(fields);
+}
+
+function normalizedAuthStoreScope(
+  fields: ReadonlyArray<readonly [keyof NormalizedAuthStoreScope, string]>
+): NormalizedAuthStoreScope {
+  const normalized = Object.create(null) as Record<string, string>;
+  for (const [name, value] of fields) normalized[name] = value;
+  return Object.freeze(normalized) as unknown as NormalizedAuthStoreScope;
+}
+
 export function normalizeAuthStoreScope(
   providerId: AuthProviderId,
   scope: AuthStoreScope | undefined
@@ -135,68 +188,79 @@ export function normalizeAuthStoreScope(
   const normalizedProviderId = normalizeAuthProviderId(providerId);
   if (normalizedProviderId === undefined) return null;
   if (scope === undefined) {
-    return { providerId: normalizedProviderId };
+    return normalizedAuthStoreScope([['providerId', normalizedProviderId]]);
   }
 
-  if (scope.providerId !== undefined) {
-    const scopeProviderId = normalizeAuthProviderId(scope.providerId);
+  const scopeSnapshot = snapshotAuthStoreScope(scope);
+  if (scopeSnapshot === null) return null;
+
+  if (scopeSnapshot.providerId !== undefined) {
+    const scopeProviderId = normalizeAuthProviderId(scopeSnapshot.providerId);
     if (scopeProviderId !== normalizedProviderId) return null;
   }
 
   const account =
     normalizedProviderId === 'jira'
-      ? normalizeJiraAccount(scope.account)
-      : normalizeNonEmpty(scope.account);
+      ? normalizeJiraAccount(scopeSnapshot.account)
+      : normalizeNonEmpty(scopeSnapshot.account);
 
   switch (normalizedProviderId) {
     case 'jira': {
-      const host = normalizeHost(scope.host);
+      const host = normalizeHost(scopeSnapshot.host);
       if (host === undefined || account === undefined) return null;
-      return {
-        providerId: normalizedProviderId,
-        host,
-        account,
-      };
+      return normalizedAuthStoreScope([
+        ['providerId', normalizedProviderId],
+        ['host', host],
+        ['account', account],
+      ]);
     }
     case 'azure-devops': {
-      if (scope.host === undefined) return null;
+      if (scopeSnapshot.host === undefined) return null;
 
       const identity = canonicalizeAzureDevOpsAuthIdentity({
-        host: scope.host,
-        org: scope.org,
+        host: scopeSnapshot.host,
+        org: scopeSnapshot.org,
       });
       if (identity === null) return null;
 
-      return {
-        providerId: normalizedProviderId,
-        host: identity.host,
-        org: identity.org,
-        ...(account === undefined ? {} : { account }),
-      };
+      return normalizedAuthStoreScope([
+        ['providerId', normalizedProviderId],
+        ['host', identity.host],
+        ['org', identity.org],
+        ...(account === undefined ? [] : ([['account', account]] as const)),
+      ]);
     }
     case 'github': {
       // Provider/remote resolution decides whether a host is GitHub. The auth
       // store only needs a deterministic identity and must retain custom GHES
       // domains rather than imposing github.com/*.ghe.com parser policy here.
-      const host = normalizeGitHubHostIdentity(scope.host);
-      if (host === undefined) return null;
-      return {
-        providerId: normalizedProviderId,
-        host,
-        ...(account === undefined ? {} : { account }),
-      };
+      const host = canonicalizeGitHubAuthHost(scopeSnapshot.host);
+      if (host === null) return null;
+      const githubAccount = canonicalizeGitHubAuthAccount(
+        scopeSnapshot.account
+      );
+      if (scopeSnapshot.account !== undefined && githubAccount === null) {
+        return null;
+      }
+      return normalizedAuthStoreScope([
+        ['providerId', normalizedProviderId],
+        ['host', host],
+        ...(githubAccount === null
+          ? []
+          : ([['account', githubAccount]] as const)),
+      ]);
     }
   }
 
-  const host = normalizeHost(scope.host);
-  const org = normalizeNonEmpty(scope.org);
+  const host = normalizeHost(scopeSnapshot.host);
+  const org = normalizeNonEmpty(scopeSnapshot.org);
 
-  return {
-    providerId: normalizedProviderId,
-    ...(host === undefined ? {} : { host }),
-    ...(org === undefined ? {} : { org }),
-    ...(account === undefined ? {} : { account }),
-  };
+  return normalizedAuthStoreScope([
+    ['providerId', normalizedProviderId],
+    ...(host === undefined ? [] : ([['host', host]] as const)),
+    ...(org === undefined ? [] : ([['org', org]] as const)),
+    ...(account === undefined ? [] : ([['account', account]] as const)),
+  ]);
 }
 
 export function legacyAuthSecretName(

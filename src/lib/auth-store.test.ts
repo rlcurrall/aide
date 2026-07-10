@@ -129,6 +129,7 @@ describe('auth-store key construction', () => {
       { host: 'not a host' },
       { host: 'https://' },
       { host: '   ' },
+      { host: 'github.com', account: '   ' },
       {},
     ];
 
@@ -243,9 +244,73 @@ describe('auth-store key construction', () => {
     expect(
       scopedAuthSecretName('github', {
         host: 'acme.ghe.com',
-        account: 'octocat',
+        account: ' OctoCat ',
       })
     ).toBe('auth:github:host:acme.ghe.com:account:octocat');
+    expect(
+      normalizeAuthStoreScope('github', {
+        host: 'ACME.GHE.COM',
+        account: ' OctoCat ',
+      })
+    ).toEqual({
+      providerId: 'github',
+      host: 'acme.ghe.com',
+      account: 'octocat',
+    });
+  });
+
+  test('uses only own scope data when selecting generic and GitHub account keys', () => {
+    const inheritedAccount = Object.assign(
+      Object.create({ account: 'attacker' }) as Record<string, string>,
+      { host: 'github.example.com' }
+    );
+    const inheritedHost = Object.create({
+      host: 'github.example.com',
+    }) as Record<string, string>;
+    let getterCalls = 0;
+    const accessorAccount = { host: 'github.example.com' } as Record<
+      string,
+      string
+    >;
+    Object.defineProperty(accessorAccount, 'account', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return 'attacker';
+      },
+    });
+    let proxyCalls = 0;
+    const proxyScope = new Proxy(
+      { host: 'github.example.com' },
+      {
+        getOwnPropertyDescriptor(target, property) {
+          proxyCalls += 1;
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        },
+      }
+    );
+    const malformedAccount = {
+      host: 'github.example.com',
+      account: 42,
+    } as unknown as Parameters<typeof normalizeAuthStoreScope>[1];
+
+    expect(scopedAuthSecretName('github', inheritedAccount)).toBe(
+      'auth:github:host:github.example.com'
+    );
+    expect(scopedAuthSecretName('custom-provider', inheritedAccount)).toBe(
+      'auth:custom-provider:host:github.example.com'
+    );
+    expect(normalizeAuthStoreScope('github', inheritedHost)).toBeNull();
+    expect(normalizeAuthStoreScope('github', accessorAccount)).toBeNull();
+    expect(scopedAuthSecretName('github', accessorAccount)).toBeNull();
+    expect(normalizeAuthStoreScope('github', proxyScope)).toBeNull();
+    expect(normalizeAuthStoreScope('github', malformedAccount)).toBeNull();
+    const normalized = normalizeAuthStoreScope('github', inheritedAccount);
+    expect(Object.getPrototypeOf(normalized)).toBeNull();
+    expect(Object.isFrozen(normalized)).toBe(true);
+    expect(getterCalls).toBe(0);
+    expect(proxyCalls).toBe(0);
   });
 
   test('normalizes scope fields and encodes unsafe key characters', () => {

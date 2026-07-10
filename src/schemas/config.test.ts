@@ -5,6 +5,7 @@ import {
   StoredJiraSchema,
   StoredAdoSchema,
   StoredGithubSchema,
+  StoredGithubScopedSchema,
 } from './config.js';
 
 describe('StoredJiraSchema', () => {
@@ -71,5 +72,20 @@ describe('StoredGithubSchema', () => {
 
   test('rejects empty token', () => {
     expect(() => v.parse(StoredGithubSchema, { token: '' })).toThrow();
+  });
+
+  test('requires identity in the scoped GitHub payload schema', () => {
+    expect(
+      v.parse(StoredGithubScopedSchema, {
+        token: 'ghp_scoped',
+        identity: { host: 'github.com', account: 'octocat' },
+      })
+    ).toEqual({
+      token: 'ghp_scoped',
+      identity: { host: 'github.com', account: 'octocat' },
+    });
+    expect(() =>
+      v.parse(StoredGithubScopedSchema, { token: 'pre-identity-token' })
+    ).toThrow();
   });
 });
