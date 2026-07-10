@@ -52,9 +52,7 @@ import {
   parseGitHubPRUrl,
   parseGitHubRemote,
 } from '@lib/github-utils.js';
-import { deleteSecret, setSecret } from '@lib/secrets.js';
 import {
-  authSecretTarget,
   deleteAuthSecret,
   type AuthStoreScope,
   writeAuthSecret,
@@ -197,10 +195,11 @@ function loginGitHubAuth(
         );
       }
 
-      yield* Effect.tryPromise({
-        try: () => setSecret('github', JSON.stringify(result.value)),
-        catch: (error) => error,
-      });
+      yield* writeAuthSecret(
+        'github',
+        JSON.stringify(result.value),
+        request.scope
+      );
       return {
         status: 'stored' as const,
         messages: messages(
@@ -210,7 +209,7 @@ function loginGitHubAuth(
       };
     }
 
-    if (ghAvailable()) {
+    if (request.scope === undefined && ghAvailable()) {
       return {
         status: 'external' as const,
         messages: ['Using gh CLI auth. Nothing to do.'],
@@ -223,22 +222,7 @@ function loginGitHubAuth(
       catch: (error) => error,
     });
 
-    const scopedTarget =
-      request.scope === undefined
-        ? null
-        : authSecretTarget('github', request.scope);
-    if (scopedTarget?.kind === 'scoped') {
-      yield* writeAuthSecret(
-        'github',
-        JSON.stringify(validated),
-        request.scope
-      );
-    } else {
-      yield* Effect.tryPromise({
-        try: () => setSecret('github', JSON.stringify(validated)),
-        catch: (error) => error,
-      });
-    }
+    yield* writeAuthSecret('github', JSON.stringify(validated), request.scope);
 
     return {
       status: 'stored' as const,
@@ -249,25 +233,7 @@ function loginGitHubAuth(
 
 function logoutGitHubAuth(request?: AideAuthLogoutRequest) {
   return Effect.gen(function* () {
-    const scope = request?.scope;
-    const scopedTarget =
-      scope === undefined ? null : authSecretTarget('github', scope);
-    if (scope !== undefined && scopedTarget?.kind === 'scoped') {
-      const removed = yield* deleteAuthSecret('github', scope);
-      return {
-        status: removed ? ('removed' as const) : ('not-found' as const),
-        messages: [
-          removed
-            ? 'Removed stored credentials for github.'
-            : 'No stored credentials for github.',
-        ],
-      };
-    }
-
-    const removed = yield* Effect.tryPromise({
-      try: () => deleteSecret('github'),
-      catch: (error) => error,
-    });
+    const removed = yield* deleteAuthSecret('github', request?.scope);
     return {
       status: removed ? ('removed' as const) : ('not-found' as const),
       messages: [

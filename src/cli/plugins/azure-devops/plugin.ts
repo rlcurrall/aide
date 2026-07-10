@@ -46,9 +46,8 @@ import {
   type ConfigStatus,
 } from '@lib/config.js';
 import { ensureRefPrefix, extractBranchName } from '@lib/git-utils.js';
-import { deleteSecret, setSecret } from '@lib/secrets.js';
 import {
-  authSecretTarget,
+  authSecretScopesMatch,
   deleteAuthSecret,
   type AuthStoreScope,
   writeAuthSecret,
@@ -112,6 +111,24 @@ type CreateAzureDevOpsClient = (options?: {
 interface AzureDevOpsPluginOptions {
   readonly probeConfig?: ProbeAdoConfig;
   readonly createClient?: CreateAzureDevOpsClient;
+}
+
+function azureDevOpsScopeValidationError(
+  credentials: AzureDevOpsConfig,
+  scope: AuthStoreScope | undefined
+): Error | null {
+  if (scope === undefined) return null;
+  if (
+    authSecretScopesMatch('azure-devops', scope, {
+      providerId: 'azure-devops',
+      host: credentials.orgUrl,
+    })
+  ) {
+    return null;
+  }
+  return new Error(
+    'Azure DevOps credential organization identity does not match the explicit authentication scope.'
+  );
 }
 
 const azureDevOpsOrgUrlField = {
@@ -232,10 +249,17 @@ function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
         );
       }
 
-      yield* Effect.tryPromise({
-        try: () => setSecret('ado', JSON.stringify(result.value)),
-        catch: (error) => error,
-      });
+      const scopeError = azureDevOpsScopeValidationError(
+        result.value,
+        request.scope
+      );
+      if (scopeError !== null) return yield* Effect.fail(scopeError);
+
+      yield* writeAuthSecret(
+        'azure-devops',
+        JSON.stringify(result.value),
+        request.scope
+      );
       return {
         status: 'stored' as const,
         messages: messages(
@@ -260,22 +284,17 @@ function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
       catch: (error) => error,
     });
 
-    const scopedTarget =
-      request.scope === undefined
-        ? null
-        : authSecretTarget('azure-devops', request.scope);
-    if (scopedTarget?.kind === 'scoped') {
-      yield* writeAuthSecret(
-        'azure-devops',
-        JSON.stringify(validated),
-        request.scope
-      );
-    } else {
-      yield* Effect.tryPromise({
-        try: () => setSecret('ado', JSON.stringify(validated)),
-        catch: (error) => error,
-      });
-    }
+    const scopeError = azureDevOpsScopeValidationError(
+      validated,
+      request.scope
+    );
+    if (scopeError !== null) return yield* Effect.fail(scopeError);
+
+    yield* writeAuthSecret(
+      'azure-devops',
+      JSON.stringify(validated),
+      request.scope
+    );
 
     return {
       status: 'stored' as const,
@@ -286,25 +305,7 @@ function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
 
 function logoutAzureDevOpsAuth(request?: AideAuthLogoutRequest) {
   return Effect.gen(function* () {
-    const scope = request?.scope;
-    const scopedTarget =
-      scope === undefined ? null : authSecretTarget('azure-devops', scope);
-    if (scope !== undefined && scopedTarget?.kind === 'scoped') {
-      const removed = yield* deleteAuthSecret('azure-devops', scope);
-      return {
-        status: removed ? ('removed' as const) : ('not-found' as const),
-        messages: [
-          removed
-            ? 'Removed stored credentials for ado.'
-            : 'No stored credentials for ado.',
-        ],
-      };
-    }
-
-    const removed = yield* Effect.tryPromise({
-      try: () => deleteSecret('ado'),
-      catch: (error) => error,
-    });
+    const removed = yield* deleteAuthSecret('azure-devops', request?.scope);
     return {
       status: removed ? ('removed' as const) : ('not-found' as const),
       messages: [

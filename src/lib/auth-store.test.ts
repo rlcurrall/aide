@@ -27,7 +27,7 @@ describe('auth-store key construction', () => {
     expect(normalizeAuthProviderId('   ')).toBeUndefined();
   });
 
-  test('maps built-in providers to legacy fallback secret names', () => {
+  test('maps built-in providers to legacy secret names', () => {
     expect(legacyAuthSecretName('jira')).toBe('jira');
     expect(legacyAuthSecretName('azure-devops')).toBe('ado');
     expect(legacyAuthSecretName('ado')).toBe('ado');
@@ -35,7 +35,7 @@ describe('auth-store key construction', () => {
     expect(legacyAuthSecretName('custom-provider')).toBeNull();
   });
 
-  test('selects legacy targets when no deterministic scope is available', () => {
+  test('selects legacy targets when scope is omitted', () => {
     expect(authSecretTarget('jira', undefined)).toEqual({
       name: 'jira',
       kind: 'legacy',
@@ -51,13 +51,15 @@ describe('auth-store key construction', () => {
       kind: 'legacy',
       providerId: 'github',
     });
-    expect(authSecretTarget('jira', { host: 'example.atlassian.net' })).toEqual(
-      {
-        name: 'jira',
-        kind: 'legacy',
-        providerId: 'jira',
-      }
-    );
+  });
+
+  test('uses exactly the legacy candidate for omitted Jira and GitHub scopes', () => {
+    expect(authSecretCandidates('jira', undefined)).toEqual([
+      { name: 'jira', kind: 'legacy', providerId: 'jira' },
+    ]);
+    expect(authSecretCandidates('github', undefined)).toEqual([
+      { name: 'github', kind: 'legacy', providerId: 'github' },
+    ]);
   });
 
   test('uses exactly the legacy candidate when Azure DevOps scope is omitted', () => {
@@ -70,7 +72,7 @@ describe('auth-store key construction', () => {
     ]);
   });
 
-  test('uses scoped then legacy candidates for a valid Azure DevOps scope', () => {
+  test('uses only the scoped candidate for a valid Azure DevOps scope', () => {
     expect(
       authSecretCandidates('ado', {
         host: 'Acme.VisualStudio.com',
@@ -85,11 +87,6 @@ describe('auth-store key construction', () => {
           host: 'dev.azure.com',
           org: 'acme',
         },
-      },
-      {
-        name: 'ado',
-        kind: 'legacy',
-        providerId: 'azure-devops',
       },
     ]);
   });
@@ -109,6 +106,71 @@ describe('auth-store key construction', () => {
       expect(authSecretCandidates('ado', scope)).toEqual([]);
       expect(authSecretTarget('ado', scope)).toBeNull();
     }
+  });
+
+  test('rejects explicit invalid or incomplete Jira scopes', () => {
+    const invalidScopes = [
+      { host: 'example.atlassian.net' },
+      { account: 'dev@example.com' },
+      { host: '   ', account: 'dev@example.com' },
+      { host: 'example.atlassian.net', account: '   ' },
+      {},
+    ];
+
+    for (const scope of invalidScopes) {
+      expect(normalizeAuthStoreScope('jira', scope)).toBeNull();
+      expect(authSecretCandidates('jira', scope)).toEqual([]);
+      expect(authSecretTarget('jira', scope)).toBeNull();
+    }
+  });
+
+  test('rejects explicit invalid or incomplete GitHub scopes', () => {
+    const invalidScopes = [
+      { host: 'not a host' },
+      { host: 'https://' },
+      { host: '   ' },
+      {},
+    ];
+
+    for (const scope of invalidScopes) {
+      expect(normalizeAuthStoreScope('github', scope)).toBeNull();
+      expect(authSecretCandidates('github', scope)).toEqual([]);
+      expect(authSecretTarget('github', scope)).toBeNull();
+    }
+  });
+
+  test('rejects mismatched provider tags while retaining canonical aliases and generic external scopes', () => {
+    const jiraScope = {
+      providerId: 'github',
+      host: 'example.atlassian.net',
+      account: 'dev@example.com',
+    };
+    expect(normalizeAuthStoreScope('jira', jiraScope)).toBeNull();
+    expect(authSecretCandidates('jira', jiraScope)).toEqual([]);
+    expect(authSecretTarget('jira', jiraScope)).toBeNull();
+
+    expect(
+      normalizeAuthStoreScope('azure-devops', {
+        providerId: 'ADO',
+        host: 'dev.azure.com',
+        org: 'acme',
+      })
+    ).toMatchObject({ providerId: 'azure-devops', org: 'acme' });
+
+    const externalScope = {
+      providerId: 'external-auth',
+      host: 'auth.example.com',
+    };
+    expect(authSecretTarget('external-auth', externalScope)).toMatchObject({
+      name: 'auth:external-auth:host:auth.example.com',
+      kind: 'scoped',
+    });
+    expect(
+      authSecretTarget('external-auth', {
+        ...externalScope,
+        providerId: 'other-auth',
+      })
+    ).toBeNull();
   });
 
   test('builds Jira host and account scoped keys', () => {
@@ -162,9 +224,21 @@ describe('auth-store key construction', () => {
     ).toBeNull();
   });
 
-  test('builds GitHub Enterprise host-only and host-account scoped keys', () => {
-    expect(scopedAuthSecretName('github', { host: 'ghe.example.com' })).toBe(
-      'auth:github:host:ghe.example.com'
+  test('builds GitHub custom-domain host-only and host-account scoped keys', () => {
+    expect(scopedAuthSecretName('github', { host: 'github.example.com' })).toBe(
+      'auth:github:host:github.example.com'
+    );
+    expect(scopedAuthSecretName('github', { host: 'ssh.github.com' })).toBe(
+      'auth:github:host:github.com'
+    );
+    expect(scopedAuthSecretName('github', { host: 'ssh.acme.ghe.com' })).toBe(
+      'auth:github:host:acme.ghe.com'
+    );
+    expect(scopedAuthSecretName('github', { host: 'ssh.corp.example' })).toBe(
+      'auth:github:host:ssh.corp.example'
+    );
+    expect(scopedAuthSecretName('github', { host: 'ssh.github.com:443' })).toBe(
+      'auth:github:host:ssh.github.com%3A443'
     );
     expect(
       scopedAuthSecretName('github', {
@@ -193,7 +267,7 @@ describe('auth-store key construction', () => {
     ).toBe('auth:azure-devops:host:dev.azure.com:org:my%20org%2Fteam%3Aone');
   });
 
-  test('orders scoped candidate before legacy fallback', () => {
+  test('uses only the scoped candidate for a valid Jira scope', () => {
     expect(
       authSecretCandidates('jira', {
         host: 'example.atlassian.net',
@@ -210,21 +284,37 @@ describe('auth-store key construction', () => {
           account: 'dev@example.com',
         },
       },
-      {
-        name: 'jira',
-        kind: 'legacy',
-        providerId: 'jira',
-      },
     ]);
     expect(
       authSecretCandidates('jira', { host: 'example.atlassian.net' })
-    ).toEqual([
+    ).toEqual([]);
+    expect(
+      authSecretTarget('jira', {
+        host: 'example.atlassian.net',
+        account: 'dev@example.com',
+      })
+    ).toMatchObject({
+      name: 'auth:jira:host:example.atlassian.net:account:dev%40example.com',
+      kind: 'scoped',
+    });
+  });
+
+  test('uses only the scoped candidate for a valid custom-domain GitHub scope', () => {
+    const candidates = authSecretCandidates('GitHub', {
+      host: 'HTTPS://GITHUB.EXAMPLE.COM/team/repo',
+    });
+
+    expect(candidates).toEqual([
       {
-        name: 'jira',
-        kind: 'legacy',
-        providerId: 'jira',
+        name: 'auth:github:host:github.example.com',
+        kind: 'scoped',
+        providerId: 'github',
+        scope: { providerId: 'github', host: 'github.example.com' },
       },
     ]);
+    expect(authSecretTarget('GitHub', { host: 'github.example.com' })).toEqual(
+      candidates[0]!
+    );
   });
 });
 
@@ -253,7 +343,7 @@ describe('auth-store keyring helpers', () => {
     return store.get(`aide:${name}`);
   }
 
-  test('resolves scoped key before legacy fallback', async () => {
+  test('resolves the exact scoped key when legacy is also populated', async () => {
     store.set(
       'aide:auth:jira:host:example.atlassian.net:account:dev%40example.com',
       'scoped'
@@ -274,21 +364,37 @@ describe('auth-store keyring helpers', () => {
     });
   });
 
-  test('falls back to legacy when scoped key is missing', async () => {
-    store.set('aide:jira', 'legacy');
+  test('missing explicit Jira, ADO, and GitHub scoped secrets never resolve populated legacy secrets', async () => {
+    store.set('aide:jira', 'legacy-jira');
+    store.set('aide:ado', 'legacy-ado');
+    store.set('aide:github', 'legacy-github');
 
-    const resolved = await Effect.runPromise(
-      resolveAuthSecret('jira', {
-        host: 'example.atlassian.net',
-        account: 'dev@example.com',
-      })
-    );
+    const cases = [
+      {
+        providerId: 'jira' as const,
+        scope: {
+          host: 'example.atlassian.net',
+          account: 'dev@example.com',
+        },
+      },
+      {
+        providerId: 'ado' as const,
+        scope: { host: 'dev.azure.com', org: 'acme' },
+      },
+      {
+        providerId: 'github' as const,
+        scope: { host: 'github.example.com' },
+      },
+    ] as const;
 
-    expect(resolved).toMatchObject({
-      name: 'jira',
-      kind: 'legacy',
-      value: 'legacy',
-    });
+    for (const { providerId, scope } of cases) {
+      expect(
+        await Effect.runPromise(resolveAuthSecret(providerId, scope))
+      ).toBeNull();
+      expect(
+        await Effect.runPromise(listAuthSecrets(providerId, scope))
+      ).toEqual([]);
+    }
   });
 
   test('writes and resolves Azure DevOps credentials across legacy and canonical scope forms', async () => {
@@ -352,38 +458,106 @@ describe('auth-store keyring helpers', () => {
     }
   });
 
-  test('uses legacy only when no deterministic scope can be built', async () => {
-    store.set('aide:jira', 'legacy');
+  test('invalid explicit Jira and GitHub scopes cannot access or mutate legacy secrets', async () => {
+    store.set('aide:jira', 'legacy-jira');
+    store.set('aide:github', 'legacy-github');
 
-    const resolved = await Effect.runPromise(
-      resolveAuthSecret('jira', { host: 'example.atlassian.net' })
-    );
+    const cases = [
+      {
+        providerId: 'jira' as const,
+        scope: { host: 'example.atlassian.net' },
+        legacyName: 'jira',
+        legacyValue: 'legacy-jira',
+      },
+      {
+        providerId: 'github' as const,
+        scope: { host: 'not a host' },
+        legacyName: 'github',
+        legacyValue: 'legacy-github',
+      },
+    ];
 
-    expect(resolved).toMatchObject({
-      name: 'jira',
-      kind: 'legacy',
-      value: 'legacy',
-    });
-    expect(store.has('aide:auth:jira:host:example.atlassian.net')).toBe(false);
+    for (const { providerId, scope, legacyName, legacyValue } of cases) {
+      expect(
+        await Effect.runPromise(resolveAuthSecret(providerId, scope))
+      ).toBeNull();
+      expect(
+        await Effect.runPromise(listAuthSecrets(providerId, scope))
+      ).toEqual([]);
+      await expect(
+        Effect.runPromise(writeAuthSecret(providerId, 'replacement', scope))
+      ).rejects.toThrow(/cannot build an auth secret key/i);
+      await expect(
+        Effect.runPromise(deleteAuthSecret(providerId, scope))
+      ).rejects.toThrow(/cannot build an auth secret key/i);
+      expect(stored(legacyName)).toBe(legacyValue);
+    }
   });
 
   test('writes scoped credentials to the exact expected secret name', async () => {
     const target = await Effect.runPromise(
       writeAuthSecret('github', 'token', {
-        host: 'ghe.example.com',
+        host: 'github.example.com',
         account: 'octocat',
       })
     );
 
     expect(target).toMatchObject({
-      name: 'auth:github:host:ghe.example.com:account:octocat',
+      name: 'auth:github:host:github.example.com:account:octocat',
       kind: 'scoped',
       providerId: 'github',
     });
-    expect(stored('auth:github:host:ghe.example.com:account:octocat')).toBe(
+    expect(stored('auth:github:host:github.example.com:account:octocat')).toBe(
       'token'
     );
     expect(stored('github')).toBeUndefined();
+  });
+
+  test('GitHub custom ssh hosts and deliberate ports retain distinct read/write/delete identities', async () => {
+    const cases = [
+      {
+        scope: { host: 'ssh.corp.example' },
+        name: 'auth:github:host:ssh.corp.example',
+        value: 'ssh-custom',
+      },
+      {
+        scope: { host: 'corp.example' },
+        name: 'auth:github:host:corp.example',
+        value: 'custom',
+      },
+      {
+        scope: { host: 'ssh.github.com:443' },
+        name: 'auth:github:host:ssh.github.com%3A443',
+        value: 'ssh-port',
+      },
+      {
+        scope: { host: 'github.com:443' },
+        name: 'auth:github:host:github.com%3A443',
+        value: 'port',
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const target = await Effect.runPromise(
+        writeAuthSecret('github', testCase.value, testCase.scope)
+      );
+      expect(target.name).toBe(testCase.name);
+      expect(
+        await Effect.runPromise(resolveAuthSecret('github', testCase.scope))
+      ).toMatchObject({ name: testCase.name, value: testCase.value });
+    }
+
+    expect(
+      await Effect.runPromise(deleteAuthSecret('github', cases[0]!.scope))
+    ).toBe(true);
+    expect(stored(cases[0]!.name)).toBeUndefined();
+    expect(stored(cases[1]!.name)).toBe('custom');
+
+    expect(
+      await Effect.runPromise(deleteAuthSecret('github', cases[2]!.scope))
+    ).toBe(true);
+    expect(stored(cases[2]!.name)).toBeUndefined();
+    expect(stored(cases[3]!.name)).toBe('port');
   });
 
   test('writes legacy credentials when scope is absent', async () => {

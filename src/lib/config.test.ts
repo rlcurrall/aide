@@ -94,6 +94,129 @@ describe('loadConfig (Jira)', () => {
     expect(source).toBe('keyring');
   });
 
+  test('uses matching Jira env credentials for an explicit scope', async () => {
+    Bun.env.JIRA_URL = 'https://EXAMPLE.atlassian.net/path';
+    Bun.env.JIRA_EMAIL = 'Dev@Example.com';
+    Bun.env.JIRA_API_TOKEN = 'env-token';
+    store.set(
+      'aide:auth:jira:host:example.atlassian.net:account:dev%40example.com',
+      '{malformed scoped credentials'
+    );
+
+    const loaded = await loadConfig({
+      providerId: 'jira',
+      host: 'example.atlassian.net',
+      account: 'dev@example.com',
+    });
+
+    expect(loaded.source).toBe('env');
+    expect(loaded.config.apiToken).toBe('env-token');
+  });
+
+  test('uses the selected scoped key and ignores mismatching Jira env identity', async () => {
+    Bun.env.JIRA_URL = 'https://other.atlassian.net';
+    Bun.env.JIRA_EMAIL = 'other@example.com';
+    Bun.env.JIRA_API_TOKEN = 'env-token';
+    store.set(
+      'aide:auth:jira:host:example.atlassian.net:account:dev%40example.com',
+      JSON.stringify({
+        url: 'https://example.atlassian.net',
+        email: 'Dev@Example.com',
+        apiToken: 'scoped-token',
+      })
+    );
+    store.set(
+      'aide:jira',
+      JSON.stringify({
+        url: 'https://legacy.atlassian.net',
+        email: 'legacy@example.com',
+        apiToken: 'legacy-token',
+      })
+    );
+
+    const loaded = await loadConfig({
+      providerId: 'jira',
+      host: 'EXAMPLE.ATLASSIAN.NET',
+      account: 'dev@example.com',
+    });
+
+    expect(loaded.source).toBe('keyring');
+    expect(loaded.config).toMatchObject({
+      url: 'https://example.atlassian.net',
+      email: 'Dev@Example.com',
+      apiToken: 'scoped-token',
+    });
+  });
+
+  test('ignores malformed unrelated Jira env and uses the selected scoped key', async () => {
+    Bun.env.JIRA_URL = 'not-a-url';
+    Bun.env.JIRA_EMAIL = 'other@example.com';
+    Bun.env.JIRA_API_TOKEN = 'env-token';
+    store.set(
+      'aide:auth:jira:host:example.atlassian.net:account:dev%40example.com',
+      JSON.stringify({
+        url: 'https://example.atlassian.net',
+        email: 'dev@example.com',
+        apiToken: 'scoped-token',
+      })
+    );
+
+    const loaded = await loadConfig({
+      providerId: 'jira',
+      host: 'example.atlassian.net',
+      account: 'dev@example.com',
+    });
+
+    expect(loaded.source).toBe('keyring');
+    expect(loaded.config.apiToken).toBe('scoped-token');
+  });
+
+  test('rejects a parsed scoped Jira payload with a mismatching identity without using legacy', async () => {
+    store.set(
+      'aide:auth:jira:host:example.atlassian.net:account:dev%40example.com',
+      JSON.stringify({
+        url: 'https://other.atlassian.net',
+        email: 'other@example.com',
+        apiToken: 'wrong-scoped-token',
+      })
+    );
+    store.set(
+      'aide:jira',
+      JSON.stringify({
+        url: 'https://example.atlassian.net',
+        email: 'dev@example.com',
+        apiToken: 'legacy-token',
+      })
+    );
+
+    await expect(
+      loadConfig({
+        providerId: 'jira',
+        host: 'example.atlassian.net',
+        account: 'dev@example.com',
+      })
+    ).rejects.toThrow(/does not match.*scope/i);
+  });
+
+  test('does not read legacy Jira credentials when a selected scoped key is missing', async () => {
+    store.set(
+      'aide:jira',
+      JSON.stringify({
+        url: 'https://legacy.atlassian.net',
+        email: 'legacy@example.com',
+        apiToken: 'legacy-token',
+      })
+    );
+
+    await expect(
+      loadConfig({
+        providerId: 'jira',
+        host: 'example.atlassian.net',
+        account: 'dev@example.com',
+      })
+    ).rejects.toThrow(/not configured/i);
+  });
+
   test('throws when neither env nor keyring is configured', async () => {
     await expect(loadConfig()).rejects.toThrow(/not configured/i);
   });
@@ -153,6 +276,36 @@ describe('loadAzureDevOpsConfig', () => {
     expect(config.authMethod).toBe('pat');
   });
 
+  test('uses the selected scoped key and ignores mismatching Azure DevOps env identity', async () => {
+    Bun.env.AZURE_DEVOPS_ORG_URL = 'https://dev.azure.com/other';
+    Bun.env.AZURE_DEVOPS_PAT = 'env-token';
+    store.set(
+      'aide:auth:azure-devops:host:dev.azure.com:org:acme',
+      JSON.stringify({
+        orgUrl: 'https://dev.azure.com/acme',
+        pat: 'scoped-token',
+        authMethod: 'pat',
+      })
+    );
+    store.set(
+      'aide:ado',
+      JSON.stringify({
+        orgUrl: 'https://dev.azure.com/acme',
+        pat: 'legacy-token',
+        authMethod: 'pat',
+      })
+    );
+
+    const loaded = await loadAzureDevOpsConfig({
+      providerId: 'azure-devops',
+      host: 'dev.azure.com',
+      org: 'acme',
+    });
+
+    expect(loaded.source).toBe('keyring');
+    expect(loaded.config.pat).toBe('scoped-token');
+  });
+
   test('falls through to keyring when env is partial', async () => {
     Bun.env.AZURE_DEVOPS_ORG_URL = 'https://ignored';
     store.set(
@@ -169,7 +322,7 @@ describe('loadAzureDevOpsConfig', () => {
     expect(config.authMethod).toBe('bearer');
   });
 
-  test('uses scoped keyring credentials before the legacy key', async () => {
+  test('uses the exact scoped keyring credential when legacy is also populated', async () => {
     store.set(
       'aide:auth:azure-devops:host:dev.azure.com:org:acme',
       JSON.stringify({
@@ -201,7 +354,7 @@ describe('loadAzureDevOpsConfig', () => {
     });
   });
 
-  test('falls back to the legacy key when scoped credentials are missing', async () => {
+  test('does not read the legacy key when scoped credentials are missing', async () => {
     store.set(
       'aide:ado',
       JSON.stringify({
@@ -211,14 +364,13 @@ describe('loadAzureDevOpsConfig', () => {
       })
     );
 
-    const { config, source } = await loadAzureDevOpsConfig({
-      providerId: 'azure-devops',
-      host: 'dev.azure.com',
-      org: 'acme',
-    });
-
-    expect(source).toBe('keyring');
-    expect(config.pat).toBe('legacy-token');
+    await expect(
+      loadAzureDevOpsConfig({
+        providerId: 'azure-devops',
+        host: 'dev.azure.com',
+        org: 'acme',
+      })
+    ).rejects.toThrow(/not configured/i);
   });
 
   test('does not fall back when scoped credentials are malformed', async () => {
@@ -242,6 +394,33 @@ describe('loadAzureDevOpsConfig', () => {
         org: 'acme',
       })
     ).rejects.toThrow(/aide login ado/i);
+  });
+
+  test('rejects a parsed scoped Azure DevOps payload with a mismatching identity without using legacy', async () => {
+    store.set(
+      'aide:auth:azure-devops:host:dev.azure.com:org:acme',
+      JSON.stringify({
+        orgUrl: 'https://dev.azure.com/other',
+        pat: 'wrong-scoped-token',
+        authMethod: 'pat',
+      })
+    );
+    store.set(
+      'aide:ado',
+      JSON.stringify({
+        orgUrl: 'https://dev.azure.com/acme',
+        pat: 'legacy-token',
+        authMethod: 'pat',
+      })
+    );
+
+    await expect(
+      loadAzureDevOpsConfig({
+        providerId: 'azure-devops',
+        host: 'dev.azure.com',
+        org: 'acme',
+      })
+    ).rejects.toThrow(/does not match.*scope/i);
   });
 
   test('throws when neither is configured', async () => {

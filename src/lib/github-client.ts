@@ -144,8 +144,8 @@ export class GitHubClient {
    * @param opts.host - GitHub web host (e.g. `github.com` or `acme.ghe.com`).
    *   Defaults to `github.com`. Used to derive the REST/GraphQL API base and,
    *   for the gh CLI transport, the `--hostname` passed to `gh api`.
-   * @param opts.scope - Optional keyring scope. Scoped credentials are checked
-   *   before the legacy GitHub key while preserving gh CLI and env precedence.
+   * @param opts.scope - Optional keyring scope. Explicit scopes read only their
+   *   matching stored credential while preserving gh CLI and env precedence.
    * @param opts.spawn - Test seam overriding the gh CLI spawn function.
    * @param opts.fetch - Test seam overriding the token transport's fetch.
    * @throws {GitHubAuthError} if no auth source is available

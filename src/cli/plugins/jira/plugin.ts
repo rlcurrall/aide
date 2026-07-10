@@ -17,11 +17,11 @@ import {
   type ConfigStatus,
 } from '@lib/config.js';
 import {
-  authSecretTarget,
+  authSecretScopesMatch,
   deleteAuthSecret,
   writeAuthSecret,
+  type AuthStoreScope,
 } from '@lib/auth-store.js';
-import { deleteSecret, setSecret } from '@lib/secrets.js';
 import { StoredJiraSchema, type JiraConfig } from '@schemas/config.js';
 import {
   formatMigrationError,
@@ -36,6 +36,27 @@ type ProbeJiraConfig = () => Promise<ConfigStatus<JiraConfig>>;
 
 interface JiraPluginOptions {
   readonly probeConfig?: ProbeJiraConfig;
+}
+
+function jiraCredentialScope(credentials: JiraConfig): AuthStoreScope {
+  return {
+    providerId: 'jira',
+    host: credentials.url,
+    account: credentials.email,
+  };
+}
+
+function jiraScopeValidationError(
+  credentials: JiraConfig,
+  scope: AuthStoreScope | undefined
+): Error | null {
+  if (scope === undefined) return null;
+  if (authSecretScopesMatch('jira', scope, jiraCredentialScope(credentials))) {
+    return null;
+  }
+  return new Error(
+    'Jira credential URL/email identity does not match the explicit authentication scope.'
+  );
 }
 
 const JIRA_COMMANDS = `## Jira Commands
@@ -187,10 +208,14 @@ function loginJiraAuth(request: AideAuthLoginRequest) {
         );
       }
 
-      yield* Effect.tryPromise({
-        try: () => setSecret('jira', JSON.stringify(result.value)),
-        catch: (error) => error,
-      });
+      const scopeError = jiraScopeValidationError(result.value, request.scope);
+      if (scopeError !== null) return yield* Effect.fail(scopeError);
+
+      yield* writeAuthSecret(
+        'jira',
+        JSON.stringify(result.value),
+        request.scope
+      );
       return {
         status: 'stored' as const,
         messages: messages(
@@ -214,18 +239,10 @@ function loginJiraAuth(request: AideAuthLoginRequest) {
       catch: (error) => error,
     });
 
-    const scopedTarget =
-      request.scope === undefined
-        ? null
-        : authSecretTarget('jira', request.scope);
-    if (scopedTarget?.kind === 'scoped') {
-      yield* writeAuthSecret('jira', JSON.stringify(validated), request.scope);
-    } else {
-      yield* Effect.tryPromise({
-        try: () => setSecret('jira', JSON.stringify(validated)),
-        catch: (error) => error,
-      });
-    }
+    const scopeError = jiraScopeValidationError(validated, request.scope);
+    if (scopeError !== null) return yield* Effect.fail(scopeError);
+
+    yield* writeAuthSecret('jira', JSON.stringify(validated), request.scope);
 
     return {
       status: 'stored' as const,
@@ -236,25 +253,7 @@ function loginJiraAuth(request: AideAuthLoginRequest) {
 
 function logoutJiraAuth(request?: AideAuthLogoutRequest) {
   return Effect.gen(function* () {
-    const scope = request?.scope;
-    const scopedTarget =
-      scope === undefined ? null : authSecretTarget('jira', scope);
-    if (scope !== undefined && scopedTarget?.kind === 'scoped') {
-      const removed = yield* deleteAuthSecret('jira', scope);
-      return {
-        status: removed ? ('removed' as const) : ('not-found' as const),
-        messages: [
-          removed
-            ? 'Removed stored credentials for jira.'
-            : 'No stored credentials for jira.',
-        ],
-      };
-    }
-
-    const removed = yield* Effect.tryPromise({
-      try: () => deleteSecret('jira'),
-      catch: (error) => error,
-    });
+    const removed = yield* deleteAuthSecret('jira', request?.scope);
     return {
       status: removed ? ('removed' as const) : ('not-found' as const),
       messages: [

@@ -10,7 +10,11 @@ import {
 } from '../schemas/config.js';
 import { getSecret, KeyringUnavailableError } from './secrets.js';
 import { isGhCliAvailable } from './gh-utils.js';
-import { resolveAuthSecretPromise, type AuthStoreScope } from './auth-store.js';
+import {
+  authSecretScopesMatch,
+  resolveAuthSecretPromise,
+  type AuthStoreScope,
+} from './auth-store.js';
 
 export type ConfigSource = 'env' | 'keyring';
 
@@ -67,10 +71,24 @@ type KeyringResult<T> =
   | { kind: 'unreachable' }
   | { kind: 'malformed'; reason: string };
 
-async function readJiraFromKeyring(): Promise<KeyringResult<JiraConfig>> {
+function jiraConfigMatchesScope(
+  config: JiraConfig,
+  scope: AuthStoreScope
+): boolean {
+  return authSecretScopesMatch('jira', scope, {
+    providerId: 'jira',
+    host: config.url,
+    account: config.email,
+  });
+}
+
+async function readJiraFromKeyring(
+  scope?: AuthStoreScope
+): Promise<KeyringResult<JiraConfig>> {
   let raw: string | null;
   try {
-    raw = await getSecret('jira');
+    const resolved = await resolveAuthSecretPromise('jira', scope);
+    raw = resolved?.value ?? null;
   } catch (err) {
     if (err instanceof KeyringUnavailableError) return { kind: 'unreachable' };
     throw err;
@@ -97,14 +115,30 @@ async function readJiraFromKeyring(): Promise<KeyringResult<JiraConfig>> {
         ". Re-run 'aide login jira' to reconfigure.",
     };
   }
+  if (scope !== undefined && !jiraConfigMatchesScope(parsed.output, scope)) {
+    return {
+      kind: 'malformed',
+      reason:
+        'Stored scoped Jira credential identity does not match the requested authentication scope. ' +
+        "Re-run 'aide login jira' to reconfigure.",
+    };
+  }
   return { kind: 'found', value: parsed.output };
 }
 
-export async function probeJiraConfig(): Promise<ConfigStatus<JiraConfig>> {
+export async function probeJiraConfig(
+  scope?: AuthStoreScope
+): Promise<ConfigStatus<JiraConfig>> {
   const fromEnv = readJiraFromEnv();
-  if (fromEnv !== null) return fromEnv;
+  if (
+    fromEnv !== null &&
+    (scope === undefined ||
+      (fromEnv.kind === 'env' && jiraConfigMatchesScope(fromEnv.value, scope)))
+  ) {
+    return fromEnv;
+  }
 
-  const fromKeyring = await readJiraFromKeyring();
+  const fromKeyring = await readJiraFromKeyring(scope);
   if (fromKeyring.kind === 'found')
     return { kind: 'keyring', value: fromKeyring.value };
   if (fromKeyring.kind === 'unreachable') return { kind: 'unreachable' };
@@ -112,8 +146,10 @@ export async function probeJiraConfig(): Promise<ConfigStatus<JiraConfig>> {
   return { kind: 'missing' };
 }
 
-export async function loadConfig(): Promise<LoadedConfig<JiraConfig>> {
-  const status = await probeJiraConfig();
+export async function loadConfig(
+  scope?: AuthStoreScope
+): Promise<LoadedConfig<JiraConfig>> {
+  const status = await probeJiraConfig(scope);
   if (status.kind === 'env') return { config: status.value, source: 'env' };
   if (status.kind === 'keyring')
     return { config: status.value, source: 'keyring' };
@@ -160,6 +196,16 @@ function readAdoFromEnv(): ConfigStatus<AzureDevOpsConfig> | null {
   return { kind: 'env', value: parsed.output };
 }
 
+function adoConfigMatchesScope(
+  config: AzureDevOpsConfig,
+  scope: AuthStoreScope
+): boolean {
+  return authSecretScopesMatch('azure-devops', scope, {
+    providerId: 'azure-devops',
+    host: config.orgUrl,
+  });
+}
+
 async function readAdoFromKeyring(
   scope?: AuthStoreScope
 ): Promise<KeyringResult<AzureDevOpsConfig>> {
@@ -193,6 +239,14 @@ async function readAdoFromKeyring(
         ". Re-run 'aide login ado' to reconfigure.",
     };
   }
+  if (scope !== undefined && !adoConfigMatchesScope(parsed.output, scope)) {
+    return {
+      kind: 'malformed',
+      reason:
+        'Stored scoped Azure DevOps credential identity does not match the requested authentication scope. ' +
+        "Re-run 'aide login ado' to reconfigure.",
+    };
+  }
   return { kind: 'found', value: parsed.output };
 }
 
@@ -200,7 +254,13 @@ export async function probeAdoConfig(
   scope?: AuthStoreScope
 ): Promise<ConfigStatus<AzureDevOpsConfig>> {
   const fromEnv = readAdoFromEnv();
-  if (fromEnv !== null) return fromEnv;
+  if (
+    fromEnv !== null &&
+    (scope === undefined ||
+      (fromEnv.kind === 'env' && adoConfigMatchesScope(fromEnv.value, scope)))
+  ) {
+    return fromEnv;
+  }
 
   const fromKeyring = await readAdoFromKeyring(scope);
   if (fromKeyring.kind === 'found')

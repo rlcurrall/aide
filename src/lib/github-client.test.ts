@@ -178,7 +178,7 @@ describe('GitHubClient.create() — missing sources', () => {
     ).rejects.toThrow(/re-run 'aide login github'/i);
   });
 
-  test('uses a scoped keyring token before the legacy token', async () => {
+  test('uses the exact scoped keyring token when legacy is also populated', async () => {
     store.set(
       `${MOCK_SERVICE}:auth:github:host:acme.ghe.com`,
       JSON.stringify({ token: 'scoped-token' })
@@ -200,22 +200,18 @@ describe('GitHubClient.create() — missing sources', () => {
     expect(fetchStub.authorizations).toEqual(['Bearer scoped-token']);
   });
 
-  test('falls back to the legacy token when the scoped key is missing', async () => {
+  test('does not read the legacy token when the scoped key is missing', async () => {
     store.set(
       `${MOCK_SERVICE}:github`,
       JSON.stringify({ token: 'legacy-token' })
     );
-    const fetchStub = makeFetchStub({ number: 5 });
-
-    const client = await GitHubClient.create({
-      ghAvailable: () => false,
-      host: 'acme.ghe.com',
-      scope: { providerId: 'github', host: 'acme.ghe.com' },
-      fetch: fetchStub.fn,
-    });
-    await client.getPullRequest('acme', 'widgets', 5);
-
-    expect(fetchStub.authorizations).toEqual(['Bearer legacy-token']);
+    await expect(
+      GitHubClient.create({
+        ghAvailable: () => false,
+        host: 'acme.ghe.com',
+        scope: { providerId: 'github', host: 'acme.ghe.com' },
+      })
+    ).rejects.toBeInstanceOf(GitHubAuthError);
   });
 
   test('keeps no-scope callers on the legacy key', async () => {
