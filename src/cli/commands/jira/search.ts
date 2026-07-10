@@ -4,7 +4,7 @@
  */
 
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import { loadConfig } from '@lib/config.js';
+import { loadJiraConfigForArgs } from './auth-scope.js';
 import { JiraClient } from '@lib/jira-client.js';
 import { formatSearchResults } from '@lib/cli-utils.js';
 import { validateArgs } from '@lib/validation.js';
@@ -19,7 +19,7 @@ async function handler(argv: ArgumentsCamelCase<SearchArgs>): Promise<void> {
   const format = validated.format;
 
   try {
-    const { config } = await loadConfig();
+    const { config } = await loadJiraConfigForArgs(argv);
     const client = new JiraClient(config);
 
     let query = validated.query;

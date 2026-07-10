@@ -4,7 +4,7 @@
  */
 
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import { loadConfig } from '@lib/config.js';
+import { loadJiraConfigForArgs } from './auth-scope.js';
 import { JiraClient } from '@lib/jira-client.js';
 import { validateArgs } from '@lib/validation.js';
 import {
@@ -28,7 +28,7 @@ async function handler(
   validateTicketKeyWithWarning(ticketKey);
 
   try {
-    const { config } = await loadConfig();
+    const { config } = await loadJiraConfigForArgs(argv);
     const client = new JiraClient(config);
 
     logProgress(

@@ -4,7 +4,7 @@
  */
 
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import { loadConfig } from '@lib/config.js';
+import { loadJiraConfigForArgs } from './auth-scope.js';
 import { JiraClient } from '@lib/jira-client.js';
 import { validateArgs } from '@lib/validation.js';
 import { BoardsArgsSchema, type BoardsArgs } from '@schemas/jira/boards.js';
@@ -38,7 +38,7 @@ async function handler(argv: ArgumentsCamelCase<BoardsArgs>): Promise<void> {
   const { project, format } = args;
 
   try {
-    const { config } = await loadConfig();
+    const { config } = await loadJiraConfigForArgs(argv);
     const client = new JiraClient(config);
 
     const label = project ? `boards for project ${project}` : 'all boards';

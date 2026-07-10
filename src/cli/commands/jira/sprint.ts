@@ -4,7 +4,7 @@
  */
 
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import { loadConfig } from '@lib/config.js';
+import { loadJiraConfigForArgs } from './auth-scope.js';
 import { JiraClient } from '@lib/jira-client.js';
 import { validateArgs } from '@lib/validation.js';
 import { SprintArgsSchema, type SprintArgs } from '@schemas/jira/sprint.js';
@@ -53,7 +53,7 @@ async function handler(argv: ArgumentsCamelCase<SprintArgs>): Promise<void> {
   const { boardId, state, format } = args;
 
   try {
-    const { config } = await loadConfig();
+    const { config } = await loadJiraConfigForArgs(argv);
     const client = new JiraClient(config);
 
     logProgress(`Fetching ${state} sprint(s) for board ${boardId}...`, format);

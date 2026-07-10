@@ -19,12 +19,13 @@ import attachCommand from './attach.js';
 import fieldsCommand from './fields.js';
 import boardsCommand from './boards.js';
 import sprintCommand from './sprint.js';
+import { configureJiraAuthScopeOptions } from './auth-scope.js';
 
 export const jiraCommands: CommandModule = {
   command: 'jira <command>',
   describe: 'Jira ticket management commands',
   builder: (yargs) =>
-    yargs
+    configureJiraAuthScopeOptions(yargs)
       // Primary commands
       .command(searchCommand)
       .command(viewCommand)
