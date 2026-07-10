@@ -8,6 +8,7 @@
 
 import { Effect } from 'effect';
 import type { CommandModule } from 'yargs';
+import type { GitHubAuthProbe } from '@lib/gh-utils.js';
 
 import { commandModuleFromDescriptor } from '@cli/host/yargs-adapter.js';
 import {
@@ -41,7 +42,7 @@ export {
 } from './whoami-program.js';
 
 export async function getWhoamiStatus(
-  opts: { ghAvailable?: () => boolean } = {}
+  opts: { ghAuthProbe?: GitHubAuthProbe } = {}
 ): Promise<WhoamiStatus[]> {
   return Effect.runPromise(
     getWhoamiStatusEffect.pipe(Effect.provide(makeWhoamiConfigLayer(opts)))
@@ -58,11 +59,14 @@ export async function getWhoamiStatus(
  *    keyring and suggest unsetting them
  */
 export async function buildWhoamiOutput(
-  opts: { ghAvailable?: () => boolean; service?: ServiceName } = {}
+  opts: {
+    ghAuthProbe?: GitHubAuthProbe;
+    service?: ServiceName;
+  } = {}
 ): Promise<string> {
   return Effect.runPromise(
     buildWhoamiOutputEffect({ service: opts.service }).pipe(
-      Effect.provide(makeWhoamiConfigLayer({ ghAvailable: opts.ghAvailable }))
+      Effect.provide(makeWhoamiConfigLayer({ ghAuthProbe: opts.ghAuthProbe }))
     )
   );
 }
@@ -72,16 +76,19 @@ interface Args {
 }
 
 export function buildWhoamiCommandEffect(
-  opts: { ghAvailable?: () => boolean; service?: ServiceName } = {}
+  opts: {
+    ghAuthProbe?: GitHubAuthProbe;
+    service?: ServiceName;
+  } = {}
 ): Effect.Effect<CommandResult, WhoamiError, never> {
   return buildWhoamiOutputEffect({ service: opts.service }).pipe(
     Effect.map(textResult),
-    Effect.provide(makeWhoamiConfigLayer({ ghAvailable: opts.ghAvailable }))
+    Effect.provide(makeWhoamiConfigLayer({ ghAuthProbe: opts.ghAuthProbe }))
   );
 }
 
 export function makeWhoamiCommandDescriptor(
-  opts: { ghAvailable?: () => boolean } = {}
+  opts: { ghAuthProbe?: GitHubAuthProbe } = {}
 ): AideCommandDescriptor<Args, WhoamiError, never> {
   return defineAideCommand<Args, WhoamiError, never>({
     id: 'whoami',
@@ -98,7 +105,7 @@ export function makeWhoamiCommandDescriptor(
     },
     run: (argv) =>
       buildWhoamiCommandEffect({
-        ghAvailable: opts.ghAvailable,
+        ghAuthProbe: opts.ghAuthProbe,
         service: argv.service,
       }),
   });

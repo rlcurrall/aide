@@ -13,6 +13,7 @@ import {
 } from '@lib/config.js';
 import type { SecretName } from '@lib/secrets.js';
 import type { AzureDevOpsConfig, JiraConfig } from '@schemas/config.js';
+import type { GitHubAuthProbe } from '@lib/gh-utils.js';
 
 export type ServiceName = 'jira' | 'ado' | 'github';
 export type WhoamiSource =
@@ -77,7 +78,7 @@ export interface WhoamiConfigServiceShape {
 }
 
 interface WhoamiConfigOptions {
-  ghAvailable?: () => boolean;
+  ghAuthProbe?: GitHubAuthProbe;
 }
 
 function tryWhoamiPromise<A>(
@@ -110,7 +111,7 @@ function makeLiveWhoamiConfigService(
       ),
     probeGithub: () =>
       tryWhoamiPromise('github', 'probing GitHub configuration', () =>
-        probeGithubConfig({ ghAvailable: opts.ghAvailable })
+        probeGithubConfig({ ghAuthProbe: opts.ghAuthProbe })
       ),
     isKeyringCredentialValid: (name) =>
       tryWhoamiPromise('keyring', `checking ${name} keyring credentials`, () =>

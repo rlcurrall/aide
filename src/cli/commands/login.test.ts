@@ -10,9 +10,11 @@ import { createGitHubPlugin } from '@cli/plugins/github/plugin.js';
 import { createJiraPlugin } from '@cli/plugins/jira/plugin.js';
 import type { Prompter, ReadLineOptions } from '@lib/prompts.js';
 import {
+  authenticatedGitHubAuthProbe,
   installMockSecrets,
   restoreEnv,
   saveEnv,
+  unavailableGitHubAuthProbe,
   type Store,
 } from '@lib/test-helpers.js';
 import { runAuthProviderLogin } from './auth-provider-command-utils.js';
@@ -178,7 +180,9 @@ describe('provider-backed login', () => {
   test('reports external GitHub auth when gh CLI is available', async () => {
     const p = new ScriptedPrompter([]);
     const result = await runAuthProviderLogin(
-      authProvider(createGitHubPlugin({ ghAvailable: () => true })),
+      authProvider(
+        createGitHubPlugin({ ghAuthProbe: authenticatedGitHubAuthProbe })
+      ),
       { values: { token: 'should-be-ignored' } },
       { prompter: p }
     );
@@ -190,7 +194,9 @@ describe('provider-backed login', () => {
   test('stores GitHub token when gh CLI is missing', async () => {
     const p = new ScriptedPrompter(['ghp_xxx']);
     const result = await runAuthProviderLogin(
-      authProvider(createGitHubPlugin({ ghAvailable: () => false })),
+      authProvider(
+        createGitHubPlugin({ ghAuthProbe: unavailableGitHubAuthProbe })
+      ),
       {},
       { prompter: p }
     );
@@ -280,7 +286,9 @@ describe('provider-backed login --from-env', () => {
   test('GitHub --from-env hint names GITHUB_TOKEN when that alias is set', async () => {
     Bun.env.GITHUB_TOKEN = 'ghp_xxx';
     await runAuthProviderLogin(
-      authProvider(createGitHubPlugin({ ghAvailable: () => false })),
+      authProvider(
+        createGitHubPlugin({ ghAuthProbe: unavailableGitHubAuthProbe })
+      ),
       { fromEnv: true }
     );
 
@@ -292,7 +300,9 @@ describe('provider-backed login --from-env', () => {
   test('GitHub --from-env hint names GH_TOKEN when that alias is set', async () => {
     Bun.env.GH_TOKEN = 'ghp_yyy';
     await runAuthProviderLogin(
-      authProvider(createGitHubPlugin({ ghAvailable: () => false })),
+      authProvider(
+        createGitHubPlugin({ ghAuthProbe: unavailableGitHubAuthProbe })
+      ),
       { fromEnv: true }
     );
 
@@ -371,7 +381,9 @@ describe('provider-backed login --from-env', () => {
   test('GitHub --from-env writes GITHUB_TOKEN to keyring even when gh-cli is available', async () => {
     Bun.env.GITHUB_TOKEN = 'ghp_xxx';
     const result = await runAuthProviderLogin(
-      authProvider(createGitHubPlugin({ ghAvailable: () => true })),
+      authProvider(
+        createGitHubPlugin({ ghAuthProbe: authenticatedGitHubAuthProbe })
+      ),
       { fromEnv: true }
     );
 
@@ -383,7 +395,9 @@ describe('provider-backed login --from-env', () => {
   test('GitHub --from-env accepts GH_TOKEN alias', async () => {
     Bun.env.GH_TOKEN = 'ghp_yyy';
     await runAuthProviderLogin(
-      authProvider(createGitHubPlugin({ ghAvailable: () => false })),
+      authProvider(
+        createGitHubPlugin({ ghAuthProbe: unavailableGitHubAuthProbe })
+      ),
       { fromEnv: true }
     );
 
@@ -394,7 +408,9 @@ describe('provider-backed login --from-env', () => {
   test('GitHub --from-env errors when no token is in env', async () => {
     await expect(
       runAuthProviderLogin(
-        authProvider(createGitHubPlugin({ ghAvailable: () => false })),
+        authProvider(
+          createGitHubPlugin({ ghAuthProbe: unavailableGitHubAuthProbe })
+        ),
         { fromEnv: true }
       )
     ).rejects.toThrow(/GITHUB_TOKEN/);

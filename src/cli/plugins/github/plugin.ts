@@ -36,7 +36,7 @@ import {
   type ConfigStatus,
   type GithubConfigValue,
 } from '@lib/config.js';
-import { isGhCliAvailable } from '@lib/gh-utils.js';
+import { probeGhCliAuth, type GitHubAuthProbe } from '@lib/gh-utils.js';
 import { GitHubClient } from '@lib/github-client.js';
 import type {
   GitHubIssueComment,
@@ -57,6 +57,12 @@ import {
   type AuthStoreScope,
   writeAuthSecret,
 } from '@lib/auth-store.js';
+import {
+  GitHubAuthRequestError,
+  githubStoredCredentialPayload,
+  resolveGitHubAuthRequest,
+  type CanonicalGitHubAuthRequest,
+} from '@lib/github-auth.js';
 import { githubRepositoryAuthScope } from '@lib/repository-auth-scope.js';
 import { StoredGithubSchema } from '@schemas/config.js';
 import {
@@ -66,7 +72,10 @@ import {
   promptAuthField,
 } from '../auth-operation-utils.js';
 
-type ProbeGithubConfig = () => Promise<ConfigStatus<GithubConfigValue>>;
+type ProbeGithubConfig = (options: {
+  readonly host?: string;
+  readonly scope?: AuthStoreScope;
+}) => Promise<ConfigStatus<GithubConfigValue>>;
 type GitHubPullRequestClient = Pick<
   GitHubClient,
   | 'listPullRequests'
@@ -97,7 +106,7 @@ type CreateGitHubClient = (options: {
 interface GitHubPluginOptions {
   readonly probeConfig?: ProbeGithubConfig;
   readonly createClient?: CreateGitHubClient;
-  readonly ghAvailable?: () => boolean;
+  readonly ghAuthProbe?: GitHubAuthProbe;
 }
 
 const githubTokenField = {
@@ -144,7 +153,8 @@ function mapGithubAuthStatus(
 }
 
 function githubAuthAccounts(
-  status: ConfigStatus<GithubConfigValue>
+  status: ConfigStatus<GithubConfigValue>,
+  request: CanonicalGitHubAuthRequest
 ): readonly AideAuthAccount[] {
   if (status.kind !== 'env' && status.kind !== 'keyring') return [];
 
@@ -161,20 +171,25 @@ function githubAuthAccounts(
         ? 'stored token'
         : 'environment token';
   const metadata = { authSource: status.value.source };
+  const scopeId =
+    request.account === undefined
+      ? request.host
+      : `${request.host}:${request.account}`;
 
   return [
     {
-      id: `github.com:${status.value.source}`,
+      id: `${scopeId}:${status.value.source}`,
       providerId: 'github',
-      label: 'GitHub',
-      detail: `configured via ${sourceLabel}`,
+      label: request.account ?? 'GitHub',
+      detail: `${scopeId} configured via ${sourceLabel}`,
       sourceKind,
       metadata,
       scope: {
-        id: 'github.com',
+        id: scopeId,
         providerId: 'github',
-        host: 'github.com',
-        label: 'github.com',
+        host: request.host,
+        ...(request.account === undefined ? {} : { account: request.account }),
+        label: scopeId,
         sourceKind,
         metadata,
       },
@@ -184,11 +199,33 @@ function githubAuthAccounts(
 
 function loginGitHubAuth(
   request: AideAuthLoginRequest,
-  ghAvailable: () => boolean
+  probeConfig: ProbeGithubConfig
 ) {
   return Effect.gen(function* () {
+    const authRequest = resolveGitHubAuthRequest({ scope: request.scope });
+    if (!authRequest.ok) {
+      return yield* Effect.fail(
+        new GitHubAuthRequestError(
+          authRequest.code,
+          authRequest.host,
+          authRequest.reason
+        )
+      );
+    }
+
     if (request.fromEnv) {
-      const result = readGithubEnvForMigration();
+      if (authRequest.account !== undefined) {
+        return yield* Effect.fail(
+          new GitHubAuthRequestError(
+            'unqualified-environment-credential',
+            authRequest.host,
+            'Account-qualified GitHub --from-env is not supported because ' +
+              'standard GitHub environment tokens do not prove account identity.',
+            authRequest.account
+          )
+        );
+      }
+      const result = readGithubEnvForMigration(authRequest.host);
       if (result.kind !== 'ok') {
         return yield* Effect.fail(
           new Error(formatMigrationError('GitHub', result))
@@ -197,8 +234,10 @@ function loginGitHubAuth(
 
       yield* writeAuthSecret(
         'github',
-        JSON.stringify(result.value),
-        request.scope
+        JSON.stringify(
+          githubStoredCredentialPayload(authRequest, result.value.token)
+        ),
+        authRequest.keyringScope
       );
       return {
         status: 'stored' as const,
@@ -209,11 +248,17 @@ function loginGitHubAuth(
       };
     }
 
-    if (request.scope === undefined && ghAvailable()) {
-      return {
-        status: 'external' as const,
-        messages: ['Using gh CLI auth. Nothing to do.'],
-      };
+    if (request.scope === undefined) {
+      const status = yield* Effect.tryPromise({
+        try: () => probeConfig({}),
+        catch: (error) => error,
+      });
+      if (status.kind === 'env' && status.value.source === 'gh-cli') {
+        return {
+          status: 'external' as const,
+          messages: ['Using gh CLI auth. Nothing to do.'],
+        };
+      }
     }
 
     const token = yield* promptAuthField(request, githubTokenField);
@@ -222,7 +267,13 @@ function loginGitHubAuth(
       catch: (error) => error,
     });
 
-    yield* writeAuthSecret('github', JSON.stringify(validated), request.scope);
+    yield* writeAuthSecret(
+      'github',
+      JSON.stringify(
+        githubStoredCredentialPayload(authRequest, validated.token)
+      ),
+      authRequest.keyringScope
+    );
 
     return {
       status: 'stored' as const,
@@ -233,7 +284,17 @@ function loginGitHubAuth(
 
 function logoutGitHubAuth(request?: AideAuthLogoutRequest) {
   return Effect.gen(function* () {
-    const removed = yield* deleteAuthSecret('github', request?.scope);
+    const authRequest = resolveGitHubAuthRequest({ scope: request?.scope });
+    if (!authRequest.ok) {
+      return yield* Effect.fail(
+        new GitHubAuthRequestError(
+          authRequest.code,
+          authRequest.host,
+          authRequest.reason
+        )
+      );
+    }
+    const removed = yield* deleteAuthSecret('github', authRequest.keyringScope);
     return {
       status: removed ? ('removed' as const) : ('not-found' as const),
       messages: [
@@ -260,22 +321,40 @@ function explicitGitHubHost(
 }
 
 export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
+  const ghAuthProbe: GitHubAuthProbe = opts.ghAuthProbe ?? probeGhCliAuth;
   const probeConfig =
     opts.probeConfig ??
-    (() => probeGithubConfig({ ghAvailable: opts.ghAvailable }));
+    ((options) => probeGithubConfig({ ...options, ghAuthProbe }));
   const createClient =
-    opts.createClient ?? ((options) => GitHubClient.create(options));
-  const ghAvailable = opts.ghAvailable ?? isGhCliAvailable;
-  const authStatus = () =>
-    Effect.tryPromise({
-      try: () => probeConfig(),
+    opts.createClient ??
+    ((options) => GitHubClient.create({ ...options, ghAuthProbe }));
+  const authStatus = (request?: { readonly scope?: AuthStoreScope }) => {
+    const authRequest = resolveGitHubAuthRequest({ scope: request?.scope });
+    if (!authRequest.ok) {
+      return Effect.succeed({
+        state: 'misconfigured' as const,
+        detail: authRequest.reason,
+      });
+    }
+    return Effect.tryPromise({
+      try: () =>
+        probeConfig({
+          scope: authRequest.keyringScope,
+        }),
       catch: (error) => error,
     }).pipe(Effect.map(mapGithubAuthStatus));
-  const authAccounts = () =>
-    Effect.tryPromise({
-      try: () => probeConfig(),
+  };
+  const authAccounts = (request?: { readonly scope?: AuthStoreScope }) => {
+    const authRequest = resolveGitHubAuthRequest({ scope: request?.scope });
+    if (!authRequest.ok) return Effect.succeed([]);
+    return Effect.tryPromise({
+      try: () =>
+        probeConfig({
+          scope: authRequest.keyringScope,
+        }),
       catch: (error) => error,
-    }).pipe(Effect.map(githubAuthAccounts));
+    }).pipe(Effect.map((status) => githubAuthAccounts(status, authRequest)));
+  };
 
   const listPullRequests = (
     request: AidePullRequestListRequest
@@ -821,11 +900,18 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         providerId: 'github',
         label: 'GitHub',
         login: {
-          summary: 'Save GitHub token (only if gh CLI is unavailable)',
+          summary: 'Save a GitHub token for the requested host',
           fields: githubLoginFields,
           envMigration: {
-            description: 'Migrate GITHUB_TOKEN / GH_TOKEN into the keyring',
-            variables: ['GITHUB_TOKEN', 'GH_TOKEN'],
+            description:
+              'Migrate a host-bound GitHub env token into the keyring',
+            variables: [
+              'GITHUB_TOKEN',
+              'GH_TOKEN',
+              'GH_HOST',
+              'GH_ENTERPRISE_TOKEN',
+              'GITHUB_ENTERPRISE_TOKEN',
+            ],
           },
         },
         logout: {
@@ -834,7 +920,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         status: authStatus,
         accounts: authAccounts,
         operations: {
-          login: (request) => loginGitHubAuth(request, ghAvailable),
+          login: (request) => loginGitHubAuth(request, probeConfig),
           logout: logoutGitHubAuth,
         },
       },

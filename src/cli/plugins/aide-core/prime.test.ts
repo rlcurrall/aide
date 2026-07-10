@@ -14,9 +14,11 @@ import {
   makePrimeCommandDescriptor,
 } from './prime.js';
 import {
+  authenticatedGitHubAuthProbe,
   installMockSecrets,
   saveEnv,
   restoreEnv,
+  unavailableGitHubAuthProbe,
   type Store,
 } from '@lib/test-helpers.js';
 import { createCommandRegistry } from '@cli/host/command-registry.js';
@@ -29,6 +31,7 @@ import { createAzureDevOpsPlugin } from '@cli/plugins/azure-devops/plugin.js';
 import { createGitHubPlugin } from '@cli/plugins/github/plugin.js';
 import { createJiraPlugin } from '@cli/plugins/jira/plugin.js';
 import { pullRequestsPlugin } from '@cli/plugins/pull-requests/plugin.js';
+import type { GitHubAuthProbe } from '@lib/gh-utils.js';
 import {
   defineAidePlugin,
   type AidePrimeSection,
@@ -45,19 +48,19 @@ const ADO_VARS = ['AZURE_DEVOPS_ORG_URL', 'AZURE_DEVOPS_PAT'];
 const GH_VARS = ['GITHUB_TOKEN', 'GH_TOKEN'];
 
 function createPrimeTestServices(
-  opts: { readonly ghAvailable?: () => boolean } = {}
+  opts: { readonly ghAuthProbe?: GitHubAuthProbe } = {}
 ): AideHostServices {
   const registry = createCommandRegistry();
   registry
     .registerPlugin(createJiraPlugin())
-    .registerPlugin(createGitHubPlugin({ ghAvailable: opts.ghAvailable }))
+    .registerPlugin(createGitHubPlugin({ ghAuthProbe: opts.ghAuthProbe }))
     .registerPlugin(createAzureDevOpsPlugin())
     .registerPlugin(pullRequestsPlugin);
   return createAideHostServices(registry);
 }
 
 async function buildPrimeTestOutput(
-  opts: { readonly ghAvailable?: () => boolean } = {}
+  opts: { readonly ghAuthProbe?: GitHubAuthProbe } = {}
 ): Promise<string> {
   return buildPrimeOutput({ services: createPrimeTestServices(opts) });
 }
@@ -80,12 +83,16 @@ describe('buildPrimeOutput', () => {
   });
 
   test('reports Jira not configured when neither env nor keyring has credentials', async () => {
-    const output = await buildPrimeTestOutput({ ghAvailable: () => false });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(output).toMatch(/Jira: Not configured/i);
   });
 
   test('buildPrimeOutputEffect matches the compatibility wrapper output', async () => {
-    const services = createPrimeTestServices({ ghAvailable: () => true });
+    const services = createPrimeTestServices({
+      ghAuthProbe: authenticatedGitHubAuthProbe,
+    });
     const effectOutput = await Effect.runPromise(
       buildPrimeOutputEffect().pipe(
         Effect.provideService(AideHostServicesTag, services)
@@ -99,7 +106,9 @@ describe('buildPrimeOutput', () => {
   });
 
   test('primeCommandDescriptor returns the Effect-backed text result', async () => {
-    const services = createPrimeTestServices({ ghAvailable: () => true });
+    const services = createPrimeTestServices({
+      ghAuthProbe: authenticatedGitHubAuthProbe,
+    });
     const descriptor = makePrimeCommandDescriptor();
     const result = await Effect.runPromise(
       descriptor
@@ -116,7 +125,9 @@ describe('buildPrimeOutput', () => {
     Bun.env.JIRA_URL = 'https://x.atlassian.net';
     Bun.env.JIRA_EMAIL = 'a@b.c';
     Bun.env.JIRA_API_TOKEN = 't';
-    const output = await buildPrimeTestOutput({ ghAvailable: () => false });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(output).toMatch(/Jira: Configured/i);
   });
 
@@ -129,7 +140,9 @@ describe('buildPrimeOutput', () => {
         apiToken: 't',
       })
     );
-    const output = await buildPrimeTestOutput({ ghAvailable: () => false });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(output).toMatch(/Jira: Configured/i);
   });
 
@@ -139,20 +152,26 @@ describe('buildPrimeOutput', () => {
     Bun.env.JIRA_API_TOKEN = 't';
     Bun.env.AZURE_DEVOPS_ORG_URL = 'https://dev.azure.com/x';
     Bun.env.AZURE_DEVOPS_PAT = 'p';
-    const output = await buildPrimeTestOutput({ ghAvailable: () => false });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(output).not.toContain('Configuration Status');
   });
 
   test('reports Jira misconfigured when stored blob fails schema', async () => {
     store.set('aide:jira', JSON.stringify({ url: 'not-a-url' }));
-    const output = await buildPrimeTestOutput({ ghAvailable: () => false });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(output).toMatch(/Jira: Misconfigured/i);
     expect(output).not.toMatch(/Jira: Configured$/m);
   });
 
   test('reports PR misconfigured when stored github token blob fails schema', async () => {
     store.set('aide:github', JSON.stringify({ wrongField: 'x' }));
-    const output = await buildPrimeTestOutput({ ghAvailable: () => false });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(output).toMatch(/Pull Requests: Misconfigured/i);
   });
 
@@ -162,14 +181,18 @@ describe('buildPrimeOutput', () => {
     Bun.env.JIRA_API_TOKEN = 't';
     Bun.env.AZURE_DEVOPS_ORG_URL = 'https://dev.azure.com/x';
     Bun.env.AZURE_DEVOPS_PAT = 'p';
-    const output = await buildPrimeTestOutput({ ghAvailable: () => false });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(output).not.toContain('Configuration Status');
   });
 
   test('reports services as not configured when keyring is unreachable', async () => {
     restore();
     restore = installMockSecrets(store, 'get');
-    const output = await buildPrimeTestOutput({ ghAvailable: () => false });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(output).toMatch(/Jira: Not configured/i);
     expect(output).toMatch(/Pull Requests: Not configured/i);
   });
@@ -178,7 +201,9 @@ describe('buildPrimeOutput', () => {
     Bun.env.JIRA_URL = 'https://x.atlassian.net';
     Bun.env.JIRA_USERNAME = 'user';
     Bun.env.JIRA_API_TOKEN = 't';
-    const output = await buildPrimeTestOutput({ ghAvailable: () => false });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(output).toMatch(/Jira: Configured/i);
   });
 
@@ -186,7 +211,9 @@ describe('buildPrimeOutput', () => {
     Bun.env.JIRA_URL = 'https://x.atlassian.net';
     Bun.env.JIRA_EMAIL = 'a@b.c';
     Bun.env.JIRA_TOKEN = 't';
-    const output = await buildPrimeTestOutput({ ghAvailable: () => false });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(output).toMatch(/Jira: Configured/i);
   });
 
@@ -194,14 +221,18 @@ describe('buildPrimeOutput', () => {
     Bun.env.JIRA_URL = 'https://x.atlassian.net';
     Bun.env.JIRA_EMAIL = 'a@b.c';
     Bun.env.JIRA_API_TOKEN = 't';
-    const output = await buildPrimeTestOutput({ ghAvailable: () => false });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(output).toContain('Configuration Status');
     expect(output).toMatch(/Jira: Configured/i);
     expect(output).toMatch(/Pull Requests: Not configured/i);
   });
 
   test('emits partial status section when PR via gh is configured but Jira is not', async () => {
-    const output = await buildPrimeTestOutput({ ghAvailable: () => true });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: authenticatedGitHubAuthProbe,
+    });
     expect(output).toContain('Configuration Status');
     expect(output).toMatch(/Jira: Not configured/i);
     expect(output).toMatch(/Pull Requests: Configured/i);
@@ -209,13 +240,17 @@ describe('buildPrimeOutput', () => {
 
   test('reports PR configured when GITHUB_TOKEN is set', async () => {
     Bun.env.GITHUB_TOKEN = 'ghp_xxx';
-    const output = await buildPrimeTestOutput({ ghAvailable: () => false });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(output).toMatch(/Pull Requests: Configured/i);
   });
 
   test('reports PR configured when GH_TOKEN is set', async () => {
     Bun.env.GH_TOKEN = 'ghp_xxx';
-    const output = await buildPrimeTestOutput({ ghAvailable: () => false });
+    const output = await buildPrimeTestOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(output).toMatch(/Pull Requests: Configured/i);
   });
 

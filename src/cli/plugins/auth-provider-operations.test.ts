@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Effect } from 'effect';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import type {
   AideDiscoveredCapability,
@@ -14,9 +17,11 @@ import { createGitHubPlugin } from './github/plugin.js';
 import { createJiraPlugin } from './jira/plugin.js';
 import { loadAzureDevOpsConfig } from '@lib/config.js';
 import {
+  authenticatedGitHubAuthProbe,
   installMockSecrets,
   restoreEnv,
   saveEnv,
+  unavailableGitHubAuthProbe,
   type Store,
 } from '@lib/test-helpers.js';
 
@@ -26,6 +31,9 @@ const AUTH_ENV_VARS = [
   'AZURE_DEVOPS_PAT',
   'GH_TOKEN',
   'GITHUB_TOKEN',
+  'GH_HOST',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
   'JIRA_API_TOKEN',
   'JIRA_EMAIL',
   'JIRA_TOKEN',
@@ -164,7 +172,7 @@ describe('auth provider operations', () => {
 
   test('GitHub login reports external auth when gh CLI is available', async () => {
     const provider = authProvider(
-      createGitHubPlugin({ ghAvailable: () => true })
+      createGitHubPlugin({ ghAuthProbe: authenticatedGitHubAuthProbe })
     );
     const result = await Effect.runPromise(
       provider.operations!.login!({ values: { token: 'ignored' } })
@@ -200,7 +208,9 @@ describe('auth provider operations', () => {
     );
     const githubAccounts = await Effect.runPromise(
       listAuthProviderAccounts(
-        discoveredAuthProvider(createGitHubPlugin({ ghAvailable: () => true }))
+        discoveredAuthProvider(
+          createGitHubPlugin({ ghAuthProbe: authenticatedGitHubAuthProbe })
+        )
       )
     );
 
@@ -277,10 +287,243 @@ describe('auth provider operations', () => {
     ]);
   });
 
+  test('GitHub scoped status and accounts ignore auth for a different host', async () => {
+    Bun.env.GITHUB_TOKEN = 'public-token';
+    Bun.env.GH_HOST = 'other.ghe.com';
+    Bun.env.GH_ENTERPRISE_TOKEN = 'other-enterprise-token';
+    const checkedHosts: string[] = [];
+    const plugin = createGitHubPlugin({
+      ghAuthProbe: (request) => {
+        checkedHosts.push(request.host);
+        return { kind: 'authenticated', host: 'github.com' };
+      },
+    });
+    const scope = {
+      id: 'github.example.com',
+      providerId: 'github',
+      host: 'github.example.com',
+    };
+
+    const status = await Effect.runPromise(
+      authProvider(plugin).status({ scope })
+    );
+    const accounts = await Effect.runPromise(
+      listAuthProviderAccounts(discoveredAuthProvider(plugin), { scope })
+    );
+
+    expect(status.state).toBe('not-configured');
+    expect(accounts).toEqual([]);
+    expect(checkedHosts).toEqual(['github.example.com', 'github.example.com']);
+  });
+
+  test('GitHub scoped status and accounts report only the exact host key', async () => {
+    store.set(
+      'aide:auth:github:host:github.example.com',
+      JSON.stringify({
+        token: 'exact-token',
+        identity: { host: 'github.example.com' },
+      })
+    );
+    store.set('aide:github', JSON.stringify({ token: 'legacy-token' }));
+    const plugin = createGitHubPlugin({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
+    const scope = {
+      id: 'github.example.com',
+      providerId: 'github',
+      host: 'github.example.com',
+    };
+
+    const status = await Effect.runPromise(
+      authProvider(plugin).status({ scope })
+    );
+    const accounts = await Effect.runPromise(
+      listAuthProviderAccounts(discoveredAuthProvider(plugin), { scope })
+    );
+
+    expect(status.state).toBe('configured');
+    expect(accounts).toMatchObject([
+      {
+        id: 'github.example.com:stored',
+        providerId: 'github',
+        sourceKind: 'keyring',
+        scope: {
+          id: 'github.example.com',
+          providerId: 'github',
+          host: 'github.example.com',
+        },
+      },
+    ]);
+  });
+
+  test('GitHub account-qualified status and accounts preserve canonical account identity', async () => {
+    store.set(
+      'aide:auth:github:host:github.com:account:octocat',
+      JSON.stringify({
+        token: 'account-token',
+        identity: { host: 'github.com', account: 'OctoCat' },
+      })
+    );
+    const plugin = createGitHubPlugin({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
+    const scope = {
+      id: 'caller-controlled-id',
+      providerId: 'github',
+      host: 'GITHUB.COM',
+      account: ' OCTOCAT ',
+    };
+
+    const status = await Effect.runPromise(
+      authProvider(plugin).status({ scope })
+    );
+    const accounts = await Effect.runPromise(
+      listAuthProviderAccounts(discoveredAuthProvider(plugin), { scope })
+    );
+
+    expect(status).toMatchObject({ state: 'configured' });
+    expect(accounts).toMatchObject([
+      {
+        id: 'github.com:octocat:stored',
+        providerId: 'github',
+        sourceKind: 'keyring',
+        scope: {
+          id: 'github.com:octocat',
+          providerId: 'github',
+          host: 'github.com',
+          account: 'octocat',
+        },
+      },
+    ]);
+  });
+
+  test('GitHub production default preserves a typed active-account mismatch', async () => {
+    const fakeBin = mkdtempSync(join(tmpdir(), 'aide-gh-account-'));
+    const fakeGh = join(fakeBin, 'gh');
+    const previousPath = Bun.env.PATH;
+    writeFileSync(
+      fakeGh,
+      [
+        '#!/bin/sh',
+        'case " $* " in',
+        '  *" --json hosts "*)',
+        `    printf '%s' '{"hosts":{"github.com":[{"active":true,"host":"github.com","login":"hubot","state":"success"}]}}'`,
+        '    exit 0',
+        '    ;;',
+        '  *) exit 0 ;;',
+        'esac',
+      ].join('\n')
+    );
+    chmodSync(fakeGh, 0o755);
+    Bun.env.PATH = `${fakeBin}:${previousPath ?? ''}`;
+
+    try {
+      const plugin = createGitHubPlugin();
+      const scope = {
+        id: 'github.com:octocat',
+        providerId: 'github',
+        host: 'github.com',
+        account: 'octocat',
+      };
+
+      expect(
+        await Effect.runPromise(authProvider(plugin).status({ scope }))
+      ).toMatchObject({
+        state: 'misconfigured',
+        detail: expect.stringMatching(/hubot.*octocat/i),
+      });
+      expect(
+        await Effect.runPromise(
+          listAuthProviderAccounts(discoveredAuthProvider(plugin), { scope })
+        )
+      ).toEqual([]);
+    } finally {
+      if (previousPath === undefined) delete Bun.env.PATH;
+      else Bun.env.PATH = previousPath;
+      rmSync(fakeBin, { recursive: true, force: true });
+    }
+  });
+
+  test('GitHub account-qualified login stores canonical identity in its exact key', async () => {
+    const provider = authProvider(
+      createGitHubPlugin({ ghAuthProbe: unavailableGitHubAuthProbe })
+    );
+
+    await Effect.runPromise(
+      provider.operations!.login!({
+        values: { token: 'account-token' },
+        scope: {
+          id: 'ignored-id',
+          providerId: 'GitHub',
+          host: 'GITHUB.COM',
+          account: ' OctoCat ',
+        },
+      })
+    );
+
+    expect(
+      JSON.parse(
+        store.get('aide:auth:github:host:github.com:account:octocat') ?? '{}'
+      )
+    ).toEqual({
+      token: 'account-token',
+      identity: { host: 'github.com', account: 'octocat' },
+    });
+    expect(store.has('aide:auth:github:host:github.com')).toBe(false);
+    expect(store.has('aide:github')).toBe(false);
+  });
+
+  test('GitHub account-qualified from-env fails because env tokens prove no account identity', async () => {
+    Bun.env.GITHUB_TOKEN = 'unqualified-env-token';
+    const provider = authProvider(
+      createGitHubPlugin({ ghAuthProbe: unavailableGitHubAuthProbe })
+    );
+
+    await expect(
+      Effect.runPromise(
+        provider.operations!.login!({
+          fromEnv: true,
+          scope: {
+            id: 'github.com:octocat',
+            providerId: 'github',
+            host: 'github.com',
+            account: 'octocat',
+          },
+        })
+      )
+    ).rejects.toThrow(/account-qualified.*environment tokens.*identity/i);
+    expect(store.has('aide:auth:github:host:github.com:account:octocat')).toBe(
+      false
+    );
+  });
+
+  test('GitHub plugin reports explicitly blank accounts as misconfigured and will not login', async () => {
+    const provider = authProvider(
+      createGitHubPlugin({ ghAuthProbe: unavailableGitHubAuthProbe })
+    );
+    const scope = {
+      id: 'github.com',
+      providerId: 'github',
+      host: 'github.com',
+      account: '   ',
+    };
+
+    expect(await Effect.runPromise(provider.status({ scope }))).toMatchObject({
+      state: 'misconfigured',
+      detail: expect.stringMatching(/account/i),
+    });
+    await expect(
+      Effect.runPromise(
+        provider.operations!.login!({ values: { token: 'token' }, scope })
+      )
+    ).rejects.toThrow(/account.*cannot be blank/i);
+    expect(store.has('aide:auth:github:host:github.com')).toBe(false);
+  });
+
   test('provider logout removes only the matching stored credential', async () => {
     store.set('aide:github', JSON.stringify({ token: 'stored' }));
     const provider = authProvider(
-      createGitHubPlugin({ ghAvailable: () => false })
+      createGitHubPlugin({ ghAuthProbe: unavailableGitHubAuthProbe })
     );
 
     const removed = await Effect.runPromise(provider.operations!.logout!());
@@ -441,7 +684,7 @@ describe('auth provider operations', () => {
 
   test('GitHub scoped login with gh unavailable writes auth:github:host:... not github', async () => {
     const provider = authProvider(
-      createGitHubPlugin({ ghAvailable: () => false })
+      createGitHubPlugin({ ghAuthProbe: unavailableGitHubAuthProbe })
     );
     const result = await Effect.runPromise(
       provider.operations!.login!({
@@ -462,13 +705,14 @@ describe('auth provider operations', () => {
       JSON.parse(store.get('aide:auth:github:host:github.example.com') ?? '{}')
     ).toEqual({
       token: 'gh-token',
+      identity: { host: 'github.example.com' },
     });
     expect(store.has('aide:github')).toBe(false);
   });
 
   test('GitHub gh availability does not silently ignore an explicit stored scope', async () => {
     const provider = authProvider(
-      createGitHubPlugin({ ghAvailable: () => true })
+      createGitHubPlugin({ ghAuthProbe: authenticatedGitHubAuthProbe })
     );
 
     const result = await Effect.runPromise(
@@ -485,7 +729,10 @@ describe('auth provider operations', () => {
     expect(result.status).toBe('stored');
     expect(
       JSON.parse(store.get('aide:auth:github:host:github.example.com') ?? '{}')
-    ).toEqual({ token: 'scoped-token' });
+    ).toEqual({
+      token: 'scoped-token',
+      identity: { host: 'github.example.com' },
+    });
     expect(store.has('aide:github')).toBe(false);
   });
 
@@ -519,7 +766,8 @@ describe('auth provider operations', () => {
     Bun.env.JIRA_API_TOKEN = 'jira-env-token';
     Bun.env.AZURE_DEVOPS_ORG_URL = 'https://DEV.AZURE.COM/AcMe';
     Bun.env.AZURE_DEVOPS_PAT = 'ado-env-token';
-    Bun.env.GITHUB_TOKEN = 'github-env-token';
+    Bun.env.GH_HOST = 'github.example.com';
+    Bun.env.GH_ENTERPRISE_TOKEN = 'github-enterprise-env-token';
 
     const cases = [
       {
@@ -556,7 +804,9 @@ describe('auth provider operations', () => {
         },
       },
       {
-        provider: authProvider(createGitHubPlugin({ ghAvailable: () => true })),
+        provider: authProvider(
+          createGitHubPlugin({ ghAuthProbe: authenticatedGitHubAuthProbe })
+        ),
         scope: {
           id: 'github.example.com',
           providerId: 'github',
@@ -564,7 +814,10 @@ describe('auth provider operations', () => {
         },
         legacyName: 'aide:github',
         scopedName: 'aide:auth:github:host:github.example.com',
-        expected: { token: 'github-env-token' },
+        expected: {
+          token: 'github-enterprise-env-token',
+          identity: { host: 'github.example.com' },
+        },
       },
     ];
 
@@ -623,7 +876,9 @@ describe('auth provider operations', () => {
         legacyName: 'aide:ado',
       },
       {
-        provider: authProvider(createGitHubPlugin({ ghAvailable: () => true })),
+        provider: authProvider(
+          createGitHubPlugin({ ghAuthProbe: authenticatedGitHubAuthProbe })
+        ),
         scope: {
           id: 'invalid-host',
           providerId: 'github',
@@ -656,7 +911,7 @@ describe('auth provider operations', () => {
         Effect.runPromise(
           testCase.provider.operations!.logout!({ scope: testCase.scope })
         )
-      ).rejects.toThrow(/cannot build an auth secret key/i);
+      ).rejects.toThrow(/scope|auth secret key/i);
       expect(store.get(testCase.legacyName)).toBe('legacy');
     }
   });
@@ -848,7 +1103,7 @@ describe('auth provider operations', () => {
       },
       {
         provider: authProvider(
-          createGitHubPlugin({ ghAvailable: () => false })
+          createGitHubPlugin({ ghAuthProbe: unavailableGitHubAuthProbe })
         ),
         values: { token: 'github-token' },
         legacyName: 'aide:github',
@@ -887,7 +1142,7 @@ describe('auth provider operations', () => {
       },
       {
         provider: authProvider(
-          createGitHubPlugin({ ghAvailable: () => false })
+          createGitHubPlugin({ ghAuthProbe: unavailableGitHubAuthProbe })
         ),
         scope: {
           id: 'github.example.com',
