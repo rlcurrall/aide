@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { Effect } from 'effect';
 import yargs from 'yargs';
+import yargsParser from 'yargs/yargs';
 
 import {
   AIDE_PLUGIN_API_VERSION,
@@ -463,7 +464,108 @@ describe('dynamic auth provider commands', () => {
           throw err ?? new Error(message ?? 'parse failed');
         })
         .parseAsync()
-    ).rejects.toThrow(/Cannot infer a valid auth scope/);
+    ).rejects.toThrow(
+      "Auth provider 'external-auth' requires '--scope-host' to be a non-empty string."
+    );
+  });
+
+  test('invalid mixed yargs scope input fails before login, from-env, and logout operations', async () => {
+    const registry = createCommandRegistry();
+    let loginCalls = 0;
+    let logoutCalls = 0;
+
+    registry.registerExternalPlugin(
+      definePublicAidePlugin({
+        id: 'external-auth-plugin',
+        summary: 'External auth provider',
+        commands: [],
+        capabilities: {
+          authProvider: {
+            providerId: 'external-auth',
+            label: 'External Auth',
+            login: {
+              command: {
+                name: 'external',
+              },
+              summary: 'Save External Auth credentials',
+              fields: [
+                {
+                  kind: 'secret',
+                  key: 'apiToken',
+                  label: 'External token',
+                  description: 'External token',
+                  required: true,
+                },
+              ],
+              envMigration: {
+                description: 'Migrate EXTERNAL_TOKEN into the keyring',
+                variables: ['EXTERNAL_TOKEN'],
+              },
+            },
+            logout: {
+              command: {
+                name: 'external',
+              },
+              summary: 'Remove External Auth credentials',
+            },
+            status: () => Effect.succeed({ state: 'configured' }),
+            operations: {
+              login: () =>
+                Effect.sync(() => {
+                  loginCalls += 1;
+                  return {
+                    status: 'stored' as const,
+                    messages: ['external login stored'],
+                  };
+                }),
+              logout: () =>
+                Effect.sync(() => {
+                  logoutCalls += 1;
+                  return {
+                    status: 'removed' as const,
+                    messages: ['external logout removed'],
+                  };
+                }),
+            },
+          },
+        },
+      }),
+      { manifest: externalManifest('external-auth-plugin') }
+    );
+    registry.registerPlugin(legacyAuthPlugin);
+
+    const invocations = [
+      ['login', 'external'],
+      ['login', 'external', '--from-env'],
+      ['logout', 'external'],
+    ];
+
+    for (const invocation of invocations) {
+      await expect(
+        registerCommands(
+          yargsParser([
+            ...invocation,
+            '--scope-host',
+            '   ',
+            '--scope-account',
+            'alice',
+          ])
+            .scriptName('aide')
+            .exitProcess(false),
+          registry
+        )
+          .strict()
+          .fail((message, err) => {
+            throw err ?? new Error(message ?? 'parse failed');
+          })
+          .parseAsync()
+      ).rejects.toThrow(
+        "Auth provider 'external-auth' requires '--scope-host' to be a non-empty string."
+      );
+    }
+
+    expect(loginCalls).toBe(0);
+    expect(logoutCalls).toBe(0);
   });
 
   test('login --from-env does not synthesize field defaults', async () => {

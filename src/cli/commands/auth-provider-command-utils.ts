@@ -119,44 +119,42 @@ export function assertNoReservedAuthScopeFlags(
   }
 }
 
-function normalizeScopeValue(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  return trimmed === '' ? undefined : trimmed;
+interface ScopeArgValue {
+  readonly present: boolean;
+  readonly value: string | undefined;
 }
 
 function readScopeArg(
+  provider: DiscoveredAuthProvider,
   argv: Readonly<Record<string, unknown>>,
   dashed: string,
   camel: string
-): string | undefined {
-  return normalizeScopeValue(
-    Object.prototype.hasOwnProperty.call(argv, dashed)
-      ? argv[dashed]
-      : Object.prototype.hasOwnProperty.call(argv, camel)
-        ? argv[camel]
-        : undefined
+): ScopeArgValue {
+  const keys = [dashed, camel].filter((key) =>
+    Object.prototype.hasOwnProperty.call(argv, key)
   );
-}
+  if (keys.length === 0) return { present: false, value: undefined };
 
-function hasScopeArg(
-  argv: Readonly<Record<string, unknown>>,
-  dashed: string,
-  camel: string
-): boolean {
-  return (
-    Object.prototype.hasOwnProperty.call(argv, dashed) ||
-    Object.prototype.hasOwnProperty.call(argv, camel)
-  );
-}
+  const values = keys.map((key) => {
+    const value = argv[key];
+    if (typeof value !== 'string' || value.trim() === '') {
+      throw new Error(
+        `Auth provider '${provider.capability.providerId}' requires '--${dashed}' to be a non-empty string.`
+      );
+    }
+    return value.trim();
+  });
 
-function camelCaseScopeArg(dashed: string): string {
-  return dashed
-    .split('-')
-    .map((part, index) =>
-      index === 0 ? part : `${part[0]!.toUpperCase()}${part.slice(1)}`
-    )
-    .join('');
+  // Yargs normally emits equivalent dashed and camel aliases. Independently
+  // supplied aliases must also agree after trimming or scope selection fails;
+  // repeated flags become arrays and fail the string validation above.
+  if (values.some((value) => value !== values[0])) {
+    throw new Error(
+      `Auth provider '${provider.capability.providerId}' received conflicting values for '--${dashed}' and '--${camel}'.`
+    );
+  }
+
+  return { present: true, value: values[0]! };
 }
 
 function scopeFromArgValues(
@@ -220,18 +218,23 @@ export function authScopeFromArgs(
   provider: DiscoveredAuthProvider,
   argv: Readonly<Record<string, unknown>> & Partial<AuthScopeArgv>
 ): AideAuthScope | undefined {
-  const hasArg = authScopeFlagKeys.some((flag) =>
-    hasScopeArg(argv, flag, camelCaseScopeArg(flag))
-  );
-  if (!hasArg) return undefined;
+  const id = readScopeArg(provider, argv, 'scope-id', 'scopeId');
+  const host = readScopeArg(provider, argv, 'scope-host', 'scopeHost');
+  const org = readScopeArg(provider, argv, 'scope-org', 'scopeOrg');
+  const account = readScopeArg(provider, argv, 'scope-account', 'scopeAccount');
+  const label = readScopeArg(provider, argv, 'scope-label', 'scopeLabel');
 
-  const id = readScopeArg(argv, 'scope-id', 'scopeId');
-  const host = readScopeArg(argv, 'scope-host', 'scopeHost');
-  const org = readScopeArg(argv, 'scope-org', 'scopeOrg');
-  const account = readScopeArg(argv, 'scope-account', 'scopeAccount');
-  const label = readScopeArg(argv, 'scope-label', 'scopeLabel');
+  if (![id, host, org, account, label].some((arg) => arg.present)) {
+    return undefined;
+  }
 
-  return scopeFromArgValues(provider, { id, host, org, account, label });
+  return scopeFromArgValues(provider, {
+    id: id.value,
+    host: host.value,
+    org: org.value,
+    account: account.value,
+    label: label.value,
+  });
 }
 
 async function secretText(
