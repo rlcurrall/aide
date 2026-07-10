@@ -15,10 +15,13 @@ import {
   probeAdoConfig,
   probeGithubConfig,
 } from './config.js';
+import type { GitHubAuthProbe } from './gh-utils.js';
 import {
+  authenticatedGitHubAuthProbe,
   installMockSecrets,
   saveEnv,
   restoreEnv,
+  unavailableGitHubAuthProbe,
   type Store,
 } from './test-helpers.js';
 
@@ -36,7 +39,13 @@ const ADO_VARS = [
   'AZURE_DEVOPS_AUTH_METHOD',
   'AZURE_DEVOPS_DEFAULT_PROJECT',
 ];
-const GITHUB_VARS = ['GITHUB_TOKEN', 'GH_TOKEN'];
+const GITHUB_VARS = [
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'GH_HOST',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
+];
 
 describe('loadConfig (Jira)', () => {
   let snap: Map<string, string | undefined>;
@@ -621,16 +630,73 @@ describe('probeGithubConfig', () => {
   });
 
   test('returns env/gh-cli when gh CLI is available', async () => {
-    const status = await probeGithubConfig({ ghAvailable: () => true });
+    const checkedHosts: string[] = [];
+    const status = await probeGithubConfig({
+      ghAuthProbe: (request) => {
+        checkedHosts.push(request.host);
+        return { kind: 'authenticated', host: request.host };
+      },
+    });
     expect(status.kind).toBe('env');
     if (status.kind === 'env') {
       expect(status.value.source).toBe('gh-cli');
     }
+    expect(checkedHosts).toEqual(['github.com']);
+  });
+
+  test('rejects inherited and accessor probe dependencies without invocation', async () => {
+    let inheritedCalls = 0;
+    let getterCalls = 0;
+    let proxyCalls = 0;
+    const inherited = Object.create({
+      ghAuthProbe: () => {
+        inheritedCalls += 1;
+        return { kind: 'authenticated', host: 'github.com' };
+      },
+    }) as Parameters<typeof probeGithubConfig>[0];
+    const accessor = Object.create(null) as Parameters<
+      typeof probeGithubConfig
+    >[0];
+    Object.defineProperty(accessor, 'ghAuthProbe', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return authenticatedGitHubAuthProbe;
+      },
+    });
+    const proxyPrototype = new Proxy(
+      { ghAuthProbe: authenticatedGitHubAuthProbe },
+      {
+        getOwnPropertyDescriptor(target, property) {
+          proxyCalls += 1;
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        },
+      }
+    );
+    const proxyBacked = Object.create(proxyPrototype) as Parameters<
+      typeof probeGithubConfig
+    >[0];
+
+    await expect(probeGithubConfig(inherited)).resolves.toMatchObject({
+      kind: 'malformed',
+    });
+    await expect(probeGithubConfig(accessor)).resolves.toMatchObject({
+      kind: 'malformed',
+    });
+    await expect(probeGithubConfig(proxyBacked)).resolves.toMatchObject({
+      kind: 'malformed',
+    });
+    expect(inheritedCalls).toBe(0);
+    expect(getterCalls).toBe(0);
+    expect(proxyCalls).toBe(0);
   });
 
   test('gh-cli takes precedence over GITHUB_TOKEN', async () => {
     Bun.env.GITHUB_TOKEN = 'ghp_xxx';
-    const status = await probeGithubConfig({ ghAvailable: () => true });
+    const status = await probeGithubConfig({
+      ghAuthProbe: authenticatedGitHubAuthProbe,
+    });
     expect(status.kind).toBe('env');
     if (status.kind === 'env') {
       expect(status.value.source).toBe('gh-cli');
@@ -639,34 +705,269 @@ describe('probeGithubConfig', () => {
 
   test('returns env/env when GITHUB_TOKEN is set and gh is absent', async () => {
     Bun.env.GITHUB_TOKEN = 'ghp_xxx';
-    const status = await probeGithubConfig({ ghAvailable: () => false });
+    const status = await probeGithubConfig({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(status.kind).toBe('env');
     if (status.kind === 'env') {
       expect(status.value.source).toBe('env');
     }
   });
 
+  test('does not report github.com gh or public env auth for a custom host', async () => {
+    Bun.env.GITHUB_TOKEN = 'public-token';
+    const checkedHosts: string[] = [];
+    const status = await probeGithubConfig({
+      host: 'github.example.com',
+      ghAuthProbe: (request) => {
+        checkedHosts.push(request.host);
+        return { kind: 'authenticated', host: 'github.com' };
+      },
+    });
+
+    expect(status.kind).toBe('missing');
+    expect(checkedHosts).toEqual(['github.example.com']);
+  });
+
+  test('accepts enterprise env auth only for a matching explicit GH_HOST', async () => {
+    Bun.env.GH_HOST = 'ssh.ACME.ghe.com';
+    Bun.env.GH_ENTERPRISE_TOKEN = 'enterprise-token';
+    const matching = await probeGithubConfig({
+      host: 'acme.ghe.com',
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
+    expect(matching).toEqual({ kind: 'env', value: { source: 'env' } });
+
+    Bun.env.GH_HOST = 'other.ghe.com';
+    const mismatched = await probeGithubConfig({
+      host: 'acme.ghe.com',
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
+    expect(mismatched.kind).toBe('missing');
+
+    Bun.env.GH_HOST = 'https://acme.ghe.com';
+    Bun.env.GITHUB_TOKEN = 'public-token';
+    const malformed = await probeGithubConfig({
+      host: 'acme.ghe.com',
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
+    expect(malformed.kind).toBe('missing');
+  });
+
+  test('reads only the exact scoped enterprise keyring credential', async () => {
+    store.set(
+      'aide:auth:github:host:acme.ghe.com',
+      JSON.stringify({
+        token: 'enterprise-token',
+        identity: { host: 'acme.ghe.com' },
+      })
+    );
+    store.set('aide:github', JSON.stringify({ token: 'legacy-token' }));
+
+    const status = await probeGithubConfig({
+      host: 'ssh.acme.ghe.com',
+      scope: { providerId: 'github', host: 'ACME.GHE.COM' },
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
+
+    expect(status).toEqual({
+      kind: 'keyring',
+      value: { source: 'stored', token: 'enterprise-token' },
+    });
+  });
+
+  test('validates the exact scoped keyring payload without legacy fallback', async () => {
+    store.set(
+      'aide:auth:github:host:acme.ghe.com',
+      JSON.stringify({ wrongField: 'scoped-invalid' })
+    );
+    store.set('aide:github', JSON.stringify({ token: 'legacy-token' }));
+
+    const status = await probeGithubConfig({
+      host: 'acme.ghe.com',
+      scope: { providerId: 'github', host: 'acme.ghe.com' },
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
+
+    expect(status.kind).toBe('malformed');
+  });
+
+  test('account-qualified probes skip unqualified env and require matching gh identity', async () => {
+    Bun.env.GITHUB_TOKEN = 'unqualified-public-token';
+    Bun.env.GH_HOST = 'acme.ghe.com';
+    Bun.env.GH_ENTERPRISE_TOKEN = 'unqualified-enterprise-token';
+    const observed: Array<[string, string | undefined]> = [];
+    const scope = {
+      providerId: 'github',
+      host: 'ACME.GHE.COM',
+      account: ' OctoCat ',
+    };
+
+    const missing = await probeGithubConfig({
+      scope,
+      ghAuthProbe: (request) => {
+        observed.push([request.host, request.account]);
+        return { kind: 'unavailable', host: request.host };
+      },
+    });
+    expect(missing.kind).toBe('missing');
+    expect(observed).toEqual([['acme.ghe.com', 'octocat']]);
+
+    const matchingGh = await probeGithubConfig({
+      scope,
+      ghAuthProbe: (request) => ({
+        kind: 'authenticated',
+        host: request.host,
+        account: request.account,
+      }),
+    });
+    expect(matchingGh).toEqual({
+      kind: 'env',
+      value: { source: 'gh-cli', account: 'octocat' },
+    });
+  });
+
+  test('a legacy boolean probe cannot synthesize account-qualified gh auth', async () => {
+    const status = await probeGithubConfig({
+      scope: {
+        providerId: 'github',
+        host: 'github.com',
+        account: 'octocat',
+      },
+      ghAuthProbe: (() => true) as unknown as GitHubAuthProbe,
+    });
+
+    expect(status).toEqual({ kind: 'missing' });
+  });
+
+  test('reads only an identity-matching exact account payload', async () => {
+    store.set(
+      'aide:auth:github:host:github.com:account:octocat',
+      JSON.stringify({
+        token: 'account-token',
+        identity: { host: 'github.com', account: 'OctoCat' },
+      })
+    );
+    store.set(
+      'aide:auth:github:host:github.com',
+      JSON.stringify({
+        token: 'host-token',
+        identity: { host: 'github.com' },
+      })
+    );
+
+    const status = await probeGithubConfig({
+      scope: {
+        providerId: 'github',
+        host: 'GITHUB.COM',
+        account: 'OCTOCAT',
+      },
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
+
+    expect(status).toEqual({
+      kind: 'keyring',
+      value: {
+        source: 'stored',
+        token: 'account-token',
+        account: 'octocat',
+      },
+    });
+  });
+
+  test('fails closed for mismatched account identity without env or host fallback', async () => {
+    Bun.env.GITHUB_TOKEN = 'unqualified-env-token';
+    store.set(
+      'aide:auth:github:host:github.com:account:octocat',
+      JSON.stringify({
+        token: 'wrong-account-token',
+        identity: { host: 'github.com', account: 'hubot' },
+      })
+    );
+    store.set(
+      'aide:auth:github:host:github.com',
+      JSON.stringify({
+        token: 'host-token',
+        identity: { host: 'github.com' },
+      })
+    );
+
+    const status = await probeGithubConfig({
+      scope: {
+        providerId: 'github',
+        host: 'github.com',
+        account: 'octocat',
+      },
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
+
+    expect(status).toMatchObject({ kind: 'malformed' });
+    if (status.kind === 'malformed') {
+      expect(status.reason).toMatch(/account.*does not match/i);
+    }
+  });
+
+  test('requires migration for pre-identity host-scoped payloads', async () => {
+    store.set(
+      'aide:auth:github:host:github.com',
+      JSON.stringify({ token: 'pre-identity-token' })
+    );
+
+    const status = await probeGithubConfig({
+      host: 'github.com',
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
+
+    expect(status).toMatchObject({ kind: 'malformed' });
+    if (status.kind === 'malformed') {
+      expect(status.reason).toMatch(/identity|re-run.*login/i);
+    }
+  });
+
   test('returns keyring when stored token is present', async () => {
     store.set('aide:github', JSON.stringify({ token: 'ghp_stored' }));
-    const status = await probeGithubConfig({ ghAvailable: () => false });
+    const status = await probeGithubConfig({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(status.kind).toBe('keyring');
   });
 
+  test('rejects scoped identity metadata stored under the legacy key', async () => {
+    store.set(
+      'aide:github',
+      JSON.stringify({
+        token: 'misplaced-scoped-token',
+        identity: { host: 'github.com' },
+      })
+    );
+
+    const status = await probeGithubConfig({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
+    expect(status).toMatchObject({ kind: 'malformed' });
+  });
+
   test('returns missing when nothing is configured', async () => {
-    const status = await probeGithubConfig({ ghAvailable: () => false });
+    const status = await probeGithubConfig({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(status.kind).toBe('missing');
   });
 
   test('returns unreachable when keyring daemon is down', async () => {
     restoreSecrets();
     restoreSecrets = installMockSecrets(store, 'get');
-    const status = await probeGithubConfig({ ghAvailable: () => false });
+    const status = await probeGithubConfig({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(status.kind).toBe('unreachable');
   });
 
   test('returns malformed when stored blob fails schema', async () => {
     store.set('aide:github', JSON.stringify({ wrongField: 'x' }));
-    const status = await probeGithubConfig({ ghAvailable: () => false });
+    const status = await probeGithubConfig({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
     expect(status.kind).toBe('malformed');
     if (status.kind === 'malformed') {
       expect(status.reason).toMatch(/aide login github/i);

@@ -9,12 +9,19 @@ import {
   type AzureDevOpsConfig,
 } from '../schemas/config.js';
 import { getSecret, KeyringUnavailableError } from './secrets.js';
-import { isGhCliAvailable } from './gh-utils.js';
 import {
   authSecretScopesMatch,
   resolveAuthSecretPromise,
   type AuthStoreScope,
 } from './auth-store.js';
+import {
+  canonicalizeGitHubAuthHost,
+  DEFAULT_GITHUB_HOST,
+  githubEnvironmentCredential,
+  resolveGitHubAuthRequest,
+} from './github-auth.js';
+import { resolveGitHubCredential } from './github-credential-resolver.js';
+import type { GitHubAuthProbe } from './gh-utils.js';
 
 export type ConfigSource = 'env' | 'keyring';
 
@@ -302,59 +309,56 @@ export async function loadAzureDevOpsConfig(
 // ---------------------------------------------------------------------------
 
 export type GithubConfigValue =
-  | { source: 'gh-cli' }
+  | { source: 'gh-cli'; account?: string }
   | { source: 'env' }
-  | { source: 'stored'; token: string };
+  | { source: 'stored'; token: string; account?: string };
+
+interface GithubConfigProbeOptions {
+  readonly ghAuthProbe?: GitHubAuthProbe;
+  readonly host?: string;
+  readonly scope?: AuthStoreScope;
+}
 
 export async function probeGithubConfig(
-  opts: { ghAvailable?: () => boolean } = {}
+  opts: GithubConfigProbeOptions = {}
 ): Promise<ConfigStatus<GithubConfigValue>> {
-  const ghCheck = opts.ghAvailable ?? isGhCliAvailable;
-
-  if (ghCheck()) {
-    return { kind: 'env', value: { source: 'gh-cli' } };
+  const request = resolveGitHubAuthRequest(opts);
+  if (!request.ok) {
+    return { kind: 'malformed', reason: request.reason };
   }
 
-  const envToken = Bun.env.GITHUB_TOKEN || Bun.env.GH_TOKEN;
-  if (envToken) {
-    return { kind: 'env', value: { source: 'env' } };
+  const credential = await resolveGitHubCredential(request, opts);
+  switch (credential.kind) {
+    case 'gh-cli':
+      return {
+        kind: 'env',
+        value: {
+          source: 'gh-cli',
+          ...(credential.account === undefined
+            ? {}
+            : { account: credential.account }),
+        },
+      };
+    case 'env':
+      return { kind: 'env', value: { source: 'env' } };
+    case 'stored':
+      return {
+        kind: 'keyring',
+        value: {
+          source: 'stored',
+          token: credential.token,
+          ...(credential.account === undefined
+            ? {}
+            : { account: credential.account }),
+        },
+      };
+    case 'missing':
+      return { kind: 'missing' };
+    case 'unreachable':
+      return { kind: 'unreachable' };
+    case 'failure':
+      return { kind: 'malformed', reason: credential.reason };
   }
-
-  let raw: string | null;
-  try {
-    raw = await getSecret('github');
-  } catch (err) {
-    if (err instanceof KeyringUnavailableError) return { kind: 'unreachable' };
-    throw err;
-  }
-
-  if (raw === null) return { kind: 'missing' };
-
-  let json: unknown;
-  try {
-    json = JSON.parse(raw);
-  } catch {
-    return {
-      kind: 'malformed',
-      reason:
-        "Stored GitHub credentials are malformed. Re-run 'aide login github' to reconfigure.",
-    };
-  }
-
-  const parsed = v.safeParse(StoredGithubSchema, json);
-  if (!parsed.success) {
-    return {
-      kind: 'malformed',
-      reason:
-        'Stored GitHub credentials failed validation. ' +
-        "Re-run 'aide login github' to reconfigure.",
-    };
-  }
-
-  return {
-    kind: 'keyring',
-    value: { source: 'stored', token: parsed.output.token },
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -420,17 +424,45 @@ export function readAdoEnvForMigration(): ReadEnvResult<
   return { kind: 'ok', value: parsed.output, varsUsed };
 }
 
-export function readGithubEnvForMigration(): ReadEnvResult<
-  v.InferOutput<typeof StoredGithubSchema>
-> {
-  const tokenVar = Bun.env.GITHUB_TOKEN ? 'GITHUB_TOKEN' : 'GH_TOKEN';
-  const token = Bun.env.GITHUB_TOKEN || Bun.env.GH_TOKEN;
-  if (!token)
-    return { kind: 'missing', missingVars: ['GITHUB_TOKEN (or GH_TOKEN)'] };
-  const parsed = v.safeParse(StoredGithubSchema, { token });
+export function readGithubEnvForMigration(
+  requestedHost: string = DEFAULT_GITHUB_HOST
+): ReadEnvResult<v.InferOutput<typeof StoredGithubSchema>> {
+  const host = canonicalizeGitHubAuthHost(requestedHost);
+  if (host === null) {
+    return {
+      kind: 'invalid',
+      reason: `Invalid GitHub authentication host '${requestedHost}'.`,
+    };
+  }
+
+  const credential = githubEnvironmentCredential(host);
+  if (credential === null) {
+    if (host === DEFAULT_GITHUB_HOST) {
+      return { kind: 'missing', missingVars: ['GITHUB_TOKEN (or GH_TOKEN)'] };
+    }
+    const missingVars: string[] = [];
+    if (!Bun.env.GH_HOST) missingVars.push('GH_HOST');
+    if (!Bun.env.GH_ENTERPRISE_TOKEN && !Bun.env.GITHUB_ENTERPRISE_TOKEN) {
+      missingVars.push('GH_ENTERPRISE_TOKEN (or GITHUB_ENTERPRISE_TOKEN)');
+    }
+    if (missingVars.length > 0) return { kind: 'missing', missingVars };
+    return {
+      kind: 'invalid',
+      reason: `GH_HOST must canonically match requested GitHub host '${host}'.`,
+    };
+  }
+
+  const parsed = v.safeParse(StoredGithubSchema, { token: credential.token });
   if (!parsed.success)
     return { kind: 'invalid', reason: formatIssues(parsed.issues) };
-  return { kind: 'ok', value: parsed.output, varsUsed: [tokenVar] };
+  return {
+    kind: 'ok',
+    value: parsed.output,
+    varsUsed:
+      host === DEFAULT_GITHUB_HOST
+        ? [credential.variable]
+        : ['GH_HOST', credential.variable],
+  };
 }
 
 // ---------------------------------------------------------------------------

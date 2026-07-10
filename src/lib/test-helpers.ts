@@ -13,8 +13,20 @@
  */
 
 import type { SecretName } from './secrets.js';
+import type { GitHubAuthProbe } from './gh-utils.js';
 
 export type Store = Map<string, string>;
+
+export const authenticatedGitHubAuthProbe: GitHubAuthProbe = (request) => ({
+  kind: 'authenticated',
+  host: request.host,
+  ...(request.account === undefined ? {} : { account: request.account }),
+});
+
+export const unavailableGitHubAuthProbe: GitHubAuthProbe = (request) => ({
+  kind: 'unavailable',
+  host: request.host,
+});
 
 // ---------------------------------------------------------------------------
 // Environment variable helpers
