@@ -8,6 +8,7 @@ import {
   type ScopedSecretName,
   type StoredSecretName,
 } from './secrets.js';
+import { canonicalizeAzureDevOpsAuthIdentity } from './azure-devops-auth-identity.js';
 
 export const legacyAuthSecretNames = Object.freeze({
   jira: 'jira',
@@ -97,9 +98,30 @@ export function normalizeAuthStoreScope(
 ): NormalizedAuthStoreScope | null {
   const normalizedProviderId = normalizeAuthProviderId(providerId);
   if (normalizedProviderId === undefined) return null;
+  const account = normalizeNonEmpty(scope?.account);
+
+  if (normalizedProviderId === 'azure-devops') {
+    if (scope === undefined) {
+      return { providerId: normalizedProviderId };
+    }
+    if (scope.host === undefined) return null;
+
+    const identity = canonicalizeAzureDevOpsAuthIdentity({
+      host: scope.host,
+      org: scope.org,
+    });
+    if (identity === null) return null;
+
+    return {
+      providerId: normalizedProviderId,
+      host: identity.host,
+      org: identity.org,
+      ...(account === undefined ? {} : { account }),
+    };
+  }
+
   const host = normalizeHost(scope?.host);
   const org = normalizeNonEmpty(scope?.org);
-  const account = normalizeNonEmpty(scope?.account);
 
   return {
     providerId: normalizedProviderId,
@@ -237,6 +259,17 @@ export function resolveAuthSecret(
     }
     return null;
   });
+}
+
+export async function resolveAuthSecretPromise(
+  providerId: AuthProviderId,
+  scope?: AuthStoreScope
+): Promise<ResolvedAuthSecret | null> {
+  const result = await Effect.runPromise(
+    Effect.either(resolveAuthSecret(providerId, scope))
+  );
+  if (result._tag === 'Left') throw result.left;
+  return result.right;
 }
 
 export function listAuthSecrets(

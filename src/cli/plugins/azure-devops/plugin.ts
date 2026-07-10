@@ -50,8 +50,14 @@ import { deleteSecret, setSecret } from '@lib/secrets.js';
 import {
   authSecretTarget,
   deleteAuthSecret,
+  type AuthStoreScope,
   writeAuthSecret,
 } from '@lib/auth-store.js';
+import { azureDevOpsRepositoryAuthScope } from '@lib/repository-auth-scope.js';
+import {
+  AZURE_DEVOPS_CANONICAL_AUTH_HOST,
+  canonicalizeAzureDevOpsAuthIdentity,
+} from '@lib/azure-devops-auth-identity.js';
 import type {
   AzureDevOpsChangeType,
   AzureDevOpsCreateCommentResponse,
@@ -96,7 +102,9 @@ type AzureDevOpsPullRequestClient = Pick<
       | 'removePullRequestLabel'
     >
   >;
-type CreateAzureDevOpsClient = () => Promise<{
+type CreateAzureDevOpsClient = (options?: {
+  readonly scope?: AuthStoreScope;
+}) => Promise<{
   readonly client: AzureDevOpsPullRequestClient;
   readonly config: AzureDevOpsConfig;
 }>;
@@ -178,8 +186,10 @@ function azureDevOpsAuthAccounts(
   if (status.kind !== 'env' && status.kind !== 'keyring') return [];
 
   const sourceKind = status.kind;
-  const org = azureDevOpsOrgFromUrl(status.value.orgUrl);
-  const host = new URL(status.value.orgUrl).host;
+  const identity = canonicalizeAzureDevOpsAuthIdentity({
+    host: status.value.orgUrl,
+  });
+  const org = identity?.org;
   const metadata = {
     authMethod: status.value.authMethod,
     ...(status.value.defaultProject === undefined
@@ -195,15 +205,19 @@ function azureDevOpsAuthAccounts(
       detail: `${status.value.orgUrl} (${status.value.authMethod}, ${sourceKind})`,
       sourceKind,
       metadata,
-      scope: {
-        id: status.value.orgUrl,
-        providerId: 'azure-devops',
-        host,
-        ...(org === null ? {} : { org }),
-        label: status.value.orgUrl,
-        sourceKind,
-        metadata,
-      },
+      ...(identity === null
+        ? {}
+        : {
+            scope: {
+              id: `https://${identity.host}/${identity.org}`,
+              providerId: 'azure-devops',
+              host: identity.host,
+              org: identity.org,
+              label: status.value.orgUrl,
+              sourceKind,
+              metadata,
+            },
+          }),
     },
   ];
 }
@@ -306,8 +320,8 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
   const probeConfig = opts.probeConfig ?? (() => probeAdoConfig());
   const createClient =
     opts.createClient ??
-    (async () => {
-      const { config } = await loadAzureDevOpsConfig();
+    (async ({ scope } = {}) => {
+      const { config } = await loadAzureDevOpsConfig(scope);
       return { client: new AzureDevOpsClient(config), config };
     });
   const authStatus = () =>
@@ -333,13 +347,10 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           );
         }
 
-        const { client, config } = await createClient();
-        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
-        if (configuredOrg !== null && configuredOrg !== repository.org) {
-          throw new Error(
-            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
-          );
-        }
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
 
         const response = await client.listPullRequests(
           repository.project,
@@ -384,13 +395,10 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           );
         }
 
-        const { client, config } = await createClient();
-        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
-        if (configuredOrg !== null && configuredOrg !== repository.org) {
-          throw new Error(
-            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
-          );
-        }
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
 
         const [pr, labelsResponse] = await Promise.all([
           client.getPullRequest(
@@ -431,13 +439,10 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           );
         }
 
-        const { client, config } = await createClient();
-        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
-        if (configuredOrg !== null && configuredOrg !== repository.org) {
-          throw new Error(
-            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
-          );
-        }
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
         if (client.createPullRequest === undefined) {
           throw new Error(
             'Azure DevOps client does not support creating pull requests'
@@ -523,13 +528,10 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           );
         }
 
-        const { client, config } = await createClient();
-        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
-        if (configuredOrg !== null && configuredOrg !== repository.org) {
-          throw new Error(
-            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
-          );
-        }
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
 
         const warnings: string[] = [];
         const updates: PullRequestUpdateOptions = {};
@@ -672,13 +674,10 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           );
         }
 
-        const { client, config } = await createClient();
-        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
-        if (configuredOrg !== null && configuredOrg !== repository.org) {
-          throw new Error(
-            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
-          );
-        }
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
 
         const [pr, labelsResponse, changes] = await Promise.all([
           client.getPullRequest(
@@ -725,13 +724,10 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           );
         }
 
-        const { client, config } = await createClient();
-        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
-        if (configuredOrg !== null && configuredOrg !== repository.org) {
-          throw new Error(
-            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
-          );
-        }
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
 
         const comments = await client.getAllComments(
           repository.project,
@@ -761,13 +757,10 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           );
         }
 
-        const { client, config } = await createClient();
-        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
-        if (configuredOrg !== null && configuredOrg !== repository.org) {
-          throw new Error(
-            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
-          );
-        }
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
         if (client.createPullRequestThread === undefined) {
           throw new Error(
             'Azure DevOps client does not support creating pull request threads'
@@ -809,13 +802,10 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           );
         }
 
-        const { client, config } = await createClient();
-        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
-        if (configuredOrg !== null && configuredOrg !== repository.org) {
-          throw new Error(
-            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
-          );
-        }
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
         if (client.createThreadComment === undefined) {
           throw new Error(
             'Azure DevOps client does not support creating thread comments'
@@ -858,13 +848,10 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           );
         }
 
-        const { client, config } = await createClient();
-        const configuredOrg = azureDevOpsOrgFromUrl(config.orgUrl);
-        if (configuredOrg !== null && configuredOrg !== repository.org) {
-          throw new Error(
-            `Azure DevOps remote org '${repository.org}' does not match configured org '${configuredOrg}'`
-          );
-        }
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
 
         const response = await client.listPullRequests(
           repository.project,
@@ -1076,29 +1063,43 @@ function azureDevOpsOrgFromHost(
     return undefined;
   }
 
-  const normalizedHost = host.toLowerCase().replace(/^ssh\./, '');
+  const identity = canonicalizeAzureDevOpsAuthIdentity({ host });
+  if (identity !== null) return identity.org;
+
+  const normalizedHost = host
+    .trim()
+    .toLowerCase()
+    .replace(/^ssh\./, '');
   if (normalizedHost === 'dev.azure.com') {
     return undefined;
-  }
-  if (normalizedHost.endsWith('.visualstudio.com')) {
-    const org = normalizedHost.replace(/\.visualstudio\.com$/, '');
-    return org.length > 0 ? org : null;
   }
   return null;
 }
 
 function azureDevOpsOrgFromUrl(orgUrl: string): string | null {
-  try {
-    const url = new URL(orgUrl);
-    if (url.hostname === 'dev.azure.com') {
-      return url.pathname.split('/').filter(Boolean)[0] ?? null;
-    }
-    if (url.hostname.endsWith('.visualstudio.com')) {
-      return url.hostname.replace(/\.visualstudio\.com$/, '');
-    }
-    return null;
-  } catch {
-    return null;
+  return canonicalizeAzureDevOpsAuthIdentity({ host: orgUrl })?.org ?? null;
+}
+
+function assertAzureDevOpsConfiguredOrg(
+  configuredOrgUrl: string,
+  repositoryOrg: string
+): void {
+  const configuredIdentity = canonicalizeAzureDevOpsAuthIdentity({
+    host: configuredOrgUrl,
+  });
+  if (configuredIdentity === null) return;
+
+  const repositoryIdentity = canonicalizeAzureDevOpsAuthIdentity({
+    host: AZURE_DEVOPS_CANONICAL_AUTH_HOST,
+    org: repositoryOrg,
+  });
+  if (
+    repositoryIdentity === null ||
+    configuredIdentity.org !== repositoryIdentity.org
+  ) {
+    throw new Error(
+      `Azure DevOps remote org '${repositoryOrg}' does not match configured org '${configuredIdentity.org}'`
+    );
   }
 }
 

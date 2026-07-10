@@ -10,6 +10,7 @@ import {
 } from '../schemas/config.js';
 import { getSecret, KeyringUnavailableError } from './secrets.js';
 import { isGhCliAvailable } from './gh-utils.js';
+import { resolveAuthSecretPromise, type AuthStoreScope } from './auth-store.js';
 
 export type ConfigSource = 'env' | 'keyring';
 
@@ -159,10 +160,13 @@ function readAdoFromEnv(): ConfigStatus<AzureDevOpsConfig> | null {
   return { kind: 'env', value: parsed.output };
 }
 
-async function readAdoFromKeyring(): Promise<KeyringResult<AzureDevOpsConfig>> {
+async function readAdoFromKeyring(
+  scope?: AuthStoreScope
+): Promise<KeyringResult<AzureDevOpsConfig>> {
   let raw: string | null;
   try {
-    raw = await getSecret('ado');
+    const resolved = await resolveAuthSecretPromise('azure-devops', scope);
+    raw = resolved?.value ?? null;
   } catch (err) {
     if (err instanceof KeyringUnavailableError) return { kind: 'unreachable' };
     throw err;
@@ -192,13 +196,13 @@ async function readAdoFromKeyring(): Promise<KeyringResult<AzureDevOpsConfig>> {
   return { kind: 'found', value: parsed.output };
 }
 
-export async function probeAdoConfig(): Promise<
-  ConfigStatus<AzureDevOpsConfig>
-> {
+export async function probeAdoConfig(
+  scope?: AuthStoreScope
+): Promise<ConfigStatus<AzureDevOpsConfig>> {
   const fromEnv = readAdoFromEnv();
   if (fromEnv !== null) return fromEnv;
 
-  const fromKeyring = await readAdoFromKeyring();
+  const fromKeyring = await readAdoFromKeyring(scope);
   if (fromKeyring.kind === 'found')
     return { kind: 'keyring', value: fromKeyring.value };
   if (fromKeyring.kind === 'unreachable') return { kind: 'unreachable' };
@@ -206,10 +210,10 @@ export async function probeAdoConfig(): Promise<
   return { kind: 'missing' };
 }
 
-export async function loadAzureDevOpsConfig(): Promise<
-  LoadedConfig<AzureDevOpsConfig>
-> {
-  const status = await probeAdoConfig();
+export async function loadAzureDevOpsConfig(
+  scope?: AuthStoreScope
+): Promise<LoadedConfig<AzureDevOpsConfig>> {
+  const status = await probeAdoConfig(scope);
   if (status.kind === 'env') return { config: status.value, source: 'env' };
   if (status.kind === 'keyring')
     return { config: status.value, source: 'keyring' };

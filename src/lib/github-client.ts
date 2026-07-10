@@ -8,6 +8,7 @@
 
 import { spawnSync } from 'bun';
 import * as v from 'valibot';
+import { resolveAuthSecretPromise, type AuthStoreScope } from './auth-store.js';
 import type {
   GitHubPullRequest,
   GitHubIssueComment,
@@ -20,7 +21,7 @@ import type {
 } from './github-types.js';
 import { isGhCliAvailable } from './gh-utils.js';
 import { DEFAULT_GITHUB_HOST, githubApiBase } from './github-utils.js';
-import { getSecret, KeyringUnavailableError } from './secrets.js';
+import { KeyringUnavailableError } from './secrets.js';
 import { StoredGithubSchema } from '@schemas/config.js';
 import { ConfigError } from './config.js';
 
@@ -86,10 +87,13 @@ export class GitHubAuthError extends Error {
   }
 }
 
-async function tryReadStoredToken(): Promise<string | null> {
+async function tryReadStoredToken(
+  scope?: AuthStoreScope
+): Promise<string | null> {
   let raw: string | null;
   try {
-    raw = await getSecret('github');
+    const resolved = await resolveAuthSecretPromise('github', scope);
+    raw = resolved?.value ?? null;
   } catch (err) {
     if (err instanceof KeyringUnavailableError) return null;
     throw err;
@@ -140,6 +144,8 @@ export class GitHubClient {
    * @param opts.host - GitHub web host (e.g. `github.com` or `acme.ghe.com`).
    *   Defaults to `github.com`. Used to derive the REST/GraphQL API base and,
    *   for the gh CLI transport, the `--hostname` passed to `gh api`.
+   * @param opts.scope - Optional keyring scope. Scoped credentials are checked
+   *   before the legacy GitHub key while preserving gh CLI and env precedence.
    * @param opts.spawn - Test seam overriding the gh CLI spawn function.
    * @param opts.fetch - Test seam overriding the token transport's fetch.
    * @throws {GitHubAuthError} if no auth source is available
@@ -148,6 +154,7 @@ export class GitHubClient {
     opts: {
       ghAvailable?: () => boolean;
       host?: string;
+      scope?: AuthStoreScope;
       spawn?: SpawnSyncFn;
       fetch?: FetchFn;
     } = {}
@@ -162,7 +169,7 @@ export class GitHubClient {
     if (envToken) {
       return new GitHubClient('token', host, envToken, deps);
     }
-    const stored = await tryReadStoredToken();
+    const stored = await tryReadStoredToken(opts.scope);
     if (stored) {
       return new GitHubClient('token', host, stored, deps);
     }

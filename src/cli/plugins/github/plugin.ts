@@ -56,8 +56,10 @@ import { deleteSecret, setSecret } from '@lib/secrets.js';
 import {
   authSecretTarget,
   deleteAuthSecret,
+  type AuthStoreScope,
   writeAuthSecret,
 } from '@lib/auth-store.js';
+import { githubRepositoryAuthScope } from '@lib/repository-auth-scope.js';
 import { StoredGithubSchema } from '@schemas/config.js';
 import {
   formatMigrationError,
@@ -91,6 +93,7 @@ type GitHubPullRequestClient = Pick<
   >;
 type CreateGitHubClient = (options: {
   readonly host: string;
+  readonly scope: AuthStoreScope;
 }) => Promise<GitHubPullRequestClient>;
 
 interface GitHubPluginOptions {
@@ -320,7 +323,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({ host: repository.host });
+        const client = await createClient({
+          host: repository.host,
+          scope: githubRepositoryAuthScope(repository.host),
+        });
         const options: GitHubListPROptions = {
           state: mapStatusToGitHubState(request.status),
           per_page: request.limit,
@@ -368,7 +374,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({ host: repository.host });
+        const client = await createClient({
+          host: repository.host,
+          scope: githubRepositoryAuthScope(repository.host),
+        });
         const pr = await client.getPullRequest(
           repository.owner,
           repository.repo,
@@ -396,7 +405,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({ host: repository.host });
+        const client = await createClient({
+          host: repository.host,
+          scope: githubRepositoryAuthScope(repository.host),
+        });
         if (client.createPullRequest === undefined) {
           throw new Error(
             'GitHub client does not support creating pull requests'
@@ -469,7 +481,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({ host: repository.host });
+        const client = await createClient({
+          host: repository.host,
+          scope: githubRepositoryAuthScope(repository.host),
+        });
         const warnings: string[] = [];
         const updates = {
           ...(request.title === undefined ? {} : { title: request.title }),
@@ -591,7 +606,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({ host: repository.host });
+        const client = await createClient({
+          host: repository.host,
+          scope: githubRepositoryAuthScope(repository.host),
+        });
         const [pr, files] = await Promise.all([
           client.getPullRequest(
             repository.owner,
@@ -627,7 +645,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({ host: repository.host });
+        const client = await createClient({
+          host: repository.host,
+          scope: githubRepositoryAuthScope(repository.host),
+        });
         const [issueComments, reviewComments] = await Promise.all([
           client.getIssueComments(
             repository.owner,
@@ -663,7 +684,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({ host: repository.host });
+        const client = await createClient({
+          host: repository.host,
+          scope: githubRepositoryAuthScope(repository.host),
+        });
         const comment =
           request.position === undefined
             ? await (async () => {
@@ -734,7 +758,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({ host: repository.host });
+        const client = await createClient({
+          host: repository.host,
+          scope: githubRepositoryAuthScope(repository.host),
+        });
         if (client.replyToReviewComment === undefined) {
           throw new Error(
             'GitHub client does not support replying to review comments'
@@ -783,7 +810,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({ host: repository.host });
+        const client = await createClient({
+          host: repository.host,
+          scope: githubRepositoryAuthScope(repository.host),
+        });
         const prs = await client.listPullRequests(
           repository.owner,
           repository.repo,

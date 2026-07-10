@@ -11,6 +11,7 @@ import { listAuthProviderAccounts } from '@cli/host/auth-provider-operations.js'
 import { createAzureDevOpsPlugin } from './azure-devops/plugin.js';
 import { createGitHubPlugin } from './github/plugin.js';
 import { createJiraPlugin } from './jira/plugin.js';
+import { loadAzureDevOpsConfig } from '@lib/config.js';
 import {
   installMockSecrets,
   restoreEnv,
@@ -241,6 +242,40 @@ describe('auth provider operations', () => {
     ]);
   });
 
+  test('Azure DevOps account discovery canonicalizes visualstudio.com identity', async () => {
+    const accounts = await Effect.runPromise(
+      listAuthProviderAccounts(
+        discoveredAuthProvider(
+          createAzureDevOpsPlugin({
+            probeConfig: async () => ({
+              kind: 'keyring',
+              value: {
+                orgUrl: 'https://Acme.visualstudio.com',
+                pat: 'ado-token',
+                authMethod: 'pat',
+              },
+            }),
+          })
+        )
+      )
+    );
+
+    expect(accounts).toMatchObject([
+      {
+        id: 'acme',
+        providerId: 'azure-devops',
+        detail: 'https://Acme.visualstudio.com (pat, keyring)',
+        scope: {
+          id: 'https://dev.azure.com/acme',
+          providerId: 'azure-devops',
+          host: 'dev.azure.com',
+          org: 'acme',
+          label: 'https://Acme.visualstudio.com',
+        },
+      },
+    ]);
+  });
+
   test('provider logout removes only the matching stored credential', async () => {
     store.set('aide:github', JSON.stringify({ token: 'stored' }));
     const provider = authProvider(
@@ -347,20 +382,19 @@ describe('auth provider operations', () => {
     expect(store.has('aide:jira')).toBe(true);
   });
 
-  test('ADO scoped login writes auth:azure-devops:host:... not ado', async () => {
+  test('ADO scoped login and lookup interoperate across legacy and canonical identities', async () => {
     const provider = authProvider(createAzureDevOpsPlugin());
     const result = await Effect.runPromise(
       provider.operations!.login!({
         values: {
-          orgUrl: 'https://dev.azure.com/example',
+          orgUrl: 'https://Acme.visualstudio.com',
           pat: 'ado-token',
           authMethod: 'pat',
         },
         scope: {
-          id: 'dev.azure.com',
+          id: 'Acme.visualstudio.com',
           providerId: 'azure-devops',
-          host: 'dev.azure.com',
-          org: 'example',
+          host: 'Acme.visualstudio.com',
         },
       })
     );
@@ -371,15 +405,24 @@ describe('auth provider operations', () => {
     });
     expect(
       JSON.parse(
-        store.get('aide:auth:azure-devops:host:dev.azure.com:org:example') ??
-          '{}'
+        store.get('aide:auth:azure-devops:host:dev.azure.com:org:acme') ?? '{}'
       )
     ).toEqual({
-      orgUrl: 'https://dev.azure.com/example',
+      orgUrl: 'https://Acme.visualstudio.com',
       pat: 'ado-token',
       authMethod: 'pat',
     });
     expect(store.has('aide:ado')).toBe(false);
+
+    const { config } = await loadAzureDevOpsConfig({
+      providerId: 'azure-devops',
+      host: 'dev.azure.com',
+      org: ' ACME ',
+    });
+    expect(config).toMatchObject({
+      orgUrl: 'https://Acme.visualstudio.com',
+      pat: 'ado-token',
+    });
   });
 
   test('GitHub scoped login with gh unavailable writes auth:github:host:... not github', async () => {

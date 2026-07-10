@@ -6,12 +6,15 @@ import {
   authSecretTarget,
   deleteAuthSecret,
   legacyAuthSecretName,
+  listAuthSecrets,
   normalizeAuthProviderId,
   normalizeAuthStoreScope,
   resolveAuthSecret,
+  resolveAuthSecretPromise,
   scopedAuthSecretName,
   writeAuthSecret,
 } from './auth-store.js';
+import { KeyringUnavailableError } from './secrets.js';
 import { installMockSecrets, type Store } from './test-helpers.js';
 
 describe('auth-store key construction', () => {
@@ -57,6 +60,57 @@ describe('auth-store key construction', () => {
     );
   });
 
+  test('uses exactly the legacy candidate when Azure DevOps scope is omitted', () => {
+    expect(authSecretCandidates('azure-devops', undefined)).toEqual([
+      {
+        name: 'ado',
+        kind: 'legacy',
+        providerId: 'azure-devops',
+      },
+    ]);
+  });
+
+  test('uses scoped then legacy candidates for a valid Azure DevOps scope', () => {
+    expect(
+      authSecretCandidates('ado', {
+        host: 'Acme.VisualStudio.com',
+      })
+    ).toEqual([
+      {
+        name: 'auth:azure-devops:host:dev.azure.com:org:acme',
+        kind: 'scoped',
+        providerId: 'azure-devops',
+        scope: {
+          providerId: 'azure-devops',
+          host: 'dev.azure.com',
+          org: 'acme',
+        },
+      },
+      {
+        name: 'ado',
+        kind: 'legacy',
+        providerId: 'azure-devops',
+      },
+    ]);
+  });
+
+  test('rejects explicit invalid or incomplete Azure DevOps scopes', () => {
+    const invalidScopes = [
+      { host: 'ado.example.com', org: 'acme' },
+      { host: 'acme.visualstudio.com', org: 'other' },
+      { host: 'dev.azure.com' },
+      { id: 'dev.azure.com' },
+      { host: '   ', org: 'acme' },
+      {},
+    ];
+
+    for (const scope of invalidScopes) {
+      expect(normalizeAuthStoreScope('ado', scope)).toBeNull();
+      expect(authSecretCandidates('ado', scope)).toEqual([]);
+      expect(authSecretTarget('ado', scope)).toBeNull();
+    }
+  });
+
   test('builds Jira host and account scoped keys', () => {
     expect(
       scopedAuthSecretName('jira', {
@@ -75,6 +129,39 @@ describe('auth-store key construction', () => {
     ).toBe('auth:azure-devops:host:dev.azure.com:org:acme');
   });
 
+  test('canonicalizes Azure DevOps legacy hosts and mixed-case orgs', () => {
+    const expected = 'auth:azure-devops:host:dev.azure.com:org:acme';
+
+    expect(
+      scopedAuthSecretName('azure-devops', {
+        host: ' Acme.VisualStudio.com ',
+      })
+    ).toBe(expected);
+    expect(
+      scopedAuthSecretName('azure-devops', {
+        host: 'DEV.AZURE.COM',
+        org: ' AcMe ',
+      })
+    ).toBe(expected);
+    expect(
+      scopedAuthSecretName('azure-devops', {
+        host: 'https://dev.azure.com/ACME',
+      })
+    ).toBe(expected);
+    expect(
+      scopedAuthSecretName('azure-devops', {
+        host: 'ado.example.com',
+        org: 'acme',
+      })
+    ).toBeNull();
+    expect(
+      scopedAuthSecretName('azure-devops', {
+        host: 'acme.visualstudio.com',
+        org: 'other',
+      })
+    ).toBeNull();
+  });
+
   test('builds GitHub Enterprise host-only and host-account scoped keys', () => {
     expect(scopedAuthSecretName('github', { host: 'ghe.example.com' })).toBe(
       'auth:github:host:ghe.example.com'
@@ -90,20 +177,20 @@ describe('auth-store key construction', () => {
   test('normalizes scope fields and encodes unsafe key characters', () => {
     expect(
       normalizeAuthStoreScope('ADO', {
-        host: ' HTTPS://DEV.AZURE.COM/Acme ',
+        host: ' HTTPS://DEV.AZURE.COM ',
         org: ' My Org/Team:One ',
       })
     ).toEqual({
       providerId: 'azure-devops',
       host: 'dev.azure.com',
-      org: 'My Org/Team:One',
+      org: 'my org/team:one',
     });
     expect(
       scopedAuthSecretName('ADO', {
-        host: ' HTTPS://DEV.AZURE.COM/Acme ',
+        host: ' HTTPS://DEV.AZURE.COM ',
         org: ' My Org/Team:One ',
       })
-    ).toBe('auth:azure-devops:host:dev.azure.com:org:My%20Org%2FTeam%3AOne');
+    ).toBe('auth:azure-devops:host:dev.azure.com:org:my%20org%2Fteam%3Aone');
   });
 
   test('orders scoped candidate before legacy fallback', () => {
@@ -204,6 +291,67 @@ describe('auth-store keyring helpers', () => {
     });
   });
 
+  test('writes and resolves Azure DevOps credentials across legacy and canonical scope forms', async () => {
+    await Effect.runPromise(
+      writeAuthSecret('azure-devops', 'scoped', {
+        host: 'Acme.VisualStudio.com',
+      })
+    );
+
+    const resolved = await resolveAuthSecretPromise('azure-devops', {
+      host: 'dev.azure.com',
+      org: 'ACME',
+    });
+
+    expect(resolved).toMatchObject({
+      name: 'auth:azure-devops:host:dev.azure.com:org:acme',
+      kind: 'scoped',
+      value: 'scoped',
+    });
+  });
+
+  test('Promise auth resolution preserves typed keyring failures', async () => {
+    const restoreFailure = installMockSecrets(store, 'get');
+    try {
+      await expect(
+        resolveAuthSecretPromise('azure-devops', {
+          host: 'dev.azure.com',
+          org: 'acme',
+        })
+      ).rejects.toBeInstanceOf(KeyringUnavailableError);
+    } finally {
+      restoreFailure();
+    }
+  });
+
+  test('invalid explicit Azure DevOps scopes cannot access or mutate the legacy secret', async () => {
+    store.set('aide:ado', 'legacy');
+    const invalidScopes = [
+      { host: 'ado.example.com', org: 'acme' },
+      { host: 'acme.visualstudio.com', org: 'other' },
+      { host: 'dev.azure.com' },
+      { id: 'dev.azure.com' },
+      { host: '   ', org: 'acme' },
+      {},
+    ];
+
+    for (const scope of invalidScopes) {
+      expect(
+        await Effect.runPromise(resolveAuthSecret('ado', scope))
+      ).toBeNull();
+      expect(await Effect.runPromise(listAuthSecrets('ado', scope))).toEqual(
+        []
+      );
+      await expect(
+        Effect.runPromise(writeAuthSecret('ado', 'replacement', scope))
+      ).rejects.toThrow(/cannot build an auth secret key/i);
+      await expect(
+        Effect.runPromise(deleteAuthSecret('ado', scope))
+      ).rejects.toThrow(/cannot build an auth secret key/i);
+      expect(store.get('aide:ado')).toBe('legacy');
+    }
+  });
+
   test('uses legacy only when no deterministic scope can be built', async () => {
     store.set('aide:jira', 'legacy');
 
@@ -255,8 +403,7 @@ describe('auth-store keyring helpers', () => {
 
     const removed = await Effect.runPromise(
       deleteAuthSecret('azure-devops', {
-        host: 'dev.azure.com',
-        org: 'acme',
+        host: 'Acme.VisualStudio.com',
       })
     );
 

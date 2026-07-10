@@ -4,22 +4,30 @@ import type { AideHostServices } from '@cli/host/runtime-context.js';
 import { corePullRequestProviderOwner } from '@cli/host/plugin-descriptor.js';
 import type { ResolvedPullRequestProvider } from './provider-resolver.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
+import type { AuthStoreScope } from '@lib/auth-store.js';
 import { loadAzureDevOpsConfig } from '@lib/config.js';
 import { GitHubClient } from '@lib/github-client.js';
 import { normalizeGitHubHost } from '@lib/github-utils.js';
 import type { PlatformContext } from '@lib/platform.js';
+import {
+  azureDevOpsRepositoryAuthScope,
+  githubRepositoryAuthScope,
+} from '@lib/repository-auth-scope.js';
 
 export interface PullRequestProviderContextClients {
   readonly createGitHubClient: (options: {
     readonly host: string;
+    readonly scope: AuthStoreScope;
   }) => Promise<GitHubClient>;
-  readonly createAzureDevOpsClient: () => Promise<AzureDevOpsClient>;
+  readonly createAzureDevOpsClient: (options: {
+    readonly scope: AuthStoreScope;
+  }) => Promise<AzureDevOpsClient>;
 }
 
 const defaultClients: PullRequestProviderContextClients = {
-  createGitHubClient: ({ host }) => GitHubClient.create({ host }),
-  createAzureDevOpsClient: async () => {
-    const { config } = await loadAzureDevOpsConfig();
+  createGitHubClient: ({ host, scope }) => GitHubClient.create({ host, scope }),
+  createAzureDevOpsClient: async ({ scope }) => {
+    const { config } = await loadAzureDevOpsConfig(scope);
     return new AzureDevOpsClient(config);
   },
 };
@@ -60,25 +68,28 @@ export async function platformContextFromPullRequestProvider(
           `Pull request provider 'github' returned unsupported GitHub host '${repository.host}'`
         );
       }
+      const scope = githubRepositoryAuthScope(host);
       return {
         platform: 'github',
         host,
         owner: repository.owner,
         repo: repository.repo,
-        client: await clients.createGitHubClient({ host }),
+        client: await clients.createGitHubClient({ host, scope }),
         autoDiscovered: true,
       };
     }
-    case 'azure-devops':
+    case 'azure-devops': {
       assertTrustedCoreRef(provider, 'azure-devops');
+      const scope = azureDevOpsRepositoryAuthScope(repository.org);
       return {
         platform: 'azure-devops',
         org: repository.org,
         project: repository.project,
         repo: repository.repo,
-        client: await clients.createAzureDevOpsClient(),
+        client: await clients.createAzureDevOpsClient({ scope }),
         autoDiscovered: true,
       };
+    }
     default:
       throw new Error(
         `Pull request provider '${repository.providerId}' cannot create a legacy platform context`

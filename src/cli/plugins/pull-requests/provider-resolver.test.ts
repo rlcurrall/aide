@@ -20,6 +20,13 @@ import { createBuiltinCommandRegistry } from '@cli/plugins/builtin.js';
 import { createGitHubPlugin } from '@cli/plugins/github/plugin.js';
 import type { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import type { GitHubClient } from '@lib/github-client.js';
+import { loadAzureDevOpsConfig } from '@lib/config.js';
+import {
+  installMockSecrets,
+  restoreEnv,
+  saveEnv,
+  type Store,
+} from '@lib/test-helpers.js';
 import type {
   GitHubIssueComment,
   GitHubPullRequest,
@@ -1328,8 +1335,8 @@ describe('pull request provider list operations', () => {
   test('lists GitHub pull requests through a provider-owned operation', async () => {
     const calls: unknown[] = [];
     const plugin = createGitHubPlugin({
-      createClient: async ({ host }) => {
-        calls.push(host);
+      createClient: async ({ host, scope }) => {
+        calls.push({ host, scope });
         return {
           listPullRequests: async (owner, repo, options) => {
             calls.push({ owner, repo, options });
@@ -1373,7 +1380,10 @@ describe('pull request provider list operations', () => {
     );
 
     expect(calls).toEqual([
-      'github.com',
+      {
+        host: 'github.com',
+        scope: { providerId: 'github', host: 'github.com' },
+      },
       {
         owner: 'acme',
         repo: 'widgets',
@@ -1399,39 +1409,42 @@ describe('pull request provider list operations', () => {
   test('lists Azure DevOps pull requests through a provider-owned operation', async () => {
     const calls: unknown[] = [];
     const plugin = createAzureDevOpsPlugin({
-      createClient: async () => ({
-        config: {
-          orgUrl: 'https://dev.azure.com/acme',
-          pat: 'token',
-          authMethod: 'pat',
-        },
-        client: {
-          listPullRequests: async (project, repo, options) => {
-            calls.push({ project, repo, options });
-            return {
-              value: [
-                fakeAzureDevOpsPullRequest({
-                  pullRequestId: 42,
-                  title: 'ADO PR',
-                  createdBy: {
-                    displayName: 'Ada Lovelace',
-                    uniqueName: 'ada@example.com',
-                    id: 'ada',
-                  },
-                }),
-              ],
-            };
+      createClient: async (options) => {
+        calls.push(options);
+        return {
+          config: {
+            orgUrl: 'https://dev.azure.com/acme',
+            pat: 'token',
+            authMethod: 'pat',
           },
-          getPullRequest: async () =>
-            fakeAzureDevOpsPullRequest({
-              pullRequestId: 1,
-              title: 'Unused',
-            }),
-          getPullRequestLabels: async () => ({ value: [] }),
-          getAllPullRequestChanges: async () => [],
-          getAllComments: async () => [],
-        },
-      }),
+          client: {
+            listPullRequests: async (project, repo, options) => {
+              calls.push({ project, repo, options });
+              return {
+                value: [
+                  fakeAzureDevOpsPullRequest({
+                    pullRequestId: 42,
+                    title: 'ADO PR',
+                    createdBy: {
+                      displayName: 'Ada Lovelace',
+                      uniqueName: 'ada@example.com',
+                      id: 'ada',
+                    },
+                  }),
+                ],
+              };
+            },
+            getPullRequest: async () =>
+              fakeAzureDevOpsPullRequest({
+                pullRequestId: 1,
+                title: 'Unused',
+              }),
+            getPullRequestLabels: async () => ({ value: [] }),
+            getAllPullRequestChanges: async () => [],
+            getAllComments: async () => [],
+          },
+        };
+      },
     });
 
     const result = await Effect.runPromise(
@@ -1449,6 +1462,13 @@ describe('pull request provider list operations', () => {
 
     expect(calls).toEqual([
       {
+        scope: {
+          providerId: 'azure-devops',
+          host: 'dev.azure.com',
+          org: 'acme',
+        },
+      },
+      {
         project: 'Platform',
         repo: 'widgets',
         options: { status: 'active', top: 20 },
@@ -1464,6 +1484,94 @@ describe('pull request provider list operations', () => {
         email: 'ada@example.com',
       },
     });
+  });
+
+  test('uses one scoped ADO credential across mixed-case and visualstudio identities', async () => {
+    const env = saveEnv([
+      'AZURE_DEVOPS_ORG_URL',
+      'AZURE_DEVOPS_PAT',
+      'AZURE_DEVOPS_AUTH_METHOD',
+      'AZURE_DEVOPS_DEFAULT_PROJECT',
+    ]);
+    const previousService = Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
+    const store: Store = new Map([
+      [
+        'aide:auth:azure-devops:host:dev.azure.com:org:acme',
+        JSON.stringify({
+          orgUrl: 'https://Acme.visualstudio.com',
+          pat: 'scoped-token',
+          authMethod: 'pat',
+        }),
+      ],
+    ]);
+    const restoreSecrets = installMockSecrets(store);
+
+    try {
+      const calls: unknown[] = [];
+      const plugin = createAzureDevOpsPlugin({
+        createClient: async (options) => {
+          const { config } = await loadAzureDevOpsConfig(options?.scope);
+          calls.push({ options, pat: config.pat });
+          return {
+            config,
+            client: {
+              listPullRequests: async () => ({
+                value: [
+                  fakeAzureDevOpsPullRequest({
+                    pullRequestId: 42,
+                    title: 'Canonical ADO identity',
+                  }),
+                ],
+              }),
+              getPullRequest: async () =>
+                fakeAzureDevOpsPullRequest({
+                  pullRequestId: 42,
+                  title: 'Canonical ADO identity',
+                }),
+              getPullRequestLabels: async () => ({ value: [] }),
+              getAllPullRequestChanges: async () => [],
+              getAllComments: async () => [],
+            },
+          };
+        },
+      });
+
+      const result = await Effect.runPromise(
+        listPullRequestsForRemote(
+          [
+            {
+              pluginId: plugin.id,
+              capability: plugin.capabilities!.pullRequestProvider!,
+            },
+          ],
+          'git@ssh.dev.azure.com:v3/ACME/Platform/widgets'
+        )
+      );
+
+      expect(calls).toEqual([
+        {
+          options: {
+            scope: {
+              providerId: 'azure-devops',
+              host: 'dev.azure.com',
+              org: 'acme',
+            },
+          },
+          pat: 'scoped-token',
+        },
+      ]);
+      expect(result.pullRequests[0]?.title).toBe('Canonical ADO identity');
+      expect(result.repositoryLabel).toBe('ACME/Platform/widgets');
+    } finally {
+      restoreSecrets();
+      restoreEnv(env);
+      if (previousService === undefined) {
+        delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+      } else {
+        Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = previousService;
+      }
+    }
   });
 
   test('rejects providers that do not implement listPullRequests', async () => {
@@ -1829,8 +1937,8 @@ describe('pull request provider view operations', () => {
   test('gets a GitHub pull request through a provider-owned operation', async () => {
     const calls: unknown[] = [];
     const plugin = createGitHubPlugin({
-      createClient: async ({ host }) => {
-        calls.push(host);
+      createClient: async ({ host, scope }) => {
+        calls.push({ host, scope });
         return {
           listPullRequests: async () => [],
           getPullRequest: async (owner, repo, number) => {
@@ -1873,7 +1981,10 @@ describe('pull request provider view operations', () => {
     );
 
     expect(calls).toEqual([
-      'github.com',
+      {
+        host: 'github.com',
+        scope: { providerId: 'github', host: 'github.com' },
+      },
       { owner: 'acme', repo: 'widgets', number: 12 },
     ]);
     expect(result.repositoryLabel).toBe('github.com/acme/widgets');
@@ -1892,36 +2003,39 @@ describe('pull request provider view operations', () => {
   test('gets an Azure DevOps pull request through a URL provider match', async () => {
     const calls: unknown[] = [];
     const plugin = createAzureDevOpsPlugin({
-      createClient: async () => ({
-        config: {
-          orgUrl: 'https://dev.azure.com/acme',
-          pat: 'token',
-          authMethod: 'pat',
-        },
-        client: {
-          listPullRequests: async () => ({ value: [] }),
-          getPullRequest: async (project, repo, number) => {
-            calls.push({ project, repo, number });
-            return fakeAzureDevOpsPullRequest({
-              pullRequestId: number,
-              title: 'ADO detail',
-              sourceRefName: 'refs/heads/feature/ado-detail',
-              targetRefName: 'refs/heads/main',
-            });
+      createClient: async (options) => {
+        calls.push(options);
+        return {
+          config: {
+            orgUrl: 'https://dev.azure.com/acme',
+            pat: 'token',
+            authMethod: 'pat',
           },
-          getPullRequestLabels: async (project, repo, number) => {
-            calls.push({ labelsFor: { project, repo, number } });
-            return {
-              value: [
-                { id: '1', name: 'ready', active: true, url: 'label-url' },
-                { id: '2', name: 'stale', active: false, url: 'label-url' },
-              ],
-            };
+          client: {
+            listPullRequests: async () => ({ value: [] }),
+            getPullRequest: async (project, repo, number) => {
+              calls.push({ project, repo, number });
+              return fakeAzureDevOpsPullRequest({
+                pullRequestId: number,
+                title: 'ADO detail',
+                sourceRefName: 'refs/heads/feature/ado-detail',
+                targetRefName: 'refs/heads/main',
+              });
+            },
+            getPullRequestLabels: async (project, repo, number) => {
+              calls.push({ labelsFor: { project, repo, number } });
+              return {
+                value: [
+                  { id: '1', name: 'ready', active: true, url: 'label-url' },
+                  { id: '2', name: 'stale', active: false, url: 'label-url' },
+                ],
+              };
+            },
+            getAllPullRequestChanges: async () => [],
+            getAllComments: async () => [],
           },
-          getAllPullRequestChanges: async () => [],
-          getAllComments: async () => [],
-        },
-      }),
+        };
+      },
     });
 
     const result = await Effect.runPromise(
@@ -1937,6 +2051,13 @@ describe('pull request provider view operations', () => {
     );
 
     expect(calls).toEqual([
+      {
+        scope: {
+          providerId: 'azure-devops',
+          host: 'dev.azure.com',
+          org: 'acme',
+        },
+      },
       { project: 'Platform', repo: 'widgets', number: 42 },
       { labelsFor: { project: 'Platform', repo: 'widgets', number: 42 } },
     ]);
@@ -4772,8 +4893,8 @@ describe('pull request provider branch lookup operations', () => {
   test('finds a GitHub pull request for a branch through a provider-owned operation', async () => {
     const calls: unknown[] = [];
     const plugin = createGitHubPlugin({
-      createClient: async ({ host }) => {
-        calls.push(host);
+      createClient: async ({ host, scope }) => {
+        calls.push({ host, scope });
         return {
           listPullRequests: async (owner, repo, options) => {
             calls.push({ owner, repo, options });
@@ -4843,7 +4964,10 @@ describe('pull request provider branch lookup operations', () => {
     );
 
     expect(calls).toEqual([
-      'github.com',
+      {
+        host: 'github.com',
+        scope: { providerId: 'github', host: 'github.com' },
+      },
       {
         owner: 'acme',
         repo: 'widgets',
@@ -4868,56 +4992,59 @@ describe('pull request provider branch lookup operations', () => {
   test('finds an Azure DevOps pull request for a branch through a provider-owned operation', async () => {
     const calls: unknown[] = [];
     const plugin = createAzureDevOpsPlugin({
-      createClient: async () => ({
-        config: {
-          orgUrl: 'https://dev.azure.com/acme',
-          pat: 'token',
-          authMethod: 'pat',
-        },
-        client: {
-          listPullRequests: async (project, repo, options) => {
-            calls.push({ project, repo, options });
-            return {
-              value: [
-                fakeAzureDevOpsPullRequest({
-                  pullRequestId: 41,
-                  title: 'Completed newer PR',
-                  status: 'completed',
-                  creationDate: '2026-01-03T00:00:00Z',
-                  sourceRefName: 'refs/heads/feature/ado-detail',
-                }),
-                fakeAzureDevOpsPullRequest({
-                  pullRequestId: 42,
-                  title: 'Active selected PR',
-                  status: 'active',
-                  creationDate: '2026-01-01T00:00:00Z',
-                  sourceRefName: 'refs/heads/feature/ado-detail',
-                }),
-              ],
-            };
+      createClient: async (options) => {
+        calls.push(options);
+        return {
+          config: {
+            orgUrl: 'https://dev.azure.com/acme',
+            pat: 'token',
+            authMethod: 'pat',
           },
-          getPullRequest: async (project, repo, number) => {
-            calls.push({ detail: { project, repo, number } });
-            return fakeAzureDevOpsPullRequest({
-              pullRequestId: number,
-              title: 'ADO branch detail',
-              sourceRefName: 'refs/heads/feature/ado-detail',
-              targetRefName: 'refs/heads/main',
-            });
+          client: {
+            listPullRequests: async (project, repo, options) => {
+              calls.push({ project, repo, options });
+              return {
+                value: [
+                  fakeAzureDevOpsPullRequest({
+                    pullRequestId: 41,
+                    title: 'Completed newer PR',
+                    status: 'completed',
+                    creationDate: '2026-01-03T00:00:00Z',
+                    sourceRefName: 'refs/heads/feature/ado-detail',
+                  }),
+                  fakeAzureDevOpsPullRequest({
+                    pullRequestId: 42,
+                    title: 'Active selected PR',
+                    status: 'active',
+                    creationDate: '2026-01-01T00:00:00Z',
+                    sourceRefName: 'refs/heads/feature/ado-detail',
+                  }),
+                ],
+              };
+            },
+            getPullRequest: async (project, repo, number) => {
+              calls.push({ detail: { project, repo, number } });
+              return fakeAzureDevOpsPullRequest({
+                pullRequestId: number,
+                title: 'ADO branch detail',
+                sourceRefName: 'refs/heads/feature/ado-detail',
+                targetRefName: 'refs/heads/main',
+              });
+            },
+            getPullRequestLabels: async (project, repo, number) => {
+              calls.push({ labelsFor: { project, repo, number } });
+              return {
+                value: [
+                  { id: '1', name: 'ready', active: true, url: 'label-url' },
+                  { id: '2', name: 'stale', active: false, url: 'label-url' },
+                ],
+              };
+            },
+            getAllPullRequestChanges: async () => [],
+            getAllComments: async () => [],
           },
-          getPullRequestLabels: async (project, repo, number) => {
-            calls.push({ labelsFor: { project, repo, number } });
-            return {
-              value: [
-                { id: '1', name: 'ready', active: true, url: 'label-url' },
-                { id: '2', name: 'stale', active: false, url: 'label-url' },
-              ],
-            };
-          },
-          getAllPullRequestChanges: async () => [],
-          getAllComments: async () => [],
-        },
-      }),
+        };
+      },
     });
 
     const result = await Effect.runPromise(
@@ -4934,6 +5061,13 @@ describe('pull request provider branch lookup operations', () => {
     );
 
     expect(calls).toEqual([
+      {
+        scope: {
+          providerId: 'azure-devops',
+          host: 'dev.azure.com',
+          org: 'acme',
+        },
+      },
       {
         project: 'Platform',
         repo: 'widgets',
@@ -5221,14 +5355,14 @@ describe('pull request provider branch lookup operations', () => {
 describe('pull request provider platform context bridge', () => {
   test('creates a GitHub platform context from the resolved provider match', async () => {
     const registry = createBuiltinCommandRegistry();
-    const calls: string[] = [];
+    const calls: unknown[] = [];
 
     const ctx = await resolvePullRequestPlatformContextForRemote(
       createAideHostServices(registry),
-      'git@github.com:acme/widgets.git',
+      'git@ssh.acme.ghe.com:acme/widgets.git',
       {
-        createGitHubClient: async ({ host }) => {
-          calls.push(`github:${host}`);
+        createGitHubClient: async ({ host, scope }) => {
+          calls.push({ host, scope });
           return { kind: 'github-client' } as unknown as GitHubClient;
         },
         createAzureDevOpsClient: async () => {
@@ -5239,17 +5373,22 @@ describe('pull request provider platform context bridge', () => {
 
     expect(ctx).toMatchObject({
       platform: 'github',
-      host: 'github.com',
+      host: 'acme.ghe.com',
       owner: 'acme',
       repo: 'widgets',
       autoDiscovered: true,
     });
-    expect(calls).toEqual(['github:github.com']);
+    expect(calls).toEqual([
+      {
+        host: 'acme.ghe.com',
+        scope: { providerId: 'github', host: 'acme.ghe.com' },
+      },
+    ]);
   });
 
   test('creates an Azure DevOps platform context from the resolved provider match', async () => {
     const registry = createBuiltinCommandRegistry();
-    const calls: string[] = [];
+    const calls: unknown[] = [];
 
     const ctx = await resolvePullRequestPlatformContextForRemote(
       createAideHostServices(registry),
@@ -5258,8 +5397,8 @@ describe('pull request provider platform context bridge', () => {
         createGitHubClient: async () => {
           throw new Error('GitHub client should not be created');
         },
-        createAzureDevOpsClient: async () => {
-          calls.push('ado');
+        createAzureDevOpsClient: async (options) => {
+          calls.push(options);
           return {
             kind: 'azure-devops-client',
           } as unknown as AzureDevOpsClient;
@@ -5274,7 +5413,15 @@ describe('pull request provider platform context bridge', () => {
       repo: 'widgets',
       autoDiscovered: true,
     });
-    expect(calls).toEqual(['ado']);
+    expect(calls).toEqual([
+      {
+        scope: {
+          providerId: 'azure-devops',
+          host: 'dev.azure.com',
+          org: 'acme',
+        },
+      },
+    ]);
   });
 
   test('uses trusted GitHub provider when a high-priority external provider matches the same remote', async () => {

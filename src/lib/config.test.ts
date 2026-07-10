@@ -139,7 +139,15 @@ describe('loadAzureDevOpsConfig', () => {
   test('uses env vars when full set is present', async () => {
     Bun.env.AZURE_DEVOPS_ORG_URL = 'https://dev.azure.com/x';
     Bun.env.AZURE_DEVOPS_PAT = 'pat';
-    const { config, source } = await loadAzureDevOpsConfig();
+    store.set(
+      'aide:auth:azure-devops:host:dev.azure.com:org:x',
+      '{malformed scoped credentials'
+    );
+    const { config, source } = await loadAzureDevOpsConfig({
+      providerId: 'azure-devops',
+      host: 'dev.azure.com',
+      org: 'x',
+    });
     expect(source).toBe('env');
     expect(config.orgUrl).toBe('https://dev.azure.com/x');
     expect(config.authMethod).toBe('pat');
@@ -159,6 +167,81 @@ describe('loadAzureDevOpsConfig', () => {
     expect(source).toBe('keyring');
     expect(config.orgUrl).toBe('https://dev.azure.com/kept');
     expect(config.authMethod).toBe('bearer');
+  });
+
+  test('uses scoped keyring credentials before the legacy key', async () => {
+    store.set(
+      'aide:auth:azure-devops:host:dev.azure.com:org:acme',
+      JSON.stringify({
+        orgUrl: 'https://dev.azure.com/acme',
+        pat: 'scoped-token',
+        authMethod: 'pat',
+      })
+    );
+    store.set(
+      'aide:ado',
+      JSON.stringify({
+        orgUrl: 'https://dev.azure.com/legacy',
+        pat: 'legacy-token',
+        authMethod: 'bearer',
+      })
+    );
+
+    const { config, source } = await loadAzureDevOpsConfig({
+      providerId: 'azure-devops',
+      host: 'dev.azure.com',
+      org: 'acme',
+    });
+
+    expect(source).toBe('keyring');
+    expect(config).toMatchObject({
+      orgUrl: 'https://dev.azure.com/acme',
+      pat: 'scoped-token',
+      authMethod: 'pat',
+    });
+  });
+
+  test('falls back to the legacy key when scoped credentials are missing', async () => {
+    store.set(
+      'aide:ado',
+      JSON.stringify({
+        orgUrl: 'https://dev.azure.com/acme',
+        pat: 'legacy-token',
+        authMethod: 'pat',
+      })
+    );
+
+    const { config, source } = await loadAzureDevOpsConfig({
+      providerId: 'azure-devops',
+      host: 'dev.azure.com',
+      org: 'acme',
+    });
+
+    expect(source).toBe('keyring');
+    expect(config.pat).toBe('legacy-token');
+  });
+
+  test('does not fall back when scoped credentials are malformed', async () => {
+    store.set(
+      'aide:auth:azure-devops:host:dev.azure.com:org:acme',
+      '{not json'
+    );
+    store.set(
+      'aide:ado',
+      JSON.stringify({
+        orgUrl: 'https://dev.azure.com/acme',
+        pat: 'legacy-token',
+        authMethod: 'pat',
+      })
+    );
+
+    await expect(
+      loadAzureDevOpsConfig({
+        providerId: 'azure-devops',
+        host: 'dev.azure.com',
+        org: 'acme',
+      })
+    ).rejects.toThrow(/aide login ado/i);
   });
 
   test('throws when neither is configured', async () => {

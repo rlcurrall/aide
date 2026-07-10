@@ -86,13 +86,20 @@ describe('GitHubClient.create() — gh-cli branch (mocked)', () => {
   test('uses gh CLI when ghAvailable returns true, ignoring other sources', async () => {
     Bun.env.GITHUB_TOKEN = 'env-token';
     store.set(
+      `${MOCK_SERVICE}:auth:github:host:acme.ghe.com`,
+      '{malformed scoped credentials'
+    );
+    store.set(
       `${MOCK_SERVICE}:github`,
       JSON.stringify({ token: 'stored-token' })
     );
-    const client = await GitHubClient.create({ ghAvailable: () => true });
+    const client = await GitHubClient.create({
+      ghAvailable: () => true,
+      host: 'acme.ghe.com',
+      scope: { providerId: 'github', host: 'acme.ghe.com' },
+    });
     expect(client).toBeInstanceOf(GitHubClient);
-    // No direct introspection of mode is exposed; success without throwing
-    // on an empty env + empty keyring confirms gh path was selected.
+    // The malformed scoped blob confirms the keyring was not read.
   });
 });
 
@@ -115,7 +122,15 @@ describe('GitHubClient.create() — env-token branch (mocked)', () => {
 
   test('uses GITHUB_TOKEN when gh is unavailable', async () => {
     Bun.env.GITHUB_TOKEN = 'env-token';
-    const client = await GitHubClient.create({ ghAvailable: () => false });
+    store.set(
+      `${MOCK_SERVICE}:auth:github:host:acme.ghe.com`,
+      '{malformed scoped credentials'
+    );
+    const client = await GitHubClient.create({
+      ghAvailable: () => false,
+      host: 'acme.ghe.com',
+      scope: { providerId: 'github', host: 'acme.ghe.com' },
+    });
     expect(client).toBeInstanceOf(GitHubClient);
   });
 
@@ -160,6 +175,78 @@ describe('GitHubClient.create() — missing sources', () => {
     store.set(`${MOCK_SERVICE}:github`, JSON.stringify({ token: '' }));
     await expect(
       GitHubClient.create({ ghAvailable: () => false })
+    ).rejects.toThrow(/re-run 'aide login github'/i);
+  });
+
+  test('uses a scoped keyring token before the legacy token', async () => {
+    store.set(
+      `${MOCK_SERVICE}:auth:github:host:acme.ghe.com`,
+      JSON.stringify({ token: 'scoped-token' })
+    );
+    store.set(
+      `${MOCK_SERVICE}:github`,
+      JSON.stringify({ token: 'legacy-token' })
+    );
+    const fetchStub = makeFetchStub({ number: 5 });
+
+    const client = await GitHubClient.create({
+      ghAvailable: () => false,
+      host: 'acme.ghe.com',
+      scope: { providerId: 'github', host: 'acme.ghe.com' },
+      fetch: fetchStub.fn,
+    });
+    await client.getPullRequest('acme', 'widgets', 5);
+
+    expect(fetchStub.authorizations).toEqual(['Bearer scoped-token']);
+  });
+
+  test('falls back to the legacy token when the scoped key is missing', async () => {
+    store.set(
+      `${MOCK_SERVICE}:github`,
+      JSON.stringify({ token: 'legacy-token' })
+    );
+    const fetchStub = makeFetchStub({ number: 5 });
+
+    const client = await GitHubClient.create({
+      ghAvailable: () => false,
+      host: 'acme.ghe.com',
+      scope: { providerId: 'github', host: 'acme.ghe.com' },
+      fetch: fetchStub.fn,
+    });
+    await client.getPullRequest('acme', 'widgets', 5);
+
+    expect(fetchStub.authorizations).toEqual(['Bearer legacy-token']);
+  });
+
+  test('keeps no-scope callers on the legacy key', async () => {
+    store.set(
+      `${MOCK_SERVICE}:github`,
+      JSON.stringify({ token: 'legacy-token' })
+    );
+    const fetchStub = makeFetchStub({ number: 5 });
+
+    const client = await GitHubClient.create({
+      ghAvailable: () => false,
+      fetch: fetchStub.fn,
+    });
+    await client.getPullRequest('acme', 'widgets', 5);
+
+    expect(fetchStub.authorizations).toEqual(['Bearer legacy-token']);
+  });
+
+  test('does not fall back when scoped credentials are malformed', async () => {
+    store.set(`${MOCK_SERVICE}:auth:github:host:acme.ghe.com`, '{not json');
+    store.set(
+      `${MOCK_SERVICE}:github`,
+      JSON.stringify({ token: 'legacy-token' })
+    );
+
+    await expect(
+      GitHubClient.create({
+        ghAvailable: () => false,
+        host: 'acme.ghe.com',
+        scope: { providerId: 'github', host: 'acme.ghe.com' },
+      })
     ).rejects.toThrow(/re-run 'aide login github'/i);
   });
 });
@@ -239,16 +326,19 @@ function makeSpawnStub(stdout = '{}'): {
 function makeFetchStub(body: unknown): {
   fn: FetchFn;
   urls: string[];
+  authorizations: Array<string | null>;
 } {
   const urls: string[] = [];
-  const fn = (async (input: string | URL | Request) => {
+  const authorizations: Array<string | null> = [];
+  const fn = (async (input: string | URL | Request, init?: RequestInit) => {
     urls.push(String(input));
+    authorizations.push(new Headers(init?.headers).get('Authorization'));
     return new Response(JSON.stringify(body), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
   }) as unknown as FetchFn;
-  return { fn, urls };
+  return { fn, urls, authorizations };
 }
 
 /** Find the value passed immediately after a flag in an argv array. */
