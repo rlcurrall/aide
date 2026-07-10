@@ -8,7 +8,7 @@ import {
   type JiraConfig,
   type AzureDevOpsConfig,
 } from '../schemas/config.js';
-import { getSecret, KeyringUnavailableError } from './secrets.js';
+import { KeyringUnavailableError } from './secrets.js';
 import {
   authSecretScopesMatch,
   resolveAuthSecretPromise,
@@ -19,6 +19,7 @@ import {
   DEFAULT_GITHUB_HOST,
   githubEnvironmentCredential,
   resolveGitHubAuthRequest,
+  validateGitHubStoredCredential,
 } from './github-auth.js';
 import { resolveGitHubCredential } from './github-credential-resolver.js';
 import type { GitHubAuthProbe } from './gh-utils.js';
@@ -499,33 +500,47 @@ export function activeGithubEnvVars(): string[] {
 }
 
 /**
- * Returns true if the OS keyring has a valid credential blob stored for
- * `name`. Returns false if the entry is missing, the backend is unreachable,
- * or the stored blob fails schema validation. Does not throw.
+ * Returns true if the unscoped production keyring reader would accept the
+ * credential stored for `name`, without consulting environment variables or
+ * the gh CLI. Missing, unreachable, malformed, or wrong-generation entries
+ * return false.
+ *
+ * Unexpected failures still propagate, matching the underlying production
+ * readers so the whoami Effect boundary can retain them in its typed error
+ * channel. GitHub validator failures are treated as malformed, as they are by
+ * resolveGitHubCredential.
  */
 export async function isKeyringCredentialValid(
   name: 'jira' | 'ado' | 'github'
 ): Promise<boolean> {
-  let raw: string | null;
+  if (name === 'jira') {
+    return (await readJiraFromKeyring()).kind === 'found';
+  }
+  if (name === 'ado') {
+    return (await readAdoFromKeyring()).kind === 'found';
+  }
+
+  const request = resolveGitHubAuthRequest({});
+  if (!request.ok) return false;
+
+  let resolved;
   try {
-    raw = await getSecret(name);
+    resolved = await resolveAuthSecretPromise('github');
+  } catch (error) {
+    if (error instanceof KeyringUnavailableError) return false;
+    throw error;
+  }
+  if (resolved === null) return false;
+
+  try {
+    return validateGitHubStoredCredential(
+      request,
+      resolved.kind,
+      resolved.value
+    ).ok;
   } catch {
     return false;
   }
-  if (!raw) return false;
-  let json: unknown;
-  try {
-    json = JSON.parse(raw);
-  } catch {
-    return false;
-  }
-  const schema =
-    name === 'jira'
-      ? StoredJiraSchema
-      : name === 'ado'
-        ? StoredAdoSchema
-        : StoredGithubSchema;
-  return v.safeParse(schema, json).success;
 }
 
 // ---------------------------------------------------------------------------

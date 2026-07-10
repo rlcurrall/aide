@@ -332,4 +332,36 @@ describe('buildWhoamiOutput', () => {
     });
     expect(out).toMatch(/GITHUB_TOKEN.*override your stored keyring entry/);
   });
+
+  test('uses the migration tip for a scoped GitHub payload misplaced under the legacy key', async () => {
+    Bun.env.GITHUB_TOKEN = 'ghp_env';
+    store.set(
+      'aide:github',
+      JSON.stringify({
+        token: 'misplaced-scoped-token',
+        identity: { host: 'github.com' },
+      })
+    );
+
+    const out = await buildWhoamiOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
+
+    expect(out).toMatch(/aide login github --from-env/);
+    expect(out).not.toMatch(/override your stored keyring entry/);
+    expect(out).not.toContain('misplaced-scoped-token');
+  });
+
+  test('keeps the migration tip nonfatal when the keyring is unavailable', async () => {
+    Bun.env.GITHUB_TOKEN = 'ghp_env';
+    restoreSecrets();
+    restoreSecrets = installMockSecrets(store, 'get');
+
+    const out = await buildWhoamiOutput({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+    });
+
+    expect(out).toMatch(/aide login github --from-env/);
+    expect(out).not.toMatch(/override your stored keyring entry/);
+  });
 });

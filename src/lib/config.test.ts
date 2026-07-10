@@ -14,6 +14,7 @@ import {
   probeJiraConfig,
   probeAdoConfig,
   probeGithubConfig,
+  isKeyringCredentialValid,
 } from './config.js';
 import type { GitHubAuthProbe } from './gh-utils.js';
 import {
@@ -972,5 +973,114 @@ describe('probeGithubConfig', () => {
     if (status.kind === 'malformed') {
       expect(status.reason).toMatch(/aide login github/i);
     }
+  });
+});
+
+describe('isKeyringCredentialValid', () => {
+  let snap: Map<string, string | undefined>;
+  let store: Store;
+  let restoreSecrets: () => void;
+
+  beforeEach(() => {
+    snap = saveEnv(GITHUB_VARS);
+    store = new Map();
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
+    restoreSecrets = installMockSecrets(store);
+  });
+
+  afterEach(() => {
+    restoreEnv(snap);
+    restoreSecrets();
+  });
+
+  test('accepts a token-only GitHub payload from the legacy key', async () => {
+    store.set('aide:github', JSON.stringify({ token: 'legacy-token' }));
+
+    expect(await isKeyringCredentialValid('github')).toBe(true);
+  });
+
+  test('rejects a scoped GitHub identity payload from the legacy key', async () => {
+    store.set(
+      'aide:github',
+      JSON.stringify({
+        token: 'misplaced-scoped-token',
+        identity: { host: 'github.com' },
+      })
+    );
+
+    expect(await isKeyringCredentialValid('github')).toBe(false);
+  });
+
+  test('treats malformed JSON and schema-invalid payloads as invalid', async () => {
+    store.set('aide:github', '{not json');
+    expect(await isKeyringCredentialValid('github')).toBe(false);
+
+    store.set('aide:github', JSON.stringify({ wrongField: 'token' }));
+    expect(await isKeyringCredentialValid('github')).toBe(false);
+  });
+
+  test('returns false when the keyring is unavailable', async () => {
+    restoreSecrets();
+    restoreSecrets = installMockSecrets(store, 'get');
+
+    expect(await isKeyringCredentialValid('github')).toBe(false);
+  });
+
+  test('does not treat an active environment credential as a keyring entry', async () => {
+    Bun.env.GITHUB_TOKEN = 'environment-token';
+
+    expect(await isKeyringCredentialValid('github')).toBe(false);
+  });
+
+  test('uses the unscoped legacy readers for Jira and Azure DevOps', async () => {
+    store.set(
+      'aide:jira',
+      JSON.stringify({
+        url: 'https://example.atlassian.net',
+        email: 'dev@example.com',
+        apiToken: 'jira-token',
+      })
+    );
+    store.set(
+      'aide:ado',
+      JSON.stringify({
+        orgUrl: 'https://dev.azure.com/acme',
+        pat: 'ado-token',
+        authMethod: 'pat',
+      })
+    );
+
+    expect(await isKeyringCredentialValid('jira')).toBe(true);
+    expect(await isKeyringCredentialValid('ado')).toBe(true);
+  });
+
+  test('does not widen the unscoped check to scoped keys', async () => {
+    store.set(
+      'aide:auth:jira:host:example.atlassian.net:account:dev%40example.com',
+      JSON.stringify({
+        url: 'https://example.atlassian.net',
+        email: 'dev@example.com',
+        apiToken: 'jira-token',
+      })
+    );
+    store.set(
+      'aide:auth:azure-devops:host:dev.azure.com:org:acme',
+      JSON.stringify({
+        orgUrl: 'https://dev.azure.com/acme',
+        pat: 'ado-token',
+        authMethod: 'pat',
+      })
+    );
+    store.set(
+      'aide:auth:github:host:github.com',
+      JSON.stringify({
+        token: 'github-token',
+        identity: { host: 'github.com' },
+      })
+    );
+
+    expect(await isKeyringCredentialValid('jira')).toBe(false);
+    expect(await isKeyringCredentialValid('ado')).toBe(false);
+    expect(await isKeyringCredentialValid('github')).toBe(false);
   });
 });
