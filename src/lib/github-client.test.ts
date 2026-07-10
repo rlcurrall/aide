@@ -26,10 +26,12 @@ import {
   beforeEach,
   afterEach,
 } from 'bun:test';
+import { runInNewContext } from 'node:vm';
 
 import {
   GitHubClient,
   GitHubAuthError,
+  type SpawnResult,
   type SpawnSyncFn,
   type FetchFn,
 } from './github-client.js';
@@ -44,6 +46,19 @@ import {
   unavailableGitHubAuthProbe,
   type Store,
 } from './test-helpers.js';
+
+type IsAssignable<From, To> = From extends To ? true : false;
+type AssertFalse<Value extends false> = Value;
+
+// Compile-time-only contract: conversion hooks are not supported spawn output.
+export type SpawnOutputExcludesConversionObjects = {
+  stdout: AssertFalse<
+    IsAssignable<{ toString(): string }, SpawnResult['stdout']>
+  >;
+  stderr: AssertFalse<
+    IsAssignable<{ toString(): string }, SpawnResult['stderr']>
+  >;
+};
 
 const GITHUB_AUTH_VARS = [
   'GITHUB_TOKEN',
@@ -430,6 +445,7 @@ describe('GitHubClient.create() — missing sources', () => {
       '{malformed exact account payload'
     );
     const observed: Array<[string, string | undefined]> = [];
+    const spawn = makeSpawnStub('account-token');
 
     const client = await GitHubClient.create({
       scope: {
@@ -445,10 +461,14 @@ describe('GitHubClient.create() — missing sources', () => {
           account: request.account,
         };
       },
+      spawn: spawn.fn,
     });
 
     expect(client).toBeInstanceOf(GitHubClient);
     expect(observed).toEqual([['github.com', 'octocat']]);
+    expect(spawn.calls).toEqual([
+      ['gh', 'auth', 'token', '--hostname', 'github.com', '--user', 'octocat'],
+    ]);
   });
 
   test('uses only an identity-matching exact account payload', async () => {
@@ -584,27 +604,12 @@ describeIfKeyring(
 // ---------------------------------------------------------------------------
 
 /** Records spawned argv and returns a canned stdout. */
-function makeSpawnStub(stdout = '{}'): {
-  fn: SpawnSyncFn;
-  calls: string[][];
-  options: Array<Parameters<SpawnSyncFn>[1]>;
-} {
-  const calls: string[][] = [];
-  const options: Array<Parameters<SpawnSyncFn>[1]> = [];
-  const fn: SpawnSyncFn = (cmd, spawnOptions) => {
-    calls.push(cmd);
-    options.push(spawnOptions);
-    return {
-      exitCode: 0,
-      stdout: { toString: () => stdout },
-      stderr: { toString: () => '' },
-    };
-  };
-  return { fn, calls, options };
+function makeSpawnStub(stdout = '{}') {
+  return makeSpawnRecorder(() => successfulSpawnResult(Buffer.from(stdout)));
 }
 
-/** Records request URLs and returns a canned JSON Response for each call. */
-function makeFetchStub(body: unknown): {
+/** Records request URLs and returns canned or URL-dependent JSON. */
+function makeFetchStub(body: unknown | ((url: string) => unknown)): {
   fn: FetchFn;
   urls: string[];
   authorizations: Array<string | null>;
@@ -614,10 +619,12 @@ function makeFetchStub(body: unknown): {
   const authorizations: Array<string | null> = [];
   const redirects: Array<RequestInit['redirect']> = [];
   const fn = (async (input: string | URL | Request, init?: RequestInit) => {
-    urls.push(String(input));
+    const url = String(input);
+    urls.push(url);
     authorizations.push(new Headers(init?.headers).get('Authorization'));
     redirects.push(init?.redirect);
-    return new Response(JSON.stringify(body), {
+    const responseBody = typeof body === 'function' ? body(url) : body;
+    return new Response(JSON.stringify(responseBody), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -635,8 +642,625 @@ function flagValue(
   return i === -1 ? undefined : argv[i + 1];
 }
 
+const PINNED_SCOPE = {
+  providerId: 'github',
+  host: 'github.com',
+  account: 'octocat',
+} as const;
+const PINNED_FALLBACK_TOKEN = 'fallback-account-token';
+const SANITIZED_GH_ENV = [
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
+  'GH_HOST',
+] as const;
+
+function pinnedTokenCommand(host = 'github.com', account = 'octocat') {
+  return ['gh', 'auth', 'token', '--hostname', host, '--user', account];
+}
+
+function makeSpawnRecorder(
+  implementation: (
+    cmd: string[],
+    options: Parameters<SpawnSyncFn>[1]
+  ) => unknown
+): {
+  fn: SpawnSyncFn;
+  calls: string[][];
+  options: Array<Parameters<SpawnSyncFn>[1]>;
+} {
+  const calls: string[][] = [];
+  const options: Array<Parameters<SpawnSyncFn>[1]> = [];
+  const fn = ((cmd: string[], spawnOptions: Parameters<SpawnSyncFn>[1]) => {
+    calls.push(cmd);
+    options.push(spawnOptions);
+    return implementation(cmd, spawnOptions);
+  }) as SpawnSyncFn;
+  return { fn, calls, options };
+}
+
+function successfulSpawnResult(
+  stdout: SpawnResult['stdout'],
+  stderr = ''
+): SpawnResult {
+  return { exitCode: 0, stdout, stderr: Buffer.from(stderr) };
+}
+
+function expectPinnedTokenSpawn(
+  spawn: ReturnType<typeof makeSpawnRecorder>,
+  host = 'github.com',
+  account = 'octocat'
+): void {
+  expect(spawn.calls).toEqual([pinnedTokenCommand(host, account)]);
+  expect(spawn.options).toHaveLength(1);
+  expect(spawn.options[0]).toMatchObject({ stdout: 'pipe', stderr: 'pipe' });
+  expect(
+    Object.fromEntries(
+      SANITIZED_GH_ENV.map((name) => [name, spawn.options[0]?.env?.[name]])
+    )
+  ).toEqual(
+    Object.fromEntries(SANITIZED_GH_ENV.map((name) => [name, undefined]))
+  );
+}
+
+function createPinnedClient(spawn: SpawnSyncFn, fetch: FetchFn) {
+  return GitHubClient.create({
+    scope: PINNED_SCOPE,
+    ghAuthProbe: authenticatedGitHubAuthProbe,
+    spawn,
+    fetch,
+  });
+}
+
+describe('GitHubClient transport — account-pinned gh CLI', () => {
+  let envSnap: ReturnType<typeof clearGhEnv>;
+  let store: Store;
+  let restoreSecrets: () => void;
+
+  beforeEach(() => {
+    envSnap = clearGhEnv();
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = MOCK_SERVICE;
+    Object.assign(Bun.env, {
+      GH_TOKEN: 'ambient-gh-token',
+      GITHUB_TOKEN: 'ambient-github-token',
+      GH_ENTERPRISE_TOKEN: 'ambient-enterprise-token',
+      GITHUB_ENTERPRISE_TOKEN: 'ambient-enterprise-alias',
+      GH_HOST: 'ambient.example.com',
+    });
+    store = new Map();
+    restoreSecrets = installMockSecrets(store);
+  });
+
+  afterEach(() => {
+    restoreGhEnv(envSnap);
+    restoreSecrets();
+  });
+
+  async function expectPinnedSpawnFailure(
+    result: () => unknown,
+    secrets: string[] = []
+  ): Promise<void> {
+    store.set(
+      `${MOCK_SERVICE}:auth:github:host:github.com:account:octocat`,
+      JSON.stringify({
+        token: PINNED_FALLBACK_TOKEN,
+        identity: { host: 'github.com', account: 'octocat' },
+      })
+    );
+    const spawn = makeSpawnRecorder(result);
+    const fetch = makeFetchStub({ number: 5 });
+    const error = await createPinnedClient(spawn.fn, fetch.fn).then(
+      () => undefined,
+      (caught: unknown) => caught
+    );
+
+    expect(error).toBeInstanceOf(GitHubAuthError);
+    expect(error).toMatchObject({
+      name: 'GitHubAuthError',
+      code: 'malformed-credential',
+      host: 'github.com',
+      account: 'octocat',
+    });
+    for (const secret of [PINNED_FALLBACK_TOKEN, ...secrets]) {
+      expect(String(error)).not.toContain(secret);
+    }
+    expectPinnedTokenSpawn(spawn);
+    expect(fetch.urls).toEqual([]);
+  }
+
+  async function expectPinnedStdoutAccepted(
+    stdout: SpawnResult['stdout'],
+    token: string
+  ): Promise<void> {
+    const spawn = makeSpawnRecorder(() => successfulSpawnResult(stdout));
+    const fetch = makeFetchStub({ number: 5 });
+    const client = await createPinnedClient(spawn.fn, fetch.fn);
+    await client.getPullRequest('acme', 'widgets', 5);
+
+    expectPinnedTokenSpawn(spawn);
+    expect(fetch.urls).toEqual([
+      'https://api.github.com/repos/acme/widgets/pulls/5',
+    ]);
+    expect(fetch.authorizations).toEqual([`Bearer ${token}`]);
+  }
+
+  function withHostilePrototype(
+    stdout: Uint8Array,
+    secret: string
+  ): { stdout: Uint8Array; hookCalls: () => number } {
+    let calls = 0;
+    Object.setPrototypeOf(
+      stdout,
+      new Proxy(Object.getPrototypeOf(stdout), {
+        get() {
+          calls += 1;
+          throw new Error(`prototype get exposed ${secret}`);
+        },
+        getPrototypeOf() {
+          calls += 1;
+          throw new Error(`prototype traversal exposed ${secret}`);
+        },
+      })
+    );
+    return { stdout, hookCalls: () => calls };
+  }
+
+  test.each([
+    {
+      name: 'github.com',
+      requestedHost: 'GITHUB.COM',
+      canonicalHost: 'github.com',
+      restBase: 'https://api.github.com',
+      graphqlUrl: 'https://api.github.com/graphql',
+    },
+    {
+      name: 'a custom enterprise host',
+      requestedHost: 'GITHUB.EXAMPLE.COM',
+      canonicalHost: 'github.example.com',
+      restBase: 'https://github.example.com/api/v3',
+      graphqlUrl: 'https://github.example.com/api/graphql',
+    },
+  ])(
+    'pins one canonical account token across REST, pagination, and GraphQL on $name',
+    async ({ requestedHost, canonicalHost, restBase, graphqlUrl }) => {
+      const token = `Ab0-._~+/${canonicalHost.replaceAll('.', '-')}==`;
+      let activeAccount = 'octocat';
+      let probeCalls = 0;
+      const spawn = makeSpawnRecorder(() =>
+        successfulSpawnResult(Buffer.from(` \t${token}\t\r\n`))
+      );
+      const fetch = makeFetchStub((url: string) =>
+        url === graphqlUrl
+          ? { data: {} }
+          : url.includes('/issues/5/comments')
+            ? []
+            : { number: 5, node_id: 'pr-node-id' }
+      );
+      const client = await GitHubClient.create({
+        scope: {
+          providerId: 'github',
+          host: requestedHost,
+          account: 'OctoCat',
+        },
+        ghAuthProbe: (request) => {
+          probeCalls += 1;
+          return activeAccount === request.account
+            ? {
+                kind: 'authenticated',
+                host: request.host,
+                account: activeAccount,
+              }
+            : {
+                kind: 'account-mismatch',
+                code: 'account-mismatch',
+                host: request.host,
+                requestedAccount: request.account!,
+                activeAccount,
+                reason: 'active account changed',
+              };
+        },
+        spawn: spawn.fn,
+        fetch: fetch.fn,
+      });
+
+      activeAccount = 'hubot';
+      await client.getPullRequest('acme', 'widgets', 5);
+      await client.getIssueComments('acme', 'widgets', 5);
+      await client.publishDraftPR('acme', 'widgets', 5);
+
+      expect(probeCalls).toBe(1);
+      expectPinnedTokenSpawn(spawn, canonicalHost);
+      expect(fetch.urls).toEqual([
+        `${restBase}/repos/acme/widgets/pulls/5`,
+        `${restBase}/repos/acme/widgets/issues/5/comments`,
+        `${restBase}/repos/acme/widgets/pulls/5`,
+        graphqlUrl,
+      ]);
+      expect(fetch.authorizations).toEqual(Array(4).fill(`Bearer ${token}`));
+    }
+  );
+
+  test('rejects inherited spawn result fields', async () => {
+    const secret = 'inherited-result-secret';
+    await expectPinnedSpawnFailure(
+      () => Object.create({ exitCode: 0, stdout: Buffer.from(secret) }),
+      [secret]
+    );
+  });
+
+  test.each(['exitCode', 'stdout'] as const)(
+    'rejects accessor-backed result %s without invoking the getter',
+    async (field) => {
+      let getterCalls = 0;
+      const secret = 'accessor-result-secret';
+      const result = { exitCode: 0, stdout: Buffer.from(secret) };
+      Object.defineProperty(result, field, {
+        enumerable: true,
+        get() {
+          getterCalls += 1;
+          return field === 'exitCode' ? 0 : Buffer.from(secret);
+        },
+      });
+      await expectPinnedSpawnFailure(() => result, [secret]);
+      expect(getterCalls).toBe(0);
+    }
+  );
+
+  test.each([
+    ['null result', () => null, []],
+    ['undefined result', () => undefined, []],
+    ['numeric result', () => 0, []],
+    [
+      'string result',
+      () => 'primitive-result-secret',
+      ['primitive-result-secret'],
+    ],
+    ['boolean result', () => false, []],
+    ['array result', () => [], []],
+    ['missing fields', () => ({}), []],
+    [
+      'missing exitCode',
+      () => ({ stdout: Buffer.from('missing-exit-secret') }),
+      ['missing-exit-secret'],
+    ],
+    ['missing stdout', () => ({ exitCode: 0 }), []],
+    [
+      'string exitCode',
+      () => ({ exitCode: '0', stdout: Buffer.from('wrong-exit-secret') }),
+      ['wrong-exit-secret'],
+    ],
+    ['object stdout', () => ({ exitCode: 0, stdout: {} }), []],
+    ['null stdout', () => ({ exitCode: 0, stdout: null }), []],
+    ['numeric stdout', () => ({ exitCode: 0, stdout: 42 }), []],
+    [
+      'Uint16Array stdout',
+      () => ({ exitCode: 0, stdout: new Uint16Array(1) }),
+      [],
+    ],
+    [
+      'DataView stdout',
+      () => ({ exitCode: 0, stdout: new DataView(new ArrayBuffer(1)) }),
+      [],
+    ],
+    [
+      'detached Uint8Array stdout',
+      () => {
+        const stdout = new TextEncoder().encode('detached-secret');
+        const buffer = stdout.buffer as ArrayBuffer;
+        structuredClone(buffer, { transfer: [buffer] });
+        return successfulSpawnResult(stdout);
+      },
+      ['detached-secret'],
+    ],
+    ['empty token output', () => successfulSpawnResult('  \n'), []],
+    [
+      'nonzero exit',
+      () => ({
+        exitCode: 1,
+        stdout: Buffer.from('pinned-secret'),
+        stderr: Buffer.from('failure mentioning pinned-secret'),
+      }),
+      ['pinned-secret'],
+    ],
+    [
+      'thrown spawn',
+      () => {
+        throw new Error('spawn failure mentioning pinned-secret');
+      },
+      ['pinned-secret'],
+    ],
+  ] as Array<[string, () => unknown, string[]]>)(
+    'fails typed and closed for %s',
+    async (_name, result, secrets) => {
+      await expectPinnedSpawnFailure(result, secrets);
+    }
+  );
+
+  test.each([
+    ['proxy spawn result', 'result', 'proxy-result-secret'],
+    ['proxy stdout', 'stdout', 'proxy-stdout-secret'],
+    [
+      'spoofed stdout with proxy prototype',
+      'prototype',
+      'spoofed-prototype-secret',
+    ],
+  ] as Array<[string, 'result' | 'stdout' | 'prototype', string]>)(
+    'rejects %s without invoking hooks',
+    async (_name, placement, secret) => {
+      let calls = 0;
+      const fail = () => {
+        calls += 1;
+        throw new Error(`proxy trap exposed ${secret}`);
+      };
+      const target =
+        placement === 'result'
+          ? { exitCode: 0, stdout: Buffer.from(secret) }
+          : placement === 'stdout'
+            ? Buffer.from(secret)
+            : Object.create(null);
+      const proxy = new Proxy(target, {
+        get: fail,
+        getOwnPropertyDescriptor: fail,
+        getPrototypeOf: fail,
+      });
+      const stdout = placement === 'prototype' ? Object.create(proxy) : proxy;
+      if (placement === 'prototype') {
+        Object.defineProperty(stdout, 'secret', { value: secret });
+      }
+      const result = placement === 'result' ? proxy : { exitCode: 0, stdout };
+
+      await expectPinnedSpawnFailure(() => result, [secret]);
+      expect(calls).toBe(0);
+    }
+  );
+
+  test('rejects revoked proxy spawn results', async () => {
+    const secret = 'revoked-proxy-secret';
+    const revocable = Proxy.revocable(
+      { exitCode: 0, stdout: Buffer.from(secret) },
+      {}
+    );
+    revocable.revoke();
+    await expectPinnedSpawnFailure(() => revocable.proxy, [secret]);
+  });
+
+  test.each([
+    {
+      name: 'primitive string',
+      make: (output: string) => ({ stdout: output }),
+    },
+    {
+      name: 'Buffer',
+      make: (output: string) => ({ stdout: Buffer.from(output) }),
+    },
+    {
+      name: 'raw Uint8Array',
+      make: (output: string) => ({ stdout: new TextEncoder().encode(output) }),
+    },
+    {
+      name: 'offset Uint8Array view',
+      make(output: string) {
+        const bytes = new TextEncoder().encode(`xx${output}xx`);
+        return { stdout: bytes.subarray(2, -2) };
+      },
+    },
+    {
+      name: 'cross-realm Uint8Array',
+      make(output: string) {
+        const bytes = [...new TextEncoder().encode(output)];
+        return {
+          stdout: runInNewContext('Uint8Array.from(bytes)', {
+            bytes,
+          }) as Uint8Array,
+        };
+      },
+    },
+    {
+      name: 'SharedArrayBuffer-backed Uint8Array',
+      make(output: string) {
+        const bytes = new TextEncoder().encode(output);
+        const stdout = new Uint8Array(new SharedArrayBuffer(bytes.length));
+        stdout.set(bytes);
+        return { stdout };
+      },
+    },
+    {
+      name: 'Buffer with proxy prototype',
+      make: (output: string) =>
+        withHostilePrototype(Buffer.from(output), output),
+    },
+    {
+      name: 'Uint8Array with proxy prototype',
+      make: (output: string) =>
+        withHostilePrototype(new TextEncoder().encode(output), output),
+    },
+  ] as Array<{
+    name: string;
+    make(output: string): {
+      stdout: SpawnResult['stdout'];
+      hookCalls?: () => number;
+    };
+  }>)('accepts and brand-decodes $name', async ({ make }) => {
+    const token = 'Ab0-._~+/==';
+    const testCase = make(` \t${token}\t\r\n`);
+    await expectPinnedStdoutAccepted(testCase.stdout, token);
+    expect(testCase.hookCalls?.() ?? 0).toBe(0);
+  });
+
+  test('does not consult Uint8Array Symbol.hasInstance', async () => {
+    const token = 'hostile-has-instance-token';
+    const stdout = new TextEncoder().encode(`${token}\n`);
+    const previous = Object.getOwnPropertyDescriptor(
+      Uint8Array,
+      Symbol.hasInstance
+    );
+    let hookCalls = 0;
+    let observedError: unknown;
+    try {
+      Object.defineProperty(Uint8Array, Symbol.hasInstance, {
+        configurable: true,
+        value() {
+          hookCalls += 1;
+          throw new Error(`hasInstance exposed ${token}`);
+        },
+      });
+      try {
+        await expectPinnedStdoutAccepted(stdout, token);
+      } catch (error) {
+        observedError = error;
+      }
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(Uint8Array, Symbol.hasInstance);
+      } else {
+        Object.defineProperty(Uint8Array, Symbol.hasInstance, previous);
+      }
+    }
+    expect(hookCalls).toBe(0);
+    if (observedError !== undefined) throw observedError;
+  });
+
+  test.each(['accessor', 'throwing method'] as const)(
+    'rejects nonnative stdout with a %s toString without invoking it',
+    async (shape) => {
+      const secret = `hostile-${shape.replace(' ', '-')}-secret`;
+      let calls = 0;
+      const stdout = {};
+      Object.defineProperty(stdout, 'toString', {
+        enumerable: true,
+        [shape === 'accessor' ? 'get' : 'value']() {
+          calls += 1;
+          throw new Error(`toString exposed ${secret}`);
+        },
+      });
+      await expectPinnedSpawnFailure(() => ({ exitCode: 0, stdout }), [secret]);
+      expect(calls).toBe(0);
+    }
+  );
+
+  test('decodes Buffer stdout without consulting its toString accessor', async () => {
+    const token = 'bun-buffer-token';
+    let getterCalls = 0;
+    const stdout = Buffer.from(`${token}\n`);
+    Object.defineProperty(stdout, 'toString', {
+      get() {
+        getterCalls += 1;
+        throw new Error(`toString exposed ${token}`);
+      },
+    });
+    await expectPinnedStdoutAccepted(stdout, token);
+    expect(getterCalls).toBe(0);
+  });
+
+  test.each([
+    ['nonzero exit with own stdout data', 7, false],
+    ['null exit with accessor output', null, true],
+  ] as Array<[string, number | null, boolean]>)(
+    'checks %s before reading output',
+    async (_name, exitCode, accessorStdout) => {
+      const secrets = [
+        `${String(exitCode)}-exit-stdout-secret`,
+        `${String(exitCode)}-exit-stderr-secret`,
+      ];
+      let stdoutCalls = 0;
+      let stderrCalls = 0;
+      const result = { exitCode } as unknown as SpawnResult;
+      const stdout = Buffer.from(secrets[0]!);
+      if (accessorStdout) {
+        Object.defineProperty(result, 'stdout', {
+          get() {
+            stdoutCalls += 1;
+            return stdout;
+          },
+        });
+      } else {
+        Object.defineProperty(stdout, 'toString', {
+          get() {
+            stdoutCalls += 1;
+            throw new Error(`stdout exposed ${secrets[0]}`);
+          },
+        });
+        Object.defineProperty(result, 'stdout', { value: stdout });
+      }
+      Object.defineProperty(result, 'stderr', {
+        get() {
+          stderrCalls += 1;
+          throw new Error(`stderr exposed ${secrets[1]}`);
+        },
+      });
+
+      await expectPinnedSpawnFailure(() => result, secrets);
+      expect([stdoutCalls, stderrCalls]).toEqual([0, 0]);
+    }
+  );
+
+  test.each([
+    ['LF-separated values', 'pinned-secret\nsecond-secret'],
+    ['CRLF-separated values', 'pinned-secret\r\nsecond-secret'],
+    ['a NUL byte', 'pinned-secret\0suffix'],
+    ['an internal space', 'pinned secret'],
+    ['an internal tab', 'pinned\tsecret'],
+    ['an internal ASCII control', 'pinned\x1fsecret'],
+    ['non-ASCII characters', 'pinned-s\u00e9cret'],
+    ['invalid bearer punctuation', 'pinned:secret'],
+    ['misplaced bearer padding', 'pinned=secret'],
+    ['padding without a value', '==='],
+    ['multiple trailing line endings', 'pinned-secret\n\n'],
+  ])('rejects RFC 6750 token output containing %s', async (_name, output) => {
+    const stderr = 'stderr-process-secret';
+    await expectPinnedSpawnFailure(
+      () => successfulSpawnResult(Buffer.from(output), stderr),
+      [output, stderr]
+    );
+  });
+});
+
 describe('GitHubClient transport — gh CLI (spawn stub)', () => {
-  test('passes --hostname github.com by default and hits the REST endpoint', async () => {
+  const stdoutFlows = [
+    {
+      name: 'REST',
+      outputs: ['{"number":5,"node_id":"abc"}'],
+      expected: { number: 5, node_id: 'abc' },
+      invoke: (client: GitHubClient) =>
+        client.getPullRequest('acme', 'widgets', 5),
+    },
+    {
+      name: 'paginated REST',
+      outputs: ['[]'],
+      expected: [],
+      invoke: (client: GitHubClient) =>
+        client.getIssueComments('acme', 'widgets', 5),
+    },
+    {
+      name: 'GraphQL',
+      outputs: ['{"node_id":"abc"}', '{"data":{}}'],
+      expected: undefined,
+      invoke: (client: GitHubClient) =>
+        client.publishDraftPR('acme', 'widgets', 5),
+    },
+  ];
+  const stdoutFailureFlows = stdoutFlows.flatMap((flow) =>
+    [
+      { ...flow, failure: 'malformed UTF-8', exitCode: 0 as const },
+      { ...flow, failure: 'null exit', exitCode: null },
+      { ...flow, failure: 'nonzero exit', exitCode: 7 as const },
+    ].map((testCase) => ({
+      ...testCase,
+      caseName: `${testCase.failure} for ${flow.name}`,
+    }))
+  );
+
+  async function clientForSpawnResults(results: SpawnResult[]) {
+    let calls = 0;
+    const client = await GitHubClient.create({
+      ghAuthProbe: authenticatedGitHubAuthProbe,
+      spawn: (() => results[calls++]!) as SpawnSyncFn,
+    });
+    return { client, callCount: () => calls };
+  }
+
+  test('host-only auth skips gh auth token and continues through gh api', async () => {
     const spawn = makeSpawnStub('{"node_id":"abc"}');
     const client = await GitHubClient.create({
       ghAuthProbe: authenticatedGitHubAuthProbe,
@@ -646,9 +1270,50 @@ describe('GitHubClient transport — gh CLI (spawn stub)', () => {
     await client.getPullRequest('acme', 'widgets', 5);
 
     expect(spawn.calls).toHaveLength(1);
+    expect(spawn.calls[0]?.slice(0, 3)).toEqual(['gh', 'api', '-X']);
+    expect(spawn.calls[0]).not.toContain('token');
     expect(flagValue(spawn.calls[0], '--hostname')).toBe('github.com');
     expect(spawn.calls[0]).toContain('/repos/acme/widgets/pulls/5');
   });
+
+  test.each(stdoutFlows)(
+    'decodes raw Uint8Array stdout for $name',
+    async ({ outputs, expected, invoke }) => {
+      const results = outputs.map((output) =>
+        successfulSpawnResult(new TextEncoder().encode(output))
+      );
+      const { client, callCount } = await clientForSpawnResults(results);
+      await expect(invoke(client) as Promise<unknown>).resolves.toEqual(
+        expected
+      );
+      expect(callCount()).toBe(outputs.length);
+    }
+  );
+
+  test.each(stdoutFailureFlows)(
+    'rejects/checks $caseName',
+    async ({ name, outputs, exitCode, invoke }) => {
+      const message = `${String(exitCode)} exit from ${name}`;
+      const results = outputs
+        .slice(0, -1)
+        .map((output) =>
+          successfulSpawnResult(new TextEncoder().encode(output))
+        );
+      results.push({
+        exitCode,
+        stdout: Uint8Array.of(0xc3, 0x28),
+        stderr: Buffer.from(message),
+      });
+      const { client, callCount } = await clientForSpawnResults(results);
+      const rejection = expect(invoke(client)).rejects;
+      if (exitCode === 0) {
+        await rejection.toThrow();
+      } else {
+        await rejection.toThrow(message);
+      }
+      expect(callCount()).toBe(outputs.length);
+    }
+  );
 
   test('passes the ghe.com host on the --hostname flag', async () => {
     const spawn = makeSpawnStub('{"node_id":"abc"}');

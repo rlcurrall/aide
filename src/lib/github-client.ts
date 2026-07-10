@@ -7,7 +7,7 @@
  * credential source.
  */
 
-import { isProxy } from 'node:util/types';
+import { isProxy, isUint8Array } from 'node:util/types';
 
 import { spawnSync } from 'bun';
 import type { AuthStoreScope } from './auth-store.js';
@@ -37,12 +37,14 @@ import { githubApiBase, githubGraphqlEndpoint } from './github-utils.js';
 type TransportMode = 'gh-cli' | 'token';
 
 /**
- * Minimal subset of `bun`'s `spawnSync` result this client relies on.
+ * Supported producer shape for the subset of `bun`'s `spawnSync` result this
+ * client relies on. Bun returns buffers for piped output; injected spawns may
+ * also return a string or raw byte array for stdout.
  */
 export interface SpawnResult {
   exitCode: number | null;
-  stdout: { toString(): string };
-  stderr: { toString(): string };
+  stdout: string | Uint8Array;
+  stderr: Buffer;
 }
 
 /**
@@ -245,6 +247,104 @@ export class GitHubAuthError extends Error {
   }
 }
 
+const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+
+/** Decode only supported spawn stdout values as strict UTF-8. */
+function decodeSpawnStdout(stdout: unknown): string {
+  if (typeof stdout === 'string') return stdout;
+  if (
+    typeof stdout !== 'object' ||
+    stdout === null ||
+    isProxy(stdout) ||
+    !isUint8Array(stdout)
+  ) {
+    throw new TypeError('Unsupported spawn stdout');
+  }
+  return utf8Decoder.decode(stdout);
+}
+
+/**
+ * Parse the single credential line printed by `gh auth token`.
+ *
+ * RFC 6750 section 2.1 defines bearer credentials as `b64token`: one or more
+ * ASCII letters, digits, or `-._~+/`, followed by optional `=` padding. The
+ * CLI may surround that value with horizontal line whitespace and terminate
+ * it with one LF or CRLF, but any additional line or byte is malformed.
+ */
+function parseGhTokenOutput(output: string): string | null {
+  const match =
+    /^[ \t]*([-A-Za-z0-9._~+/]+={0,})[ \t]*(?:\r?\n)?(?![\s\S])/.exec(output);
+  return match?.[1] ?? null;
+}
+
+/** Resolve one exact gh account token without exposing process output. */
+function resolveGhAccountToken(
+  host: string,
+  account: string,
+  spawn: SpawnSyncFn
+): string {
+  const failure = () =>
+    new GitHubAuthError(
+      host,
+      'malformed-credential',
+      `Failed to obtain authentication for GitHub account '${account}' on '${host}' from gh.`,
+      account
+    );
+
+  let result: unknown;
+  try {
+    result = spawn(
+      ['gh', 'auth', 'token', '--hostname', host, '--user', account],
+      {
+        env: githubCliEnvironment(),
+        stdout: 'pipe',
+        stderr: 'pipe',
+      }
+    );
+  } catch {
+    throw failure();
+  }
+
+  try {
+    if (
+      typeof result !== 'object' ||
+      result === null ||
+      isProxy(result) ||
+      Array.isArray(result)
+    ) {
+      throw failure();
+    }
+
+    const exitCodeProperty = Object.getOwnPropertyDescriptor(
+      result,
+      'exitCode'
+    );
+    if (
+      exitCodeProperty === undefined ||
+      !Object.hasOwn(exitCodeProperty, 'value') ||
+      typeof exitCodeProperty.value !== 'number' ||
+      exitCodeProperty.value !== 0
+    ) {
+      throw failure();
+    }
+
+    const stdoutProperty = Object.getOwnPropertyDescriptor(result, 'stdout');
+    if (
+      stdoutProperty === undefined ||
+      !Object.hasOwn(stdoutProperty, 'value')
+    ) {
+      throw failure();
+    }
+
+    const output = decodeSpawnStdout(stdoutProperty.value);
+    const token = parseGhTokenOutput(output);
+    if (token === null) throw failure();
+    return token;
+  } catch {
+    throw failure();
+  }
+}
+
 export class GitHubClient {
   private mode: TransportMode;
   private token?: string;
@@ -314,8 +414,17 @@ export class GitHubClient {
       opts as unknown as GitHubCredentialResolverOptions
     );
     switch (credential.kind) {
-      case 'gh-cli':
+      case 'gh-cli': {
+        if (credential.account !== undefined) {
+          const token = resolveGhAccountToken(
+            credential.host,
+            credential.account,
+            deps.spawn
+          );
+          return new GitHubClient('token', credential.host, token, deps);
+        }
         return new GitHubClient('gh-cli', host, undefined, deps);
+      }
       case 'env':
         return new GitHubClient(
           'token',
@@ -392,7 +501,7 @@ export class GitHubClient {
       throw new Error(`GitHub API error: ${stderr}`);
     }
 
-    const stdout = result.stdout.toString().trim();
+    const stdout = decodeSpawnStdout(result.stdout).trim();
     if (!stdout) {
       return undefined as T;
     }
@@ -429,7 +538,7 @@ export class GitHubClient {
       throw new Error(`GitHub API error: ${stderr}`);
     }
 
-    const stdout = result.stdout.toString().trim();
+    const stdout = decodeSpawnStdout(result.stdout).trim();
     if (!stdout) {
       return [];
     }
@@ -687,7 +796,7 @@ export class GitHubClient {
         throw new Error(`${errorPrefix}: ${result.stderr.toString().trim()}`);
       }
       // Check for GraphQL-level errors in stdout
-      const stdout = result.stdout.toString().trim();
+      const stdout = decodeSpawnStdout(result.stdout).trim();
       if (stdout) {
         const parsed = JSON.parse(stdout) as {
           errors?: Array<{ message: string }>;
