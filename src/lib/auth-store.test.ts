@@ -1,30 +1,81 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { beforeEach, describe, expect, test } from 'bun:test';
 import { Effect } from 'effect';
 
 import {
   authSecretCandidates,
   authSecretTarget,
-  deleteAuthSecret,
+  deleteAuthSecretEffect as deleteAuthSecretCore,
   legacyAuthSecretName,
-  listAuthSecrets,
+  listAuthSecretsEffect as listAuthSecretsCore,
   normalizeAuthProviderId,
   normalizeAuthStoreScope,
-  resolveAuthSecret,
-  resolveAuthSecretPromise,
+  resolveAuthSecretEffect as resolveAuthSecretCore,
   scopedAuthSecretName,
-  writeAuthSecret,
+  writeAuthSecretEffect as writeAuthSecretCore,
 } from './auth-store.js';
-import { KeyringUnavailableError } from './secrets.js';
-import { installMockSecrets, type Store } from './test-helpers.js';
+import { KeyringService, KeyringUnavailableError } from './auth-keyring.js';
+import {
+  makeTestKeyring,
+  type TestKeyring,
+} from './auth-keyring.test-helper.js';
 
 describe('auth-store key construction', () => {
   test('normalizes built-in provider ids and keeps custom ids stable', () => {
     expect(normalizeAuthProviderId(' jira ')).toBe('jira');
     expect(normalizeAuthProviderId('ADO')).toBe('azure-devops');
+    expect(normalizeAuthProviderId('  aDo  ')).toBe('azure-devops');
     expect(normalizeAuthProviderId('Azure-DevOps')).toBe('azure-devops');
+    expect(normalizeAuthProviderId(' azure-DEVOPS ')).toBe('azure-devops');
     expect(normalizeAuthProviderId('GitHub')).toBe('github');
     expect(normalizeAuthProviderId('custom-provider')).toBe('custom-provider');
+    expect(normalizeAuthProviderId('Acme.Auth_v2')).toBe('acme.auth_v2');
     expect(normalizeAuthProviderId('   ')).toBeUndefined();
+  });
+
+  test('rejects prototype names, pathological ids, and non-string runtime values', () => {
+    const invalidValues: readonly unknown[] = [
+      'constructor',
+      '__proto__',
+      'toString',
+      'toLocaleString',
+      'valueOf',
+      'hasOwnProperty',
+      'isPrototypeOf',
+      'propertyIsEnumerable',
+      'prototype',
+      '../provider',
+      'provider/name',
+      'provider:name',
+      'provider\u0000name',
+      '-provider',
+      'provider-',
+      'p'.repeat(65),
+      undefined,
+      null,
+      42,
+      true,
+      {},
+      [],
+      Symbol('provider'),
+      'K',
+      'githubK',
+      'Ｇithub',
+      '\u00a0github',
+      'github\u00a0',
+    ];
+
+    for (const value of invalidValues) {
+      expect(
+        normalizeAuthProviderId(
+          value as unknown as Parameters<typeof normalizeAuthProviderId>[0]
+        )
+      ).toBeUndefined();
+    }
+  });
+
+  test('trims ASCII whitespace without laundering non-ASCII provider ids', () => {
+    expect(normalizeAuthProviderId(' \tAcme.Auth_v2\r\n')).toBe('acme.auth_v2');
+    expect(normalizeAuthProviderId(' \tADO\r\n')).toBe('azure-devops');
   });
 
   test('maps built-in providers to legacy secret names', () => {
@@ -384,25 +435,38 @@ describe('auth-store key construction', () => {
 });
 
 describe('auth-store keyring helpers', () => {
-  let store: Store;
-  let restoreSecrets: () => void;
-  let previousServiceOverride: string | undefined;
+  let store: Map<string, string>;
+  let keyring: TestKeyring;
 
   beforeEach(() => {
-    previousServiceOverride = Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
-    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
     store = new Map();
-    restoreSecrets = installMockSecrets(store);
+    keyring = makeTestKeyring(store);
   });
 
-  afterEach(() => {
-    restoreSecrets();
-    if (previousServiceOverride === undefined) {
-      delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
-    } else {
-      Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = previousServiceOverride;
-    }
-  });
+  function provideKeyring<A, E>(
+    effect: Effect.Effect<A, E, KeyringService>
+  ): Effect.Effect<A, E> {
+    return effect.pipe(Effect.provide(keyring.layer));
+  }
+
+  const deleteAuthSecret = (...args: Parameters<typeof deleteAuthSecretCore>) =>
+    provideKeyring(deleteAuthSecretCore(...args));
+  const listAuthSecrets = (...args: Parameters<typeof listAuthSecretsCore>) =>
+    provideKeyring(listAuthSecretsCore(...args));
+  const resolveAuthSecret = (
+    ...args: Parameters<typeof resolveAuthSecretCore>
+  ) => provideKeyring(resolveAuthSecretCore(...args));
+  const writeAuthSecret = (...args: Parameters<typeof writeAuthSecretCore>) =>
+    provideKeyring(writeAuthSecretCore(...args));
+  const resolveAuthSecretPromise = async (
+    ...args: Parameters<typeof resolveAuthSecretCore>
+  ) => {
+    const result = await Effect.runPromise(
+      Effect.either(resolveAuthSecret(...args))
+    );
+    if (result._tag === 'Left') throw result.left;
+    return result.right;
+  };
 
   function stored(name: string): string | undefined {
     return store.get(`aide:${name}`);
@@ -481,18 +545,14 @@ describe('auth-store keyring helpers', () => {
     });
   });
 
-  test('Promise auth resolution preserves typed keyring failures', async () => {
-    const restoreFailure = installMockSecrets(store, 'get');
-    try {
-      await expect(
-        resolveAuthSecretPromise('azure-devops', {
-          host: 'dev.azure.com',
-          org: 'acme',
-        })
-      ).rejects.toBeInstanceOf(KeyringUnavailableError);
-    } finally {
-      restoreFailure();
-    }
+  test('service-provided auth resolution preserves typed keyring failures', async () => {
+    keyring.replace({ fail: (call) => call.operation === 'get' });
+    await expect(
+      resolveAuthSecretPromise('azure-devops', {
+        host: 'dev.azure.com',
+        org: 'acme',
+      })
+    ).rejects.toBeInstanceOf(KeyringUnavailableError);
   });
 
   test('invalid explicit Azure DevOps scopes cannot access or mutate the legacy secret', async () => {
@@ -507,12 +567,12 @@ describe('auth-store keyring helpers', () => {
     ];
 
     for (const scope of invalidScopes) {
-      expect(
-        await Effect.runPromise(resolveAuthSecret('ado', scope))
-      ).toBeNull();
-      expect(await Effect.runPromise(listAuthSecrets('ado', scope))).toEqual(
-        []
-      );
+      await expect(
+        Effect.runPromise(resolveAuthSecret('ado', scope))
+      ).rejects.toThrow(/cannot build an auth secret key/i);
+      await expect(
+        Effect.runPromise(listAuthSecrets('ado', scope))
+      ).rejects.toThrow(/cannot build an auth secret key/i);
       await expect(
         Effect.runPromise(writeAuthSecret('ado', 'replacement', scope))
       ).rejects.toThrow(/cannot build an auth secret key/i);
@@ -543,12 +603,12 @@ describe('auth-store keyring helpers', () => {
     ];
 
     for (const { providerId, scope, legacyName, legacyValue } of cases) {
-      expect(
-        await Effect.runPromise(resolveAuthSecret(providerId, scope))
-      ).toBeNull();
-      expect(
-        await Effect.runPromise(listAuthSecrets(providerId, scope))
-      ).toEqual([]);
+      await expect(
+        Effect.runPromise(resolveAuthSecret(providerId, scope))
+      ).rejects.toThrow(/cannot build an auth secret key/i);
+      await expect(
+        Effect.runPromise(listAuthSecrets(providerId, scope))
+      ).rejects.toThrow(/cannot build an auth secret key/i);
       await expect(
         Effect.runPromise(writeAuthSecret(providerId, 'replacement', scope))
       ).rejects.toThrow(/cannot build an auth secret key/i);

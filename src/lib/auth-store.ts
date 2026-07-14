@@ -1,44 +1,78 @@
 import { isProxy } from 'node:util/types';
 
-import { Effect } from 'effect';
+import { Data, Effect } from 'effect';
 
 import {
-  deleteSecret,
-  getSecret,
-  setSecret,
-  type LegacySecretName,
+  AuthIndexProviderError,
+  authIndexScopeName,
+  authIndexSecretName,
+  emptyAuthIndexDocument,
+  legacyAuthSecretName,
+  makeAuthIndexDocument,
+  normalizeAuthProviderId,
+  normalizeAuthStoreScope,
+  parseAuthIndexDocument,
+  removeAuthIndexScope,
+  scopedAuthSecretName,
+  serializeAuthIndexDocument,
+  upsertAuthIndexScope,
+  type AuthIndexDocument,
+  type AuthIndexDocumentError,
+  type AuthProviderId,
+  type AuthStoreScope,
+  type NormalizedAuthStoreScope,
+} from './auth-index-codec.js';
+import { AuthIndexLockError, withAuthIndexLock } from './auth-index-lock.js';
+import {
+  KeyringLive,
+  KeyringService,
+  KeyringUnavailableError,
+  type AuthIndexSecretName,
+  type KeyringServiceShape,
   type ScopedSecretName,
   type StoredSecretName,
-} from './secrets.js';
-import { canonicalizeAzureDevOpsAuthIdentity } from './azure-devops-auth-identity.js';
-import {
-  canonicalizeGitHubAuthAccount,
-  canonicalizeGitHubAuthHost,
-} from './github-auth.js';
+} from './auth-keyring.js';
 
-export const legacyAuthSecretNames = Object.freeze({
-  jira: 'jira',
-  'azure-devops': 'ado',
-  github: 'github',
-} as const satisfies Record<string, LegacySecretName>);
+const arrayIsArray = Array.isArray;
+const objectDefineProperty = Object.defineProperty;
+const objectFreeze = Object.freeze;
+const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const objectHasOwn = Object.hasOwn;
 
-export type BuiltinAuthProviderId = keyof typeof legacyAuthSecretNames;
-export type AuthProviderId = BuiltinAuthProviderId | 'ado' | (string & {});
-
-export interface AuthStoreScope {
-  readonly id?: string;
-  readonly providerId?: string;
-  readonly host?: string;
-  readonly org?: string;
-  readonly account?: string;
+function ownHostArrayLength(value: object): number | undefined {
+  const descriptor = objectGetOwnPropertyDescriptor(value, 'length');
+  return descriptor !== undefined &&
+    objectHasOwn(descriptor, 'value') &&
+    typeof descriptor.value === 'number' &&
+    Number.isSafeInteger(descriptor.value) &&
+    descriptor.value >= 0
+    ? descriptor.value
+    : undefined;
 }
 
-export interface NormalizedAuthStoreScope {
-  readonly providerId: string;
-  readonly host?: string;
-  readonly org?: string;
-  readonly account?: string;
+function ownHostArrayValue<T>(value: object, index: number): T | undefined {
+  const descriptor = objectGetOwnPropertyDescriptor(value, String(index));
+  return descriptor !== undefined && objectHasOwn(descriptor, 'value')
+    ? (descriptor.value as T)
+    : undefined;
 }
+
+function defineHostArrayIndex<T>(target: T[], index: number, value: T): void {
+  objectDefineProperty(target, String(index), {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
+}
+
+function appendHostArrayValue<T>(target: T[], value: T): void {
+  const length = ownHostArrayLength(target);
+  if (length === undefined) throw new TypeError('Invalid host auth array');
+  defineHostArrayIndex(target, length, value);
+}
+
+export * from './auth-index-codec.js';
 
 export type AuthSecretStorageKind = 'scoped' | 'legacy';
 
@@ -53,282 +87,123 @@ export interface ResolvedAuthSecret extends AuthSecretReference {
   readonly value: string;
 }
 
-const providerAliases = Object.freeze({
-  ado: 'azure-devops',
-} as const);
+export type AuthSecretReferenceFailureCode =
+  | 'invalid-reference'
+  | 'reference-mismatch';
 
-function normalizeNonEmpty(value: string | undefined): string | undefined {
-  if (value !== undefined && typeof value !== 'string') return undefined;
-  const normalized = value?.trim().normalize('NFC');
-  return normalized === undefined || normalized.length === 0
-    ? undefined
-    : normalized;
+interface AuthSecretReferenceErrorFields {
+  readonly code: AuthSecretReferenceFailureCode;
+  readonly providerId?: string;
 }
 
-function normalizeJiraAccount(value: string | undefined): string | undefined {
-  return normalizeNonEmpty(value)?.toLowerCase();
-}
+export class AuthSecretReferenceError extends Data.TaggedError(
+  'AuthSecretReferenceError'
+)<AuthSecretReferenceErrorFields> {
+  constructor(code: AuthSecretReferenceFailureCode, providerId?: string) {
+    super({ code, ...(providerId === undefined ? {} : { providerId }) });
+  }
 
-function explicitPort(value: string): string | undefined {
-  const authority =
-    /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(value)?.[1] ??
-    /^[^/?#]*/.exec(value)?.[0];
-  if (authority === undefined) return undefined;
-  const match = authority.startsWith('[')
-    ? /^\[[^\]]+\]:(\d+)$/.exec(authority)
-    : /:(\d+)$/.exec(authority);
-  return match?.[1] === undefined ? undefined : String(Number(match[1]));
-}
-
-export function normalizeAuthProviderId(
-  providerId: string
-): string | undefined {
-  const normalized = normalizeNonEmpty(providerId)?.toLowerCase();
-  if (normalized === undefined) return undefined;
-  return (
-    providerAliases[normalized as keyof typeof providerAliases] ?? normalized
-  );
-}
-
-function normalizeHost(host: string | undefined): string | undefined {
-  const normalized = normalizeNonEmpty(host);
-  if (normalized === undefined) return undefined;
-
-  try {
-    const port = explicitPort(normalized);
-    const url = new URL(
-      /^[a-z][a-z0-9+.-]*:\/\//i.test(normalized)
-        ? normalized
-        : `https://${normalized}`
-    );
-    if (
-      url.hostname.length === 0 ||
-      url.username.length > 0 ||
-      url.password.length > 0
-    ) {
-      return undefined;
-    }
-    return `${url.hostname.toLowerCase()}${port === undefined ? '' : `:${port}`}`;
-  } catch {
-    return undefined;
+  override get message(): string {
+    return this.providerId === undefined
+      ? `Cannot read an auth secret from an invalid reference (${this.code}).`
+      : `Cannot read a ${this.providerId} auth secret from an invalid reference (${this.code}).`;
   }
 }
 
-// Key values are normalized by role, then URI-component encoded so ':' remains
-// a structural separator and exact key strings stay deterministic in tests.
-export function encodeAuthStoreKeySegment(value: string): string {
-  return encodeURIComponent(value).replace(
-    /[!'()*]/g,
-    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`
-  );
+export type AuthStoreValidationFailureCode =
+  | 'invalid-target'
+  | 'invalid-index-scope';
+
+interface AuthStoreValidationErrorFields {
+  readonly code: AuthStoreValidationFailureCode;
+  readonly providerId: string;
 }
 
-type AuthScopePropertySnapshot =
-  | { readonly kind: 'data'; readonly value: string | undefined }
-  | { readonly kind: 'absent' }
-  | { readonly kind: 'invalid' };
+export class AuthStoreValidationError extends Data.TaggedError(
+  'AuthStoreValidationError'
+)<AuthStoreValidationErrorFields> {
+  constructor(code: AuthStoreValidationFailureCode, providerId: string) {
+    super({ code, providerId });
+  }
 
-function snapshotAuthScopeProperty(
-  scope: object,
-  name: string
-): AuthScopePropertySnapshot {
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(scope, name);
-    if (descriptor === undefined) return { kind: 'absent' };
-    if (!Object.hasOwn(descriptor, 'value')) return { kind: 'invalid' };
-    return descriptor.value === undefined ||
-      typeof descriptor.value === 'string'
-      ? { kind: 'data', value: descriptor.value }
-      : { kind: 'invalid' };
-  } catch {
-    return { kind: 'invalid' };
+  override get message(): string {
+    return this.code === 'invalid-target'
+      ? `Cannot build an auth secret key for provider '${this.providerId}'.`
+      : `Cannot index an auth secret for provider '${this.providerId}'.`;
   }
 }
 
-type AuthScopeSnapshot = Readonly<
-  Record<'id' | 'providerId' | 'host' | 'org' | 'account', string | undefined>
->;
+export type AuthIndexConsistencyOperation = 'write' | 'delete' | 'repair';
+export type AuthIndexConsistencyPhase =
+  | 'credential-write'
+  | 'credential-delete'
+  | 'index-update'
+  | 'index-cleanup';
+export type AuthIndexRollback = 'succeeded' | 'failed' | 'not-needed';
+export type AuthIndexResidualState = 'none' | 'stale-index' | 'unknown';
+export type AuthIndexFailureClassification = 'keyring-unavailable';
 
-function snapshotAuthStoreScope(
-  scope: AuthStoreScope
-): AuthScopeSnapshot | null {
-  if (
-    typeof scope !== 'object' ||
-    scope === null ||
-    isProxy(scope) ||
-    Array.isArray(scope)
-  ) {
-    return null;
-  }
-
-  const fields = Object.create(null) as Record<
-    keyof AuthScopeSnapshot,
-    string | undefined
-  >;
-  for (const name of ['id', 'providerId', 'host', 'org', 'account'] as const) {
-    const property = snapshotAuthScopeProperty(scope, name);
-    if (property.kind === 'invalid') return null;
-    fields[name] = property.kind === 'data' ? property.value : undefined;
-  }
-  return Object.freeze(fields);
+interface AuthIndexConsistencyErrorFields {
+  readonly operation: AuthIndexConsistencyOperation;
+  readonly phase: AuthIndexConsistencyPhase;
+  readonly providerId: string;
+  readonly rollback: AuthIndexRollback;
+  readonly residualState: AuthIndexResidualState;
+  readonly failure: AuthIndexFailureClassification;
 }
 
-function normalizedAuthStoreScope(
-  fields: ReadonlyArray<readonly [keyof NormalizedAuthStoreScope, string]>
-): NormalizedAuthStoreScope {
-  const normalized = Object.create(null) as Record<string, string>;
-  for (const [name, value] of fields) normalized[name] = value;
-  return Object.freeze(normalized) as unknown as NormalizedAuthStoreScope;
-}
-
-export function normalizeAuthStoreScope(
-  providerId: AuthProviderId,
-  scope: AuthStoreScope | undefined
-): NormalizedAuthStoreScope | null {
-  const normalizedProviderId = normalizeAuthProviderId(providerId);
-  if (normalizedProviderId === undefined) return null;
-  if (scope === undefined) {
-    return normalizedAuthStoreScope([['providerId', normalizedProviderId]]);
+export class AuthIndexConsistencyError extends Data.TaggedError(
+  'AuthIndexConsistencyError'
+)<AuthIndexConsistencyErrorFields> {
+  constructor(options: {
+    readonly operation: AuthIndexConsistencyOperation;
+    readonly phase: AuthIndexConsistencyPhase;
+    readonly providerId: string;
+    readonly rollback: AuthIndexRollback;
+    readonly residualState: AuthIndexResidualState;
+    readonly cause?: unknown;
+  }) {
+    super({
+      operation: options.operation,
+      phase: options.phase,
+      providerId: options.providerId,
+      rollback: options.rollback,
+      residualState: options.residualState,
+      failure: 'keyring-unavailable',
+    });
   }
 
-  const scopeSnapshot = snapshotAuthStoreScope(scope);
-  if (scopeSnapshot === null) return null;
-
-  if (scopeSnapshot.providerId !== undefined) {
-    const scopeProviderId = normalizeAuthProviderId(scopeSnapshot.providerId);
-    if (scopeProviderId !== normalizedProviderId) return null;
+  override get message(): string {
+    return `The ${this.providerId} auth ${this.operation} could not keep its index consistent during ${this.phase}; rollback ${this.rollback}.`;
   }
-
-  const account =
-    normalizedProviderId === 'jira'
-      ? normalizeJiraAccount(scopeSnapshot.account)
-      : normalizeNonEmpty(scopeSnapshot.account);
-
-  switch (normalizedProviderId) {
-    case 'jira': {
-      const host = normalizeHost(scopeSnapshot.host);
-      if (host === undefined || account === undefined) return null;
-      return normalizedAuthStoreScope([
-        ['providerId', normalizedProviderId],
-        ['host', host],
-        ['account', account],
-      ]);
-    }
-    case 'azure-devops': {
-      if (scopeSnapshot.host === undefined) return null;
-
-      const identity = canonicalizeAzureDevOpsAuthIdentity({
-        host: scopeSnapshot.host,
-        org: scopeSnapshot.org,
-      });
-      if (identity === null) return null;
-
-      return normalizedAuthStoreScope([
-        ['providerId', normalizedProviderId],
-        ['host', identity.host],
-        ['org', identity.org],
-        ...(account === undefined ? [] : ([['account', account]] as const)),
-      ]);
-    }
-    case 'github': {
-      // Provider/remote resolution decides whether a host is GitHub. The auth
-      // store only needs a deterministic identity and must retain custom GHES
-      // domains rather than imposing github.com/*.ghe.com parser policy here.
-      const host = canonicalizeGitHubAuthHost(scopeSnapshot.host);
-      if (host === null) return null;
-      const githubAccount = canonicalizeGitHubAuthAccount(
-        scopeSnapshot.account
-      );
-      if (scopeSnapshot.account !== undefined && githubAccount === null) {
-        return null;
-      }
-      return normalizedAuthStoreScope([
-        ['providerId', normalizedProviderId],
-        ['host', host],
-        ...(githubAccount === null
-          ? []
-          : ([['account', githubAccount]] as const)),
-      ]);
-    }
-  }
-
-  const host = normalizeHost(scopeSnapshot.host);
-  const org = normalizeNonEmpty(scopeSnapshot.org);
-
-  return normalizedAuthStoreScope([
-    ['providerId', normalizedProviderId],
-    ...(host === undefined ? [] : ([['host', host]] as const)),
-    ...(org === undefined ? [] : ([['org', org]] as const)),
-    ...(account === undefined ? [] : ([['account', account]] as const)),
-  ]);
 }
 
-export function legacyAuthSecretName(
-  providerId: AuthProviderId
-): LegacySecretName | null {
-  const normalizedProviderId = normalizeAuthProviderId(providerId);
-  if (normalizedProviderId === undefined) return null;
+export type AuthIndexReadError =
+  | AuthIndexProviderError
+  | AuthIndexDocumentError
+  | AuthIndexConsistencyError
+  | AuthIndexLockError
+  | KeyringUnavailableError;
 
-  return (
-    legacyAuthSecretNames[
-      normalizedProviderId as keyof typeof legacyAuthSecretNames
-    ] ?? null
-  );
-}
+export type AuthSecretReadError =
+  | AuthIndexProviderError
+  | AuthSecretReferenceError
+  | KeyringUnavailableError
+  | AuthStoreValidationError;
 
-function buildScopedName(
-  providerId: string,
-  parts: readonly (readonly [string, string])[]
-): ScopedSecretName {
-  const encoded = [
-    'auth',
-    encodeAuthStoreKeySegment(providerId),
-    ...parts.flatMap(([key, value]) => [key, encodeAuthStoreKeySegment(value)]),
-  ];
-  return encoded.join(':') as ScopedSecretName;
-}
+export type AuthIndexMutationError =
+  | AuthIndexProviderError
+  | AuthIndexDocumentError
+  | AuthIndexConsistencyError
+  | AuthIndexLockError
+  | KeyringUnavailableError
+  | AuthStoreValidationError;
 
-export function scopedAuthSecretName(
-  providerId: AuthProviderId,
-  scope: AuthStoreScope | undefined
-): ScopedSecretName | null {
-  const normalized = normalizeAuthStoreScope(providerId, scope);
-  if (normalized === null || normalized.host === undefined) return null;
+export type AuthStoreError = AuthSecretReadError | AuthIndexMutationError;
 
-  switch (normalized.providerId) {
-    case 'jira':
-      if (normalized.account === undefined) return null;
-      return buildScopedName(normalized.providerId, [
-        ['host', normalized.host],
-        ['account', normalized.account],
-      ]);
-    case 'azure-devops':
-      if (normalized.org === undefined) return null;
-      return buildScopedName(normalized.providerId, [
-        ['host', normalized.host],
-        ['org', normalized.org],
-      ]);
-    case 'github':
-      return buildScopedName(
-        normalized.providerId,
-        normalized.account === undefined
-          ? [['host', normalized.host]]
-          : [
-              ['host', normalized.host],
-              ['account', normalized.account],
-            ]
-      );
-    default: {
-      const parts: Array<readonly [string, string]> = [
-        ['host', normalized.host],
-      ];
-      if (normalized.org !== undefined) parts.push(['org', normalized.org]);
-      if (normalized.account !== undefined) {
-        parts.push(['account', normalized.account]);
-      }
-      return buildScopedName(normalized.providerId, parts);
-    }
-  }
+interface AuthIndexState {
+  readonly raw: string | null;
+  readonly document: AuthIndexDocument;
 }
 
 export function authSecretCandidates(
@@ -342,33 +217,36 @@ export function authSecretCandidates(
 
   if (scope !== undefined) {
     if (scopedName !== null && normalized !== null) {
-      candidates.push({
+      appendHostArrayValue(candidates, {
         name: scopedName,
         kind: 'scoped',
         providerId: normalized.providerId,
         scope: normalized,
       });
     }
-    return Object.freeze(candidates);
+    return objectFreeze(candidates);
   }
 
   if (legacyName !== null && normalized !== null) {
-    candidates.push({
+    appendHostArrayValue(candidates, {
       name: legacyName,
       kind: 'legacy',
       providerId: normalized.providerId,
     });
   }
-
-  return Object.freeze(candidates);
+  return objectFreeze(candidates);
 }
 
 export function authSecretTarget(
   providerId: AuthProviderId,
   scope: AuthStoreScope | undefined
 ): AuthSecretReference | null {
-  const candidates = authSecretCandidates(providerId, scope);
-  return candidates[0] ?? null;
+  return (
+    ownHostArrayValue<AuthSecretReference>(
+      authSecretCandidates(providerId, scope),
+      0
+    ) ?? null
+  );
 }
 
 export function authSecretScopesMatch(
@@ -382,90 +260,846 @@ export function authSecretScopesMatch(
   );
 }
 
-export function readAuthSecret(
-  reference: AuthSecretReference
-): Effect.Effect<ResolvedAuthSecret | null, unknown, never> {
-  return Effect.tryPromise({
-    try: async () => {
-      const value = await getSecret(reference.name);
-      return value === null ? null : { ...reference, value };
-    },
-    catch: (error) => error,
+function readAuthIndexState(
+  providerId: string,
+  keyring: KeyringServiceShape
+): Effect.Effect<
+  AuthIndexState,
+  AuthIndexDocumentError | KeyringUnavailableError
+> {
+  return Effect.gen(function* () {
+    const raw = yield* keyring.get(authIndexSecretName(providerId));
+    const document =
+      raw === null
+        ? emptyAuthIndexDocument(providerId)
+        : yield* parseAuthIndexDocument(raw, providerId);
+    return { raw, document };
   });
 }
 
+type VerifiedMutationOutcome =
+  | { readonly kind: 'desired' }
+  | { readonly kind: 'previous'; readonly error: KeyringUnavailableError }
+  | { readonly kind: 'unknown'; readonly error: KeyringUnavailableError };
+
+interface AuthTransactionSnapshot {
+  readonly credentialName: ScopedSecretName;
+  readonly credentialValue: string | null;
+  readonly indexName: AuthIndexSecretName;
+  readonly indexValue: string | null;
+}
+
+interface ReconciliationResult {
+  readonly rollback: Exclude<AuthIndexRollback, 'not-needed'>;
+  readonly residualState: AuthIndexResidualState;
+}
+
+function mutateKeyringValue(
+  keyring: KeyringServiceShape,
+  name: ScopedSecretName | AuthIndexSecretName,
+  desiredValue: string | null
+): Effect.Effect<void, KeyringUnavailableError> {
+  return desiredValue === null
+    ? Effect.asVoid(keyring.delete(name))
+    : keyring.set(name, desiredValue);
+}
+
+function verifiedMutation(
+  keyring: KeyringServiceShape,
+  name: ScopedSecretName | AuthIndexSecretName,
+  previousValue: string | null,
+  desiredValue: string | null
+): Effect.Effect<VerifiedMutationOutcome> {
+  return Effect.gen(function* () {
+    const mutation = yield* Effect.either(
+      mutateKeyringValue(keyring, name, desiredValue)
+    );
+    if (mutation._tag === 'Right') return { kind: 'desired' };
+
+    const observed = yield* Effect.either(keyring.get(name));
+    if (observed._tag === 'Left') {
+      return { kind: 'unknown', error: mutation.left };
+    }
+    if (observed.right === desiredValue) return { kind: 'desired' };
+    if (observed.right === previousValue) {
+      return { kind: 'previous', error: mutation.left };
+    }
+    return { kind: 'unknown', error: mutation.left };
+  });
+}
+
+function mutateWithoutAssumingOutcome(
+  keyring: KeyringServiceShape,
+  name: ScopedSecretName | AuthIndexSecretName,
+  desiredValue: string | null
+): Effect.Effect<void> {
+  return Effect.asVoid(
+    Effect.either(mutateKeyringValue(keyring, name, desiredValue))
+  );
+}
+
+function readMatches(
+  keyring: KeyringServiceShape,
+  name: ScopedSecretName | AuthIndexSecretName,
+  expectedValue: string | null
+): Effect.Effect<boolean> {
+  return Effect.match(keyring.get(name), {
+    onFailure: () => false,
+    onSuccess: (value) => value === expectedValue,
+  });
+}
+
+function reconcileAuthSnapshot(
+  keyring: KeyringServiceShape,
+  target: AuthTransactionSnapshot,
+  mutateCredential: boolean,
+  mutateIndex: boolean,
+  verifiedResidualState: Exclude<AuthIndexResidualState, 'unknown'> = 'none'
+): Effect.Effect<ReconciliationResult> {
+  return Effect.gen(function* () {
+    if (mutateCredential) {
+      yield* mutateWithoutAssumingOutcome(
+        keyring,
+        target.credentialName,
+        target.credentialValue
+      );
+    }
+    if (mutateIndex) {
+      yield* mutateWithoutAssumingOutcome(
+        keyring,
+        target.indexName,
+        target.indexValue
+      );
+    }
+
+    const credentialMatches = yield* readMatches(
+      keyring,
+      target.credentialName,
+      target.credentialValue
+    );
+    const indexMatches = yield* readMatches(
+      keyring,
+      target.indexName,
+      target.indexValue
+    );
+    return credentialMatches && indexMatches
+      ? { rollback: 'succeeded', residualState: verifiedResidualState }
+      : { rollback: 'failed', residualState: 'unknown' };
+  });
+}
+
+function consistencyError(options: {
+  readonly operation: AuthIndexConsistencyOperation;
+  readonly phase: AuthIndexConsistencyPhase;
+  readonly providerId: string;
+  readonly rollback: AuthIndexRollback;
+  readonly residualState: AuthIndexResidualState;
+  readonly cause?: unknown;
+}): AuthIndexConsistencyError {
+  return new AuthIndexConsistencyError(options);
+}
+
+function writeScopedAuthSecret(
+  keyring: KeyringServiceShape,
+  target: AuthSecretReference & {
+    readonly kind: 'scoped';
+    readonly name: ScopedSecretName;
+    readonly scope: NormalizedAuthStoreScope;
+  },
+  value: string
+): Effect.Effect<
+  AuthSecretReference,
+  AuthIndexDocumentError | KeyringUnavailableError | AuthIndexConsistencyError
+> {
+  return Effect.gen(function* () {
+    const providerId = target.providerId;
+    const state = yield* readAuthIndexState(providerId, keyring);
+    const previousCredential = yield* keyring.get(target.name);
+    const nextDocument = upsertAuthIndexScope(state.document, target.scope);
+    const previousIndex = state.raw;
+    const nextIndex = serializeAuthIndexDocument(nextDocument);
+    const indexChanges =
+      nextIndex !== serializeAuthIndexDocument(state.document);
+    const snapshot: AuthTransactionSnapshot = {
+      credentialName: target.name,
+      credentialValue: previousCredential,
+      indexName: authIndexSecretName(providerId),
+      indexValue: previousIndex,
+    };
+
+    if (!indexChanges) {
+      const credentialWrite = yield* verifiedMutation(
+        keyring,
+        target.name,
+        previousCredential,
+        value
+      );
+      if (credentialWrite.kind === 'desired') return target;
+      if (credentialWrite.kind === 'previous') {
+        return yield* Effect.fail(credentialWrite.error);
+      }
+
+      const reconciliationTarget =
+        previousCredential === null
+          ? {
+              ...snapshot,
+              indexValue: serializeAuthIndexDocument(
+                removeAuthIndexScope(state.document, target.scope)
+              ),
+            }
+          : snapshot;
+      const reconciliation = yield* reconcileAuthSnapshot(
+        keyring,
+        reconciliationTarget,
+        true,
+        previousCredential === null
+      );
+      return yield* Effect.fail(
+        consistencyError({
+          operation: 'write',
+          phase: 'credential-write',
+          providerId,
+          ...reconciliation,
+        })
+      );
+    }
+
+    if (previousCredential === null) {
+      const indexWrite = yield* verifiedMutation(
+        keyring,
+        snapshot.indexName,
+        previousIndex,
+        nextIndex
+      );
+      if (indexWrite.kind === 'previous') {
+        return yield* Effect.fail(indexWrite.error);
+      }
+      if (indexWrite.kind === 'unknown') {
+        const reconciliation = yield* reconcileAuthSnapshot(
+          keyring,
+          snapshot,
+          false,
+          true
+        );
+        return yield* Effect.fail(
+          consistencyError({
+            operation: 'write',
+            phase: 'index-update',
+            providerId,
+            ...reconciliation,
+          })
+        );
+      }
+
+      const credentialWrite = yield* verifiedMutation(
+        keyring,
+        target.name,
+        null,
+        value
+      );
+      if (credentialWrite.kind === 'desired') return target;
+      const reconciliation = yield* reconcileAuthSnapshot(
+        keyring,
+        snapshot,
+        credentialWrite.kind === 'unknown',
+        true
+      );
+      return yield* Effect.fail(
+        consistencyError({
+          operation: 'write',
+          phase: 'credential-write',
+          providerId,
+          ...reconciliation,
+        })
+      );
+    }
+
+    const credentialWrite = yield* verifiedMutation(
+      keyring,
+      target.name,
+      previousCredential,
+      value
+    );
+    if (credentialWrite.kind === 'previous') {
+      return yield* Effect.fail(credentialWrite.error);
+    }
+    if (credentialWrite.kind === 'unknown') {
+      const reconciliation = yield* reconcileAuthSnapshot(
+        keyring,
+        snapshot,
+        true,
+        false
+      );
+      return yield* Effect.fail(
+        consistencyError({
+          operation: 'write',
+          phase: 'credential-write',
+          providerId,
+          ...reconciliation,
+        })
+      );
+    }
+
+    const indexWrite = yield* verifiedMutation(
+      keyring,
+      snapshot.indexName,
+      previousIndex,
+      nextIndex
+    );
+    if (indexWrite.kind === 'desired') return target;
+    const reconciliation = yield* reconcileAuthSnapshot(
+      keyring,
+      snapshot,
+      true,
+      indexWrite.kind === 'unknown'
+    );
+    return yield* Effect.fail(
+      consistencyError({
+        operation: 'write',
+        phase: 'index-update',
+        providerId,
+        ...reconciliation,
+      })
+    );
+  });
+}
+
+function deleteScopedAuthSecret(
+  keyring: KeyringServiceShape,
+  target: AuthSecretReference & {
+    readonly kind: 'scoped';
+    readonly name: ScopedSecretName;
+    readonly scope: NormalizedAuthStoreScope;
+  }
+): Effect.Effect<
+  boolean,
+  AuthIndexDocumentError | KeyringUnavailableError | AuthIndexConsistencyError
+> {
+  return Effect.gen(function* () {
+    const providerId = target.providerId;
+    const state = yield* readAuthIndexState(providerId, keyring);
+    const previousCredential = yield* keyring.get(target.name);
+    const nextDocument = removeAuthIndexScope(state.document, target.scope);
+    const previousIndex = state.raw;
+    const nextIndex = serializeAuthIndexDocument(nextDocument);
+    const indexChanges =
+      nextIndex !== serializeAuthIndexDocument(state.document);
+    const snapshot: AuthTransactionSnapshot = {
+      credentialName: target.name,
+      credentialValue: previousCredential,
+      indexName: authIndexSecretName(providerId),
+      indexValue: previousIndex,
+    };
+
+    let deleted = false;
+    if (previousCredential !== null) {
+      const credentialDelete = yield* verifiedMutation(
+        keyring,
+        target.name,
+        previousCredential,
+        null
+      );
+      if (credentialDelete.kind === 'previous') {
+        return yield* Effect.fail(credentialDelete.error);
+      }
+      if (credentialDelete.kind === 'unknown') {
+        const reconciliation = yield* reconcileAuthSnapshot(
+          keyring,
+          snapshot,
+          true,
+          false
+        );
+        return yield* Effect.fail(
+          consistencyError({
+            operation: 'delete',
+            phase: 'credential-delete',
+            providerId,
+            ...reconciliation,
+          })
+        );
+      }
+      deleted = true;
+    }
+    if (!indexChanges) return deleted;
+
+    const indexCleanup = yield* verifiedMutation(
+      keyring,
+      snapshot.indexName,
+      previousIndex,
+      nextIndex
+    );
+    if (indexCleanup.kind === 'desired') return deleted;
+    if (indexCleanup.kind === 'previous' && !deleted) {
+      return yield* Effect.fail(indexCleanup.error);
+    }
+    if (!deleted) {
+      return yield* Effect.fail(
+        consistencyError({
+          operation: 'delete',
+          phase: 'index-cleanup',
+          providerId,
+          rollback: 'not-needed',
+          residualState: 'unknown',
+        })
+      );
+    }
+
+    const reconciliation = yield* reconcileAuthSnapshot(
+      keyring,
+      snapshot,
+      true,
+      indexCleanup.kind === 'unknown'
+    );
+    return yield* Effect.fail(
+      consistencyError({
+        operation: 'delete',
+        phase: 'index-cleanup',
+        providerId,
+        ...reconciliation,
+      })
+    );
+  });
+}
+
+function enumerateIndexedAuthScopes(
+  providerId: string,
+  keyring: KeyringServiceShape
+): Effect.Effect<
+  readonly NormalizedAuthStoreScope[],
+  AuthIndexDocumentError | KeyringUnavailableError | AuthIndexConsistencyError
+> {
+  return Effect.gen(function* () {
+    const state = yield* readAuthIndexState(providerId, keyring);
+    const liveScopes: NormalizedAuthStoreScope[] = [];
+    const scopeCount = ownHostArrayLength(state.document.scopes);
+    if (scopeCount === undefined) {
+      throw new TypeError('Invalid host auth index scopes');
+    }
+    for (let index = 0; index < scopeCount; index += 1) {
+      const scope = ownHostArrayValue<NormalizedAuthStoreScope>(
+        state.document.scopes,
+        index
+      );
+      if (scope === undefined) {
+        throw new TypeError('Invalid host auth index scope');
+      }
+      const value = yield* keyring.get(authIndexScopeName(scope));
+      if (value !== null) appendHostArrayValue(liveScopes, scope);
+    }
+
+    if (liveScopes.length !== state.document.scopes.length) {
+      const indexName = authIndexSecretName(providerId);
+      const repairedValue = serializeAuthIndexDocument(
+        makeAuthIndexDocument(providerId, liveScopes)
+      );
+      const repair = yield* verifiedMutation(
+        keyring,
+        indexName,
+        state.raw,
+        repairedValue
+      );
+      if (repair.kind === 'previous') return yield* Effect.fail(repair.error);
+      if (repair.kind === 'unknown') {
+        return yield* Effect.fail(
+          consistencyError({
+            operation: 'repair',
+            phase: 'index-cleanup',
+            providerId,
+            rollback: 'not-needed',
+            residualState: 'unknown',
+          })
+        );
+      }
+    }
+    return objectFreeze(liveScopes);
+  });
+}
+
+export function listIndexedAuthScopesEffect(
+  providerId: AuthProviderId
+): Effect.Effect<
+  readonly NormalizedAuthStoreScope[],
+  AuthIndexReadError,
+  KeyringService
+> {
+  const normalizedProviderId = normalizeAuthProviderId(providerId);
+  if (normalizedProviderId === undefined) {
+    return Effect.fail(new AuthIndexProviderError());
+  }
+  return Effect.flatMap(KeyringService, (keyring) =>
+    withAuthIndexLock(
+      normalizedProviderId,
+      Effect.uninterruptible(
+        enumerateIndexedAuthScopes(normalizedProviderId, keyring)
+      )
+    )
+  );
+}
+
+type AuthSecretReferencePropertySnapshot =
+  | { readonly kind: 'data'; readonly value: unknown }
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'invalid' };
+
+function snapshotAuthSecretReferenceProperty(
+  reference: object,
+  name: keyof AuthSecretReference
+): AuthSecretReferencePropertySnapshot {
+  try {
+    const descriptor = objectGetOwnPropertyDescriptor(reference, name);
+    if (descriptor === undefined) return { kind: 'absent' };
+    if (!objectHasOwn(descriptor, 'value')) return { kind: 'invalid' };
+    return { kind: 'data', value: descriptor.value };
+  } catch {
+    return { kind: 'invalid' };
+  }
+}
+
+function validateAuthSecretReference(
+  reference: AuthSecretReference
+): AuthSecretReference | AuthIndexProviderError | AuthSecretReferenceError {
+  if (
+    typeof reference !== 'object' ||
+    reference === null ||
+    isProxy(reference) ||
+    arrayIsArray(reference)
+  ) {
+    return new AuthSecretReferenceError('invalid-reference');
+  }
+
+  const providerProperty = snapshotAuthSecretReferenceProperty(
+    reference,
+    'providerId'
+  );
+  if (providerProperty.kind !== 'data') {
+    return new AuthSecretReferenceError('invalid-reference');
+  }
+  if (typeof providerProperty.value !== 'string') {
+    return new AuthIndexProviderError();
+  }
+  const providerId = normalizeAuthProviderId(providerProperty.value);
+  if (providerId === undefined) return new AuthIndexProviderError();
+
+  const nameProperty = snapshotAuthSecretReferenceProperty(reference, 'name');
+  const kindProperty = snapshotAuthSecretReferenceProperty(reference, 'kind');
+  const scopeProperty = snapshotAuthSecretReferenceProperty(reference, 'scope');
+  if (
+    nameProperty.kind !== 'data' ||
+    typeof nameProperty.value !== 'string' ||
+    kindProperty.kind !== 'data' ||
+    (kindProperty.value !== 'legacy' && kindProperty.value !== 'scoped') ||
+    scopeProperty.kind === 'invalid'
+  ) {
+    return new AuthSecretReferenceError('invalid-reference', providerId);
+  }
+
+  const scope = scopeProperty.kind === 'data' ? scopeProperty.value : undefined;
+  if (
+    (kindProperty.value === 'legacy' && scope !== undefined) ||
+    (kindProperty.value === 'scoped' &&
+      (typeof scope !== 'object' || scope === null))
+  ) {
+    return new AuthSecretReferenceError('invalid-reference', providerId);
+  }
+
+  const expected = authSecretTarget(
+    providerId,
+    kindProperty.value === 'scoped' ? (scope as AuthStoreScope) : undefined
+  );
+  if (
+    expected === null ||
+    expected.kind !== kindProperty.value ||
+    expected.name !== nameProperty.value
+  ) {
+    return new AuthSecretReferenceError('reference-mismatch', providerId);
+  }
+  return expected;
+}
+
+export function readAuthSecretEffect(
+  reference: AuthSecretReference
+): Effect.Effect<
+  ResolvedAuthSecret | null,
+  AuthIndexProviderError | AuthSecretReferenceError | KeyringUnavailableError,
+  KeyringService
+> {
+  const validated = validateAuthSecretReference(reference);
+  if (
+    validated instanceof AuthIndexProviderError ||
+    validated instanceof AuthSecretReferenceError
+  ) {
+    return Effect.fail(validated);
+  }
+  return Effect.flatMap(KeyringService, (keyring) =>
+    Effect.map(keyring.get(validated.name), (value) =>
+      value === null ? null : { ...validated, value }
+    )
+  );
+}
+
+export function resolveAuthSecretEffect(
+  providerId: AuthProviderId,
+  scope?: AuthStoreScope
+): Effect.Effect<
+  ResolvedAuthSecret | null,
+  AuthIndexProviderError | AuthStoreValidationError | KeyringUnavailableError,
+  KeyringService
+> {
+  const normalizedProviderId = normalizeAuthProviderId(providerId);
+  if (normalizedProviderId === undefined) {
+    return Effect.fail(new AuthIndexProviderError());
+  }
+  const candidates = authSecretCandidates(normalizedProviderId, scope);
+  if (scope !== undefined && candidates.length === 0) {
+    return Effect.fail(
+      new AuthStoreValidationError('invalid-target', normalizedProviderId)
+    );
+  }
+  return Effect.flatMap(KeyringService, (keyring) =>
+    Effect.gen(function* () {
+      const candidateCount = ownHostArrayLength(candidates);
+      if (candidateCount === undefined) {
+        return yield* Effect.fail(
+          new AuthStoreValidationError('invalid-target', normalizedProviderId)
+        );
+      }
+      for (let index = 0; index < candidateCount; index += 1) {
+        const candidate = ownHostArrayValue<AuthSecretReference>(
+          candidates,
+          index
+        );
+        if (candidate === undefined) {
+          return yield* Effect.fail(
+            new AuthStoreValidationError('invalid-target', normalizedProviderId)
+          );
+        }
+        const value = yield* keyring.get(candidate.name);
+        if (value !== null) return { ...candidate, value };
+      }
+      return null;
+    })
+  );
+}
+
+export function listAuthSecretsEffect(
+  providerId: AuthProviderId,
+  scope?: AuthStoreScope
+): Effect.Effect<
+  readonly ResolvedAuthSecret[],
+  AuthIndexProviderError | AuthStoreValidationError | KeyringUnavailableError,
+  KeyringService
+> {
+  const normalizedProviderId = normalizeAuthProviderId(providerId);
+  if (normalizedProviderId === undefined) {
+    return Effect.fail(new AuthIndexProviderError());
+  }
+  const candidates = authSecretCandidates(normalizedProviderId, scope);
+  if (scope !== undefined && candidates.length === 0) {
+    return Effect.fail(
+      new AuthStoreValidationError('invalid-target', normalizedProviderId)
+    );
+  }
+  return Effect.flatMap(KeyringService, (keyring) =>
+    Effect.gen(function* () {
+      const resolved: ResolvedAuthSecret[] = [];
+      const candidateCount = ownHostArrayLength(candidates);
+      if (candidateCount === undefined) {
+        return yield* Effect.fail(
+          new AuthStoreValidationError('invalid-target', normalizedProviderId)
+        );
+      }
+      for (let index = 0; index < candidateCount; index += 1) {
+        const candidate = ownHostArrayValue<AuthSecretReference>(
+          candidates,
+          index
+        );
+        if (candidate === undefined) {
+          return yield* Effect.fail(
+            new AuthStoreValidationError('invalid-target', normalizedProviderId)
+          );
+        }
+        const value = yield* keyring.get(candidate.name);
+        if (value !== null) {
+          appendHostArrayValue(resolved, { ...candidate, value });
+        }
+      }
+      return objectFreeze(resolved);
+    })
+  );
+}
+
+export function writeAuthSecretEffect(
+  providerId: AuthProviderId,
+  value: string,
+  scope?: AuthStoreScope
+): Effect.Effect<AuthSecretReference, AuthIndexMutationError, KeyringService> {
+  const normalizedProviderId = normalizeAuthProviderId(providerId);
+  if (normalizedProviderId === undefined) {
+    return Effect.fail(new AuthIndexProviderError());
+  }
+  const target = authSecretTarget(normalizedProviderId, scope);
+  if (target === null) {
+    return Effect.fail(
+      new AuthStoreValidationError('invalid-target', normalizedProviderId)
+    );
+  }
+  if (target.kind === 'legacy') {
+    return Effect.flatMap(KeyringService, (keyring) =>
+      Effect.as(keyring.set(target.name, value), target)
+    );
+  }
+  if (target.scope === undefined) {
+    return Effect.fail(
+      new AuthStoreValidationError('invalid-index-scope', normalizedProviderId)
+    );
+  }
+  const targetScope = target.scope;
+  return Effect.flatMap(KeyringService, (keyring) =>
+    withAuthIndexLock(
+      target.providerId,
+      Effect.uninterruptible(
+        writeScopedAuthSecret(
+          keyring,
+          {
+            ...target,
+            kind: 'scoped',
+            name: authIndexScopeName(targetScope),
+            scope: targetScope,
+          },
+          value
+        )
+      )
+    )
+  );
+}
+
+export function deleteAuthSecretEffect(
+  providerId: AuthProviderId,
+  scope?: AuthStoreScope
+): Effect.Effect<boolean, AuthIndexMutationError, KeyringService> {
+  const normalizedProviderId = normalizeAuthProviderId(providerId);
+  if (normalizedProviderId === undefined) {
+    return Effect.fail(new AuthIndexProviderError());
+  }
+  const target = authSecretTarget(normalizedProviderId, scope);
+  if (target === null) {
+    return Effect.fail(
+      new AuthStoreValidationError('invalid-target', normalizedProviderId)
+    );
+  }
+  if (target.kind === 'legacy') {
+    return Effect.flatMap(KeyringService, (keyring) =>
+      keyring.delete(target.name)
+    );
+  }
+  if (target.scope === undefined) {
+    return Effect.fail(
+      new AuthStoreValidationError('invalid-index-scope', normalizedProviderId)
+    );
+  }
+  const targetScope = target.scope;
+  return Effect.flatMap(KeyringService, (keyring) =>
+    withAuthIndexLock(
+      target.providerId,
+      Effect.uninterruptible(
+        deleteScopedAuthSecret(keyring, {
+          ...target,
+          kind: 'scoped',
+          name: authIndexScopeName(targetScope),
+          scope: targetScope,
+        })
+      )
+    )
+  );
+}
+
+function provideLive<A, E>(
+  effect: Effect.Effect<A, E, KeyringService>
+): Effect.Effect<A, E> {
+  return effect.pipe(Effect.provide(KeyringLive));
+}
+
+/** @deprecated Live compatibility adapter. Use listIndexedAuthScopesEffect. */
+export function listIndexedAuthScopes(
+  providerId: AuthProviderId
+): Effect.Effect<readonly NormalizedAuthStoreScope[], AuthIndexReadError> {
+  return provideLive(listIndexedAuthScopesEffect(providerId));
+}
+
+/** @deprecated Live compatibility adapter. Use readAuthSecretEffect. */
+export function readAuthSecret(
+  reference: AuthSecretReference
+): Effect.Effect<
+  ResolvedAuthSecret | null,
+  AuthIndexProviderError | AuthSecretReferenceError | KeyringUnavailableError
+> {
+  return provideLive(readAuthSecretEffect(reference));
+}
+
+/** @deprecated Live compatibility adapter. Use resolveAuthSecretEffect. */
 export function resolveAuthSecret(
   providerId: AuthProviderId,
   scope?: AuthStoreScope
-): Effect.Effect<ResolvedAuthSecret | null, unknown, never> {
-  return Effect.gen(function* () {
-    for (const candidate of authSecretCandidates(providerId, scope)) {
-      const resolved = yield* readAuthSecret(candidate);
-      if (resolved !== null) return resolved;
-    }
-    return null;
-  });
+): Effect.Effect<
+  ResolvedAuthSecret | null,
+  AuthIndexProviderError | AuthStoreValidationError | KeyringUnavailableError
+> {
+  return provideLive(resolveAuthSecretEffect(providerId, scope));
 }
 
-export async function resolveAuthSecretPromise(
+/** @deprecated Live compatibility adapter. Use listAuthSecretsEffect. */
+export function listAuthSecrets(
   providerId: AuthProviderId,
   scope?: AuthStoreScope
-): Promise<ResolvedAuthSecret | null> {
+): Effect.Effect<
+  readonly ResolvedAuthSecret[],
+  AuthIndexProviderError | AuthStoreValidationError | KeyringUnavailableError
+> {
+  return provideLive(listAuthSecretsEffect(providerId, scope));
+}
+
+/** @deprecated Live compatibility adapter. Use writeAuthSecretEffect. */
+export function writeAuthSecret(
+  providerId: AuthProviderId,
+  value: string,
+  scope?: AuthStoreScope
+): Effect.Effect<AuthSecretReference, AuthIndexMutationError> {
+  return provideLive(writeAuthSecretEffect(providerId, value, scope));
+}
+
+/** @deprecated Live compatibility adapter. Use deleteAuthSecretEffect. */
+export function deleteAuthSecret(
+  providerId: AuthProviderId,
+  scope?: AuthStoreScope
+): Effect.Effect<boolean, AuthIndexMutationError> {
+  return provideLive(deleteAuthSecretEffect(providerId, scope));
+}
+
+/** @deprecated Live compatibility adapter. Use listIndexedAuthScopesEffect. */
+export async function listIndexedAuthScopesPromise(
+  providerId: AuthProviderId
+): Promise<readonly NormalizedAuthStoreScope[]> {
   const result = await Effect.runPromise(
-    Effect.either(resolveAuthSecret(providerId, scope))
+    Effect.either(
+      listIndexedAuthScopesEffect(providerId).pipe(Effect.provide(KeyringLive))
+    )
   );
   if (result._tag === 'Left') throw result.left;
   return result.right;
 }
 
-export function listAuthSecrets(
+/** @deprecated Live compatibility adapter. Use resolveAuthSecretEffect. */
+export async function resolveAuthSecretPromise(
   providerId: AuthProviderId,
   scope?: AuthStoreScope
-): Effect.Effect<readonly ResolvedAuthSecret[], unknown, never> {
-  return Effect.gen(function* () {
-    const resolved: ResolvedAuthSecret[] = [];
-    for (const candidate of authSecretCandidates(providerId, scope)) {
-      const entry = yield* readAuthSecret(candidate);
-      if (entry !== null) resolved.push(entry);
-    }
-    return Object.freeze(resolved);
-  });
-}
-
-export function writeAuthSecret(
-  providerId: AuthProviderId,
-  value: string,
-  scope?: AuthStoreScope
-): Effect.Effect<AuthSecretReference, unknown, never> {
-  const target = authSecretTarget(providerId, scope);
-  if (target === null) {
-    return Effect.fail(
-      new Error(`Cannot build an auth secret key for provider '${providerId}'.`)
-    );
-  }
-
-  return Effect.tryPromise({
-    try: async () => {
-      await setSecret(target.name, value);
-      return target;
-    },
-    catch: (error) => error,
-  });
-}
-
-export function deleteAuthSecret(
-  providerId: AuthProviderId,
-  scope?: AuthStoreScope
-): Effect.Effect<boolean, unknown, never> {
-  const target = authSecretTarget(providerId, scope);
-  if (target === null) {
-    return Effect.fail(
-      new Error(`Cannot build an auth secret key for provider '${providerId}'.`)
-    );
-  }
-
-  return Effect.tryPromise({
-    try: () => deleteSecret(target.name),
-    catch: (error) => error,
-  });
+): Promise<ResolvedAuthSecret | null> {
+  const result = await Effect.runPromise(
+    Effect.either(
+      resolveAuthSecretEffect(providerId, scope).pipe(
+        Effect.provide(KeyringLive)
+      )
+    )
+  );
+  if (result._tag === 'Left') throw result.left;
+  return result.right;
 }

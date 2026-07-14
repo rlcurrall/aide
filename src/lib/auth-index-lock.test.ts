@@ -11,12 +11,71 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { inspect } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
-import { Cause, Effect, Exit, Fiber, Option } from 'effect';
+import { Cause, Effect, Exit, Fiber, Match, Option } from 'effect';
 
-import { AuthIndexLockError, withAuthIndexLock } from './auth-index-lock.js';
+import { renderTopLevelError } from '../cli/index.js';
+import {
+  AuthIndexLockCompromisedFatalError,
+  AuthIndexLockError,
+  withAuthIndexLock,
+  type AuthIndexLockReason,
+} from './auth-index-lock.js';
+import {
+  backendFailureSentinels,
+  exportedErrorText,
+  maliciousBackendFailure,
+  reachableOwnDataText,
+} from './error-redaction.test-helper.js';
 
 const temporaryDirectories = new Set<string>();
+const normalizationFixturePath = fileURLToPath(
+  new URL('./auth-index-lock-normalization.fixture.ts', import.meta.url)
+);
+const finalClassFixturePath = fileURLToPath(
+  new URL('./auth-index-lock-final-class.fixture.ts', import.meta.url)
+);
+
+const validLockErrorOptions = Object.freeze({
+  reason: 'acquire-failed' as const,
+  code: 'unavailable' as const,
+  phase: 'acquire' as const,
+  providerId: 'github',
+  protectedOperationOutcome: 'not-started' as const,
+});
+
+function constructLockError(options: unknown): AuthIndexLockError {
+  return new AuthIndexLockError(
+    options as ConstructorParameters<typeof AuthIndexLockError>[0]
+  );
+}
+
+function captureConstructorDefect(options: unknown): TypeError {
+  try {
+    constructLockError(options);
+  } catch (error) {
+    expect(error).toBeInstanceOf(TypeError);
+    return error as TypeError;
+  }
+  throw new Error('expected AuthIndexLockError constructor to reject input');
+}
+
+function ownDataOptions(
+  prototype: object | null = Object.prototype
+): Record<string, unknown> {
+  const options = Object.create(prototype) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(validLockErrorOptions)) {
+    Object.defineProperty(options, key, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true,
+    });
+  }
+  return options;
+}
 
 async function secureTemporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'aide-auth-lock-'));
@@ -98,6 +157,504 @@ describe('auth index lock lifecycle', () => {
     expect(String(result.left)).not.toContain(parent);
   });
 
+  test('supports idiomatic catchTag and Match handling with a stable acquire reason', async () => {
+    const parent = await secureTemporaryDirectory();
+    Bun.env.AIDE_AUTH_INDEX_LOCK_ROOT = join(parent, 'missing-parent', 'locks');
+
+    const recovered: Effect.Effect<string | AuthIndexLockReason, never, never> =
+      withAuthIndexLock('github', Effect.succeed('protected')).pipe(
+        Effect.catchTag('AuthIndexLockError', (error) =>
+          Effect.succeed(error.reason)
+        )
+      );
+    const reason = await Effect.runPromise(recovered);
+    const matchReason = Match.type<AuthIndexLockError>().pipe(
+      Match.tag('AuthIndexLockError', (error) => error.reason),
+      Match.exhaustive
+    );
+    const error = new AuthIndexLockError({
+      reason: 'acquire-failed',
+      code: 'unavailable',
+      phase: 'acquire',
+      providerId: 'github',
+      protectedOperationOutcome: 'not-started',
+    });
+
+    expect(reason).toBe('acquire-failed');
+    expect(matchReason(error)).toBe('acquire-failed');
+    expect(error).toMatchObject({
+      _tag: 'AuthIndexLockError',
+      name: 'AuthIndexLockError',
+      reason: 'acquire-failed',
+    });
+    expect(error).toBeInstanceOf(AuthIndexLockError);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.name).toBe('AuthIndexLockError');
+    expect(error.message).toBe(
+      'Auth index coordination acquire failed (unavailable); protected operation not-started.'
+    );
+    expect(String(error)).toBe(
+      'AuthIndexLockError: Auth index coordination acquire failed (unavailable); protected operation not-started.'
+    );
+    const expectedJson = {
+      reason: 'acquire-failed',
+      code: 'unavailable',
+      phase: 'acquire',
+      providerId: 'github',
+      protectedOperationOutcome: 'not-started',
+      _tag: 'AuthIndexLockError',
+    } as const;
+    const firstJson = error.toJSON();
+    const secondJson = error.toJSON();
+    expect(firstJson).toEqual(expectedJson);
+    expect(secondJson).toEqual(expectedJson);
+    expect(firstJson).not.toBe(secondJson);
+    expect(Object.isFrozen(firstJson)).toBe(true);
+    expect(inspect(error)).toBe(inspect(expectedJson));
+  });
+
+  test('constructs from ordinary, null-prototype, and custom-prototype own data only', () => {
+    let inheritedReads = 0;
+    const customPrototype = Object.create(null) as Record<string, unknown>;
+    for (const key of Object.keys(validLockErrorOptions)) {
+      Object.defineProperty(customPrototype, key, {
+        get() {
+          inheritedReads += 1;
+          throw new Error('inherited constructor hook ran');
+        },
+      });
+    }
+
+    for (const options of [
+      ownDataOptions(),
+      ownDataOptions(null),
+      ownDataOptions(customPrototype),
+    ]) {
+      const error = constructLockError(options);
+      const literalTag: 'AuthIndexLockError' = error._tag;
+      expect(literalTag).toBe('AuthIndexLockError');
+      expect(error).toMatchObject(validLockErrorOptions);
+      expect(error.name).toBe('AuthIndexLockError');
+      expect(error).toBeInstanceOf(AuthIndexLockError);
+      expect(error).toBeInstanceOf(Error);
+    }
+    expect(inheritedReads).toBe(0);
+  });
+
+  test('rejects inherited fields, accessors, Proxies, hostile values, and malformed primitives with one fixed fresh defect', () => {
+    const secret = 'AUTH_LOCK_INVALID_INPUT_SECRET_638e';
+    let hooks = 0;
+    const hostileValue = {
+      get secret() {
+        hooks += 1;
+        return secret;
+      },
+      toJSON() {
+        hooks += 1;
+        return secret;
+      },
+      toString() {
+        hooks += 1;
+        return secret;
+      },
+      valueOf() {
+        hooks += 1;
+        return secret;
+      },
+      [inspect.custom]() {
+        hooks += 1;
+        return secret;
+      },
+    };
+
+    const inherited = Object.create(null) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(validLockErrorOptions)) {
+      Object.defineProperty(inherited, key, {
+        get() {
+          hooks += 1;
+          return value;
+        },
+      });
+    }
+
+    const ownAccessors = Object.create(null) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(validLockErrorOptions)) {
+      Object.defineProperty(ownAccessors, key, {
+        enumerable: true,
+        get() {
+          hooks += 1;
+          return value;
+        },
+      });
+    }
+
+    const proxyTarget = ownDataOptions();
+    Object.defineProperty(proxyTarget, 'secret', { value: secret });
+    const proxied = new Proxy(proxyTarget, {
+      get() {
+        hooks += 1;
+        throw new Error('proxy get trap ran');
+      },
+      getOwnPropertyDescriptor() {
+        hooks += 1;
+        throw new Error('proxy descriptor trap ran');
+      },
+      getPrototypeOf() {
+        hooks += 1;
+        throw new Error('proxy prototype trap ran');
+      },
+      ownKeys() {
+        hooks += 1;
+        throw new Error('proxy ownKeys trap ran');
+      },
+    });
+    const revoked = Proxy.revocable(proxyTarget, {});
+    revoked.revoke();
+
+    const invalid: unknown[] = [
+      null,
+      undefined,
+      true,
+      'options',
+      Object.create(inherited),
+      ownAccessors,
+      proxied,
+      revoked.proxy,
+      ...Object.keys(validLockErrorOptions).map((missing) => {
+        const options = ownDataOptions(null);
+        Reflect.deleteProperty(options, missing);
+        return options;
+      }),
+      { ...validLockErrorOptions, reason: 'unknown-reason' },
+      { ...validLockErrorOptions, code: 'ELOCKED' },
+      { ...validLockErrorOptions, phase: 'cleanup' },
+      { ...validLockErrorOptions, protectedOperationOutcome: 'unknown' },
+      { ...validLockErrorOptions, providerId: ' ado ' },
+      { ...validLockErrorOptions, providerId: 'ado' },
+      { ...validLockErrorOptions, providerId: 'GitHub' },
+      { ...validLockErrorOptions, providerId: '__proto__' },
+      { ...validLockErrorOptions, providerId: `${'a'.repeat(64)}b` },
+      { ...validLockErrorOptions, providerId: 'github\ud800' },
+      ...Object.keys(validLockErrorOptions).map((field) => ({
+        ...validLockErrorOptions,
+        [field]: hostileValue,
+      })),
+    ];
+
+    const defects = invalid.map(captureConstructorDefect);
+    expect(new Set(defects.map((error) => error.message)).size).toBe(1);
+    expect(defects[0]?.message).toBeTruthy();
+    expect(new Set(defects).size).toBe(defects.length);
+    for (const defect of defects) {
+      expect(Object.hasOwn(defect, 'cause')).toBe(false);
+      expect(reachableOwnDataText(defect)).not.toContain(secret);
+    }
+    expect(hooks).toBe(0);
+  });
+
+  test('ignores hostile extras and freezes every exported and Effect payload surface', async () => {
+    const secret = 'AUTH_LOCK_IMMUTABILITY_SECRET_1f7b';
+    let hooks = 0;
+    const hostile = Object.create(null) as Record<PropertyKey, unknown>;
+    hostile.self = hostile;
+    hostile.secret = secret;
+    hostile.toJSON = () => {
+      hooks += 1;
+      return secret;
+    };
+    hostile.toString = () => {
+      hooks += 1;
+      return secret;
+    };
+    hostile.valueOf = () => {
+      hooks += 1;
+      return secret;
+    };
+    hostile[inspect.custom] = () => {
+      hooks += 1;
+      return secret;
+    };
+
+    const ignoredSymbol = Symbol(secret);
+    const options = ownDataOptions(null);
+    Object.defineProperties(options, {
+      cause: { value: hostile },
+      extra: { enumerable: true, value: hostile },
+      hidden: { value: hostile },
+      accessorExtra: {
+        get() {
+          hooks += 1;
+          return hostile;
+        },
+      },
+    });
+    Object.defineProperty(options, ignoredSymbol, {
+      enumerable: true,
+      value: hostile,
+    });
+
+    const error = constructLockError(options);
+    options.providerId = 'attacker';
+    options.reason = 'release-failed';
+    hostile.later = 'AUTH_LOCK_LATE_MUTATION_SECRET_23ac';
+
+    expect(error).toMatchObject(validLockErrorOptions);
+    expect(Object.isFrozen(error)).toBe(true);
+    expect(Object.isExtensible(error)).toBe(false);
+
+    for (const field of [
+      '_tag',
+      'reason',
+      'code',
+      'phase',
+      'providerId',
+      'protectedOperationOutcome',
+      'stack',
+    ]) {
+      const descriptor = Object.getOwnPropertyDescriptor(error, field);
+      expect(descriptor).toBeDefined();
+      expect(descriptor?.configurable).toBe(false);
+      expect(descriptor?.writable).toBe(false);
+    }
+    expect(Object.hasOwn(error, 'message')).toBe(false);
+
+    const plainArgsSymbol = Object.getOwnPropertySymbols(error).find((symbol) =>
+      String(symbol).includes('effect/Data/Error/plainArgs')
+    );
+    expect(plainArgsSymbol).toBeDefined();
+    const plainArgs =
+      plainArgsSymbol === undefined
+        ? undefined
+        : Object.getOwnPropertyDescriptor(error, plainArgsSymbol)?.value;
+    expect(plainArgs).toBeDefined();
+    expect(plainArgs).not.toBe(options);
+    expect(Object.isFrozen(plainArgs)).toBe(true);
+    expect(Reflect.ownKeys(plainArgs as object).sort()).toEqual(
+      Object.keys(validLockErrorOptions).sort()
+    );
+    for (const value of Object.values(plainArgs as object)) {
+      expect(['string', 'number', 'boolean', 'undefined']).toContain(
+        typeof value
+      );
+    }
+
+    const safeBefore = [
+      exportedErrorText(error),
+      renderTopLevelError(error),
+      inspect(Cause.fail(error), {
+        depth: 20,
+        getters: false,
+        showHidden: true,
+      }),
+    ].join('\n');
+    expect(safeBefore).not.toContain(secret);
+    expect(safeBefore).not.toContain('AUTH_LOCK_LATE_MUTATION_SECRET_23ac');
+    expect(hooks).toBe(0);
+
+    const mutationSymbol = Symbol('AUTH_LOCK_MUTATION_SYMBOL_99de');
+    expect(Reflect.set(error, 'providerId', secret)).toBe(false);
+    expect(Reflect.set(error, '_tag', secret)).toBe(false);
+    expect(Reflect.set(error, mutationSymbol, secret)).toBe(false);
+    expect(
+      Reflect.defineProperty(error, 'hiddenMutation', { value: secret })
+    ).toBe(false);
+    expect(Reflect.defineProperty(error, 'message', { value: secret })).toBe(
+      false
+    );
+    expect(Reflect.deleteProperty(error, 'reason')).toBe(false);
+    expect(Reflect.set(plainArgs as object, 'providerId', secret)).toBe(false);
+    expect(Reflect.set(plainArgs as object, 'secret', secret)).toBe(false);
+
+    const exit = await Effect.runPromiseExit(Effect.fail(error));
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isSuccess(exit)) throw new Error('expected typed lock failure');
+    expect(Cause.failureOption(exit.cause)).toEqual(Option.some(error));
+
+    const safeAfter = [
+      exportedErrorText(error),
+      renderTopLevelError(error),
+      inspect(exit.cause, { depth: 20, getters: false, showHidden: true }),
+    ].join('\n');
+    expect(safeAfter).toBe(safeBefore);
+    expect(safeAfter).not.toContain(secret);
+    expect(hooks).toBe(0);
+  });
+
+  test('keeps the exported constructor and prototype final after an instance exists', async () => {
+    const inheritedEnvironment = { ...Bun.env };
+    delete inheritedEnvironment.FORCE_COLOR;
+    delete inheritedEnvironment.NO_COLOR;
+    const child = Bun.spawn({
+      cmd: [process.execPath, 'run', finalClassFixturePath],
+      cwd: import.meta.dir,
+      env: inheritedEnvironment,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout as ReadableStream<Uint8Array>).text(),
+      new Response(child.stderr as ReadableStream<Uint8Array>).text(),
+    ]);
+
+    expect(`${stdout}\n${stderr}`).not.toContain(
+      'AUTH_LOCK_PROTOTYPE_MUTATION_SECRET_7f31'
+    );
+    expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
+  });
+
+  test('rejects hostile subclass construction with fixed fresh defects', () => {
+    const secret = 'AUTH_LOCK_HOSTILE_SUBCLASS_SECRET_11c4';
+    class HostileSubclass extends AuthIndexLockError {
+      override get name(): string {
+        return secret;
+      }
+
+      override get message(): string {
+        return secret;
+      }
+
+      override toJSON() {
+        return {
+          ...validLockErrorOptions,
+          providerId: secret,
+          _tag: 'AuthIndexLockError' as const,
+        };
+      }
+
+      override toString(): string {
+        return secret;
+      }
+
+      override [inspect.custom]() {
+        return this.toJSON();
+      }
+    }
+
+    const instances: HostileSubclass[] = [];
+    const defects: unknown[] = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        instances.push(new HostileSubclass(validLockErrorOptions));
+      } catch (error) {
+        defects.push(error);
+      }
+    }
+    const exposed = instances
+      .flatMap((instance) => [
+        JSON.stringify(instance),
+        inspect(instance),
+        inspect(Cause.fail(instance)),
+        renderTopLevelError(instance),
+        String(instance),
+        instance.name,
+        instance.message,
+        reachableOwnDataText(instance),
+      ])
+      .join('\n');
+
+    expect(instances).toHaveLength(0);
+    expect(defects).toHaveLength(2);
+    expect(new Set(defects).size).toBe(2);
+    expect(new Set(defects.map((defect) => String(defect))).size).toBe(1);
+    for (const defect of defects) {
+      expect(defect).toBeInstanceOf(TypeError);
+      if (!(defect instanceof TypeError)) throw new Error('wrong defect type');
+      expect(defect.message).toBe(
+        'Invalid AuthIndexLockError constructor options.'
+      );
+      expect(Object.hasOwn(defect, 'cause')).toBe(false);
+      expect(exportedErrorText(defect)).not.toContain(secret);
+      expect(renderTopLevelError(defect)).not.toContain(secret);
+      expect(inspect(Cause.die(defect))).not.toContain(secret);
+      expect(reachableOwnDataText(defect)).not.toContain(secret);
+    }
+    expect(exposed).not.toContain(secret);
+  });
+
+  test('normalizes arbitrary Promise-library rejections without traps or identity escape', async () => {
+    const inheritedEnvironment = { ...Bun.env };
+    delete inheritedEnvironment.FORCE_COLOR;
+    delete inheritedEnvironment.NO_COLOR;
+    const child = Bun.spawn({
+      cmd: [process.execPath, 'run', normalizationFixturePath],
+      cwd: import.meta.dir,
+      env: inheritedEnvironment,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout as ReadableStream<Uint8Array>).text(),
+      new Response(child.stderr as ReadableStream<Uint8Array>).text(),
+    ]);
+
+    expect(`${stdout}\n${stderr}`).not.toContain(
+      'AUTH_LOCK_NORMALIZATION_SECRET_6a42'
+    );
+    expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
+  });
+
+  test('does not retain hostile causes or caller extras on any exported or CLI surface', () => {
+    const path = '/private/tmp/AUTH_LOCK_PATH_SENTINEL_8d51';
+    const credential = 'AUTH_LOCK_CREDENTIAL_SENTINEL_9c2e';
+    const account = 'AUTH_LOCK_ACCOUNT_SENTINEL_a117';
+    const token = 'AUTH_LOCK_TOKEN_SENTINEL_f043';
+    const environment = 'AUTH_LOCK_ENV_SENTINEL_74bb';
+    const fixture = maliciousBackendFailure([
+      path,
+      credential,
+      account,
+      token,
+      environment,
+    ]);
+    const hostileOptions = {
+      reason: 'acquire-failed' as const,
+      code: 'unavailable' as const,
+      phase: 'acquire' as const,
+      providerId: 'github',
+      protectedOperationOutcome: 'not-started' as const,
+      cause: fixture.failure,
+      path,
+      credential,
+      account,
+      token,
+      environment,
+    };
+
+    const error = new AuthIndexLockError(hostileOptions);
+    const surfaces = `${exportedErrorText(error)}\n${renderTopLevelError(error)}`;
+    for (const secret of [
+      ...backendFailureSentinels,
+      path,
+      credential,
+      account,
+      token,
+      environment,
+    ]) {
+      expect(surfaces).not.toContain(secret);
+    }
+    expect(fixture.getterReads()).toBe(0);
+  });
+
+  test('keeps fatal ownership compromise outside ordinary tagged recovery', async () => {
+    const fatal = new AuthIndexLockCompromisedFatalError();
+    const fatalProgram: Effect.Effect<never, AuthIndexLockError, never> =
+      Effect.die(fatal);
+    const exit = await Effect.runPromiseExit(
+      fatalProgram.pipe(
+        Effect.catchTag('AuthIndexLockError', () => Effect.succeed('recovered'))
+      )
+    );
+
+    expect(fatal).not.toBeInstanceOf(AuthIndexLockError);
+    expect(Object.hasOwn(fatal, '_tag')).toBe(false);
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isSuccess(exit)) throw new Error('expected fatal defect');
+    expect(Cause.dieOption(exit.cause)).toEqual(Option.some(fatal));
+    expect(Option.isNone(Cause.failureOption(exit.cause))).toBe(true);
+  });
+
   test('releases an acquired lock when the protected Effect is interrupted', async () => {
     const parent = await secureTemporaryDirectory();
     const root = join(parent, 'locks');
@@ -169,6 +726,8 @@ describe('auth index lock lifecycle', () => {
     if (result._tag === 'Right') throw new Error('expected release failure');
     expect(result.left).toBeInstanceOf(AuthIndexLockError);
     expect(result.left).toMatchObject({
+      _tag: 'AuthIndexLockError',
+      reason: 'release-failed',
       code: 'unavailable',
       phase: 'release',
       providerId: 'github',
@@ -183,35 +742,113 @@ describe('auth index lock lifecycle', () => {
     Bun.env.AIDE_AUTH_INDEX_LOCK_ROOT = root;
     const useFailure = new Error('protected failure sentinel');
 
-    const result = await Effect.runPromise(
-      Effect.either(
-        withAuthIndexLock(
-          'github',
-          Effect.gen(function* () {
-            yield* Effect.tryPromise({
-              try: async () => {
-                const lockDirectory = await waitForLockDirectory(root);
-                await writeFile(join(lockDirectory, 'prevent-release'), 'x');
-              },
-              catch: (error) => error,
-            });
-            return yield* Effect.fail(useFailure);
-          })
-        )
+    const exit = await Effect.runPromiseExit(
+      withAuthIndexLock(
+        'github',
+        Effect.gen(function* () {
+          yield* Effect.tryPromise({
+            try: async () => {
+              const lockDirectory = await waitForLockDirectory(root);
+              await writeFile(join(lockDirectory, 'prevent-release'), 'x');
+            },
+            catch: (error) => error,
+          });
+          return yield* Effect.fail(useFailure);
+        })
       )
     );
 
-    expect(result._tag).toBe('Left');
-    if (result._tag === 'Right') throw new Error('expected release failure');
-    expect(result.left).toBeInstanceOf(AuthIndexLockError);
-    expect(result.left).toMatchObject({
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isSuccess(exit)) throw new Error('expected release failure');
+    const failure = Cause.failureOption(exit.cause);
+    expect(Option.isSome(failure)).toBe(true);
+    if (Option.isNone(failure)) throw new Error('expected typed lock failure');
+    expect(failure.value).toBeInstanceOf(AuthIndexLockError);
+    expect(failure.value).toMatchObject({
+      _tag: 'AuthIndexLockError',
+      reason: 'release-failed',
       code: 'unavailable',
       phase: 'release',
       providerId: 'github',
       protectedOperationOutcome: 'failed',
     });
-    expect(result.left).not.toBe(useFailure);
-    expect(String(result.left)).not.toContain(parent);
+    expect(failure.value).not.toBe(useFailure);
+    expect(Array.from(Cause.failures(exit.cause))).toEqual([failure.value]);
+    expect(Array.from(Cause.defects(exit.cause))).toEqual([]);
+    expect(String(failure.value)).not.toContain(parent);
+  });
+
+  test('keeps a protected defect behind the primary release failure', async () => {
+    const parent = await secureTemporaryDirectory();
+    const root = join(parent, 'locks');
+    Bun.env.AIDE_AUTH_INDEX_LOCK_ROOT = root;
+    const defect = new Error('protected programmer defect sentinel');
+
+    const exit = await Effect.runPromiseExit(
+      withAuthIndexLock(
+        'github',
+        Effect.gen(function* () {
+          yield* Effect.tryPromise({
+            try: async () => {
+              const lockDirectory = await waitForLockDirectory(root);
+              await writeFile(join(lockDirectory, 'prevent-release'), 'x');
+            },
+            catch: (error) => error,
+          });
+          return yield* Effect.die(defect);
+        })
+      )
+    );
+
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isSuccess(exit)) throw new Error('expected release failure');
+    const failure = Cause.failureOption(exit.cause);
+    expect(Option.isSome(failure)).toBe(true);
+    if (Option.isNone(failure)) throw new Error('expected typed lock failure');
+    expect(failure.value).toMatchObject({
+      _tag: 'AuthIndexLockError',
+      reason: 'release-failed',
+      code: 'unavailable',
+      phase: 'release',
+      providerId: 'github',
+      protectedOperationOutcome: 'failed',
+    });
+    expect(Array.from(Cause.failures(exit.cause))).toEqual([failure.value]);
+    expect(Array.from(Cause.defects(exit.cause))).toEqual([defect]);
+    expect(Cause.isInterrupted(exit.cause)).toBe(false);
+    expect(Cause.isSequentialType(exit.cause)).toBe(true);
+    if (!Cause.isSequentialType(exit.cause)) {
+      throw new Error('expected release-first sequential Cause');
+    }
+    expect(Cause.failureOption(exit.cause.left)).toEqual(
+      Option.some(failure.value)
+    );
+    expect(Array.from(Cause.defects(exit.cause.right))).toEqual([defect]);
+  });
+
+  test('reports a finalizer cleanup failure without swallowing interruption semantics', async () => {
+    const parent = await secureTemporaryDirectory();
+    const root = join(parent, 'locks');
+    Bun.env.AIDE_AUTH_INDEX_LOCK_ROOT = root;
+
+    const holder = Effect.runFork(withAuthIndexLock('github', Effect.never));
+    const lockDirectory = await waitForLockDirectory(root);
+    await writeFile(join(lockDirectory, 'prevent-release'), 'x');
+    const exit = await Effect.runPromise(Fiber.interrupt(holder));
+
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isSuccess(exit)) throw new Error('expected interrupted cleanup');
+    const failure = Cause.failureOption(exit.cause);
+    expect(Option.isSome(failure)).toBe(true);
+    if (Option.isNone(failure)) throw new Error('expected cleanup failure');
+    expect(failure.value).toMatchObject({
+      _tag: 'AuthIndexLockError',
+      reason: 'cleanup-failed',
+      phase: 'release',
+      protectedOperationOutcome: 'failed',
+    });
+    expect(Cause.isInterrupted(exit.cause)).toBe(true);
+    expect(String(failure.value)).not.toContain(parent);
   });
 
   test('cleans up acquisition that is interrupted during contention', async () => {
@@ -261,6 +898,8 @@ describe('auth index lock lifecycle', () => {
     expect(contender._tag).toBe('Left');
     if (contender._tag === 'Right') throw new Error('expected lock timeout');
     expect(contender.left).toMatchObject({
+      _tag: 'AuthIndexLockError',
+      reason: 'contention-timeout',
       code: 'timeout',
       phase: 'acquire',
       protectedOperationOutcome: 'not-started',
