@@ -2,12 +2,15 @@
  * PR comment command - Post a comment on a pull request.
  */
 
-import { Effect } from 'effect';
 import type { ArgumentsCamelCase, Argv, CommandModule } from 'yargs';
 
 import type { AidePullRequestCommentMutationResult } from '@cli/host/plugin-descriptor.js';
 import { logProgress } from '@lib/cli-utils.js';
-import { handleCommandError } from '@lib/errors.js';
+import {
+  handlePullRequestCommandError,
+  pullRequestCommandError,
+  runPullRequestCommandEffect,
+} from './error.js';
 import { validateArgs } from '@lib/validation.js';
 import {
   PrCommentArgsSchema,
@@ -123,27 +126,31 @@ export function validatePullRequestCommentLocation(
   args: Pick<PrCommentArgs, 'file' | 'line' | 'endLine'>
 ): void {
   if (args.file !== undefined && args.file.trim() === '') {
-    throw new Error('--file cannot be empty.');
+    throw pullRequestCommandError('--file cannot be empty.');
   }
   if (args.file !== undefined && args.line === undefined) {
-    throw new Error(
+    throw pullRequestCommandError(
       '--line is required when --file is specified. To comment on a specific file location, provide both --file and --line.'
     );
   }
   if (args.line !== undefined && args.file === undefined) {
-    throw new Error(
+    throw pullRequestCommandError(
       '--file is required when --line is specified. To comment on a specific file location, provide both --file and --line.'
     );
   }
   if (args.endLine !== undefined && args.line === undefined) {
-    throw new Error('--line is required when --end-line is specified.');
+    throw pullRequestCommandError(
+      '--line is required when --end-line is specified.'
+    );
   }
   if (
     args.endLine !== undefined &&
     args.line !== undefined &&
     args.endLine < args.line
   ) {
-    throw new Error('--end-line must be greater than or equal to --line.');
+    throw pullRequestCommandError(
+      '--end-line must be greater than or equal to --line.'
+    );
   }
 }
 
@@ -181,7 +188,7 @@ async function handler(argv: ArgumentsCamelCase<PrCommentArgs>): Promise<void> {
     }
     logProgress('', format);
 
-    const result = await Effect.runPromise(
+    const result = await runPullRequestCommandEffect(
       resolved.context.addPullRequestComment({
         pullRequest: { number: prNumber },
         body: comment,
@@ -203,7 +210,7 @@ async function handler(argv: ArgumentsCamelCase<PrCommentArgs>): Promise<void> {
       })
     );
   } catch (error) {
-    handleCommandError(error);
+    handlePullRequestCommandError(error);
   }
 }
 

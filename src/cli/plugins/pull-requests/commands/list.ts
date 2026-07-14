@@ -3,13 +3,16 @@
  * Supports Azure DevOps and GitHub
  */
 
-import { Effect } from 'effect';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 import type { AidePullRequestListResult } from '@cli/host/plugin-descriptor.js';
 import { getAideHostContext } from '@cli/host/runtime-context.js';
 import { logProgress } from '@lib/cli-utils.js';
-import { handleCommandError } from '@lib/errors.js';
+import {
+  handlePullRequestCommandError,
+  pullRequestCommandError,
+  runPullRequestCommandEffect,
+} from './error.js';
 import { getGitRemoteUrl } from '@lib/git-utils.js';
 import { validateArgs } from '@lib/validation.js';
 import {
@@ -109,7 +112,7 @@ async function handler(argv: ArgumentsCamelCase<ListArgs>): Promise<void> {
 
     console.log(formatPullRequestListOutput(resolved.result, format));
   } catch (error) {
-    handleCommandError(error);
+    handlePullRequestCommandError(error);
   }
 }
 
@@ -122,7 +125,9 @@ async function resolvePullRequestList(
 }> {
   const hostContext = getAideHostContext(argv);
   if (hostContext === null) {
-    throw new Error('Pull request provider services are unavailable.');
+    throw pullRequestCommandError(
+      'Pull request provider services are unavailable.'
+    );
   }
 
   const request = {
@@ -134,7 +139,7 @@ async function resolvePullRequestList(
   if (hasExplicitPullRequestRepositoryInput(args)) {
     const { repository, autoDiscovered } =
       await resolveExplicitPullRequestRepositoryRef(hostContext.services, args);
-    const result = await Effect.runPromise(
+    const result = await runPullRequestCommandEffect(
       hostContext.services.listPullRequestsForRepository(repository, request)
     );
     return { result, autoDiscovered };
@@ -142,12 +147,12 @@ async function resolvePullRequestList(
 
   const remoteUrl = getGitRemoteUrl();
   if (remoteUrl === null) {
-    throw new Error(
+    throw pullRequestCommandError(
       'Could not determine repository context. Run this command from a git repository with a supported remote or specify explicit repository options.'
     );
   }
 
-  const result = await Effect.runPromise(
+  const result = await runPullRequestCommandEffect(
     hostContext.services.listPullRequestsForRemote(remoteUrl, request)
   );
   return { result, autoDiscovered: true };

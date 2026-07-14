@@ -2,7 +2,6 @@
  * PR update command - Update a pull request.
  */
 
-import { Effect } from 'effect';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 import type {
@@ -10,7 +9,11 @@ import type {
   AidePullRequestUpdateResult,
 } from '@cli/host/plugin-descriptor.js';
 import { logProgress } from '@lib/cli-utils.js';
-import { handleCommandError } from '@lib/errors.js';
+import {
+  handlePullRequestCommandError,
+  pullRequestCommandError,
+  runPullRequestCommandEffect,
+} from './error.js';
 import { validateArgs } from '@lib/validation.js';
 import {
   PrUpdateArgsSchema,
@@ -50,7 +53,7 @@ export function buildPullRequestUpdateOperationRequest(
   };
 
   if (!hasPullRequestUpdates(request)) {
-    throw new Error(
+    throw pullRequestCommandError(
       'No updates specified. Use one or more of: --title, --description, --target, --draft, --publish, --abandon, --activate, --tag, --remove-tag'
     );
   }
@@ -62,10 +65,14 @@ export function validatePullRequestUpdateFlags(
   args: Pick<PrUpdateArgs, 'draft' | 'publish' | 'abandon' | 'activate'>
 ): void {
   if (args.draft && args.publish) {
-    throw new Error('Cannot use both --draft and --publish flags.');
+    throw pullRequestCommandError(
+      'Cannot use both --draft and --publish flags.'
+    );
   }
   if (args.abandon && args.activate) {
-    throw new Error('Cannot use both --abandon and --activate flags.');
+    throw pullRequestCommandError(
+      'Cannot use both --abandon and --activate flags.'
+    );
   }
 }
 
@@ -247,7 +254,7 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
 
     const prNumber = resolved.context.result.pullRequest.id;
     logUpdateProgress(prNumber, updateRequest, format);
-    const result = await Effect.runPromise(
+    const result = await runPullRequestCommandEffect(
       resolved.context.updatePullRequest({
         pullRequest: { number: prNumber },
         ...updateRequest,
@@ -257,7 +264,7 @@ async function handler(argv: ArgumentsCamelCase<PrUpdateArgs>): Promise<void> {
     logUpdateWarnings(result, format);
     console.log(formatPullRequestUpdateOutput(result, format));
   } catch (error) {
-    handleCommandError(error);
+    handlePullRequestCommandError(error);
   }
 }
 

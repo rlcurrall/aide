@@ -3,13 +3,16 @@
  * Supports Azure DevOps and GitHub
  */
 
-import { Effect } from 'effect';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 import type { AidePullRequestViewResult } from '@cli/host/plugin-descriptor.js';
 import { getAideHostContext } from '@cli/host/runtime-context.js';
 import { logProgress } from '@lib/cli-utils.js';
-import { handleCommandError } from '@lib/errors.js';
+import {
+  handlePullRequestCommandError,
+  pullRequestCommandError,
+  runPullRequestCommandEffect,
+} from './error.js';
 import { getCurrentBranch, getGitRemoteUrl } from '@lib/git-utils.js';
 import { validateArgs } from '@lib/validation.js';
 import {
@@ -120,7 +123,7 @@ async function handler(argv: ArgumentsCamelCase<ViewArgs>): Promise<void> {
 
     console.log(formatPullRequestViewOutput(resolved.result, format));
   } catch (error) {
-    handleCommandError(error);
+    handlePullRequestCommandError(error);
   }
 }
 
@@ -134,13 +137,15 @@ async function resolvePullRequestView(
 }> {
   const hostContext = getAideHostContext(argv);
   if (hostContext === null) {
-    throw new Error('Pull request provider services are unavailable.');
+    throw pullRequestCommandError(
+      'Pull request provider services are unavailable.'
+    );
   }
 
   if (args.pr === undefined) {
     const branch = getCurrentBranch();
     if (!branch) {
-      throw new Error(
+      throw pullRequestCommandError(
         'Could not detect current git branch. Are you in a git repository? (Detached HEAD state is not supported)'
       );
     }
@@ -155,7 +160,7 @@ async function resolvePullRequestView(
               hostContext.services,
               args
             );
-          const result = await Effect.runPromise(
+          const result = await runPullRequestCommandEffect(
             hostContext.services.findPullRequestForBranchForRepository(
               repository,
               {
@@ -168,11 +173,11 @@ async function resolvePullRequestView(
       : await (async () => {
           const remoteUrl = getGitRemoteUrl();
           if (!remoteUrl) {
-            throw new Error(
+            throw pullRequestCommandError(
               'Could not determine repository context. Provide a PR ID, full PR URL, or run from a git repository with a supported remote.'
             );
           }
-          const result = await Effect.runPromise(
+          const result = await runPullRequestCommandEffect(
             hostContext.services.findPullRequestForBranchForRemote(remoteUrl, {
               branch,
             })
@@ -189,7 +194,7 @@ async function resolvePullRequestView(
   }
 
   if (args.pr.startsWith('http')) {
-    const result = await Effect.runPromise(
+    const result = await runPullRequestCommandEffect(
       hostContext.services.getPullRequestForUrl(args.pr)
     );
     return { result, autoDiscovered: false };
@@ -197,7 +202,7 @@ async function resolvePullRequestView(
 
   const validation = validatePullRequestId(args.pr);
   if (!validation.valid || validation.value === undefined) {
-    throw new Error(
+    throw pullRequestCommandError(
       `Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
     );
   }
@@ -205,7 +210,7 @@ async function resolvePullRequestView(
   if (hasExplicitPullRequestRepositoryInput(args)) {
     const { repository, autoDiscovered } =
       await resolveExplicitPullRequestRepositoryRef(hostContext.services, args);
-    const result = await Effect.runPromise(
+    const result = await runPullRequestCommandEffect(
       hostContext.services.getPullRequestForRepository(repository, {
         pullRequest: { number: validation.value },
       })
@@ -215,12 +220,12 @@ async function resolvePullRequestView(
 
   const remoteUrl = getGitRemoteUrl();
   if (!remoteUrl) {
-    throw new Error(
+    throw pullRequestCommandError(
       'Could not determine repository context. Provide a full PR URL or run from a git repository with a supported remote.'
     );
   }
 
-  const result = await Effect.runPromise(
+  const result = await runPullRequestCommandEffect(
     hostContext.services.getPullRequestForRemote(remoteUrl, {
       pullRequest: { number: validation.value },
     })

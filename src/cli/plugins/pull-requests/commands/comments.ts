@@ -15,7 +15,11 @@ import type {
 } from '@cli/host/plugin-descriptor.js';
 import { getAideHostContext } from '@cli/host/runtime-context.js';
 import { logProgress } from '@lib/cli-utils.js';
-import { handleCommandError } from '@lib/errors.js';
+import {
+  handlePullRequestCommandError,
+  pullRequestCommandError,
+  runPullRequestCommandEffect,
+} from './error.js';
 import { getCurrentBranch, getGitRemoteUrl } from '@lib/git-utils.js';
 import { validateArgs } from '@lib/validation.js';
 import {
@@ -335,7 +339,7 @@ async function loadCommentsFromContext(
     `Fetching comments for PR #${context.result.pullRequest.id}...`,
     format
   );
-  return Effect.runPromise(
+  return runPullRequestCommandEffect(
     context.listPullRequestComments({
       pullRequest: { number: context.result.pullRequest.id },
     })
@@ -349,13 +353,15 @@ async function resolvePullRequestComments(
 ): Promise<ResolvedComments> {
   const hostContext = getAideHostContext(argv);
   if (hostContext === null) {
-    throw new Error('Pull request provider services are unavailable.');
+    throw pullRequestCommandError(
+      'Pull request provider services are unavailable.'
+    );
   }
 
   if (args.pr === undefined) {
     const branch = getCurrentBranch();
     if (!branch) {
-      throw new Error(
+      throw pullRequestCommandError(
         'Could not detect current git branch. Are you in a git repository? (Detached HEAD state is not supported)'
       );
     }
@@ -368,7 +374,7 @@ async function resolvePullRequestComments(
               hostContext.services,
               args
             );
-          const context = await Effect.runPromise(
+          const context = await runPullRequestCommandEffect(
             hostContext.services.findPullRequestForBranchContextForRepository(
               repository,
               { branch }
@@ -380,7 +386,7 @@ async function resolvePullRequestComments(
           const remoteUrl = gitRemoteOrThrow(
             'Could not determine repository context. Provide a PR ID, full PR URL, or run from a git repository with a supported remote.'
           );
-          const context = await Effect.runPromise(
+          const context = await runPullRequestCommandEffect(
             hostContext.services.findPullRequestForBranchContextForRemote(
               remoteUrl,
               { branch }
@@ -401,7 +407,7 @@ async function resolvePullRequestComments(
   }
 
   if (args.pr.startsWith('http')) {
-    const context = await Effect.runPromise(
+    const context = await runPullRequestCommandEffect(
       hostContext.services.getPullRequestContextForUrl(args.pr)
     );
     return {
@@ -412,7 +418,7 @@ async function resolvePullRequestComments(
 
   const validation = validatePullRequestId(args.pr);
   if (!validation.valid || validation.value === undefined) {
-    throw new Error(
+    throw pullRequestCommandError(
       `Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
     );
   }
@@ -421,7 +427,7 @@ async function resolvePullRequestComments(
   if (hasExplicitPullRequestRepositoryInput(args)) {
     const { repository, autoDiscovered } =
       await resolveExplicitPullRequestRepositoryRef(hostContext.services, args);
-    const context = await Effect.runPromise(
+    const context = await runPullRequestCommandEffect(
       hostContext.services.getPullRequestContextForRepository(repository, {
         pullRequest: { number: prNumber },
       })
@@ -435,7 +441,7 @@ async function resolvePullRequestComments(
   const remoteUrl = gitRemoteOrThrow(
     'Could not determine repository context. Provide a full PR URL or run from a git repository with a supported remote.'
   );
-  const context = await Effect.runPromise(
+  const context = await runPullRequestCommandEffect(
     hostContext.services.getPullRequestContextForRemote(remoteUrl, {
       pullRequest: { number: prNumber },
     })
@@ -449,7 +455,7 @@ async function resolvePullRequestComments(
 function gitRemoteOrThrow(message: string): string {
   const remoteUrl = getGitRemoteUrl();
   if (!remoteUrl) {
-    throw new Error(message);
+    throw pullRequestCommandError(message);
   }
   return remoteUrl;
 }
@@ -488,7 +494,7 @@ async function handler(argv: ArgumentsCamelCase<CommentsArgs>): Promise<void> {
       formatPullRequestCommentsOutput(resolved.result, threads, format)
     );
   } catch (error) {
-    handleCommandError(error);
+    handlePullRequestCommandError(error);
   }
 }
 

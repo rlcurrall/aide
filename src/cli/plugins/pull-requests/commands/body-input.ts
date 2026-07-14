@@ -1,3 +1,5 @@
+import { pullRequestCommandError } from './error.js';
+
 export interface PullRequestBodyInput {
   body?: string;
   description?: string;
@@ -42,7 +44,7 @@ function resolveAliasGroup(
 
   const conflict = defined.find((candidate) => candidate.value !== first.value);
   if (conflict) {
-    throw new Error(message);
+    throw pullRequestCommandError(message);
   }
 
   return first;
@@ -84,7 +86,7 @@ export function selectPullRequestBodyInputSource(
   );
 
   if (direct && file) {
-    throw new Error(AMBIGUOUS_BODY_INPUT_MESSAGE);
+    throw pullRequestCommandError(AMBIGUOUS_BODY_INPUT_MESSAGE);
   }
 
   if (direct) {
@@ -103,7 +105,7 @@ export function selectPullRequestBodyInputSource(
   }
 
   if (file.value.length === 0) {
-    throw new Error('PR body file path cannot be empty');
+    throw pullRequestCommandError('PR body file path cannot be empty');
   }
 
   return {

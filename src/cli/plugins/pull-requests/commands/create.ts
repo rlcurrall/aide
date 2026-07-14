@@ -2,7 +2,6 @@
  * PR create command - Create a pull request.
  */
 
-import { Effect } from 'effect';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 
 import type {
@@ -11,7 +10,11 @@ import type {
 } from '@cli/host/plugin-descriptor.js';
 import { getAideHostContext } from '@cli/host/runtime-context.js';
 import { logProgress } from '@lib/cli-utils.js';
-import { handleCommandError } from '@lib/errors.js';
+import {
+  handlePullRequestCommandError,
+  pullRequestCommandError,
+  runPullRequestCommandEffect,
+} from './error.js';
 import { getCurrentBranch, getGitRemoteUrl } from '@lib/git-utils.js';
 import { validateArgs } from '@lib/validation.js';
 import {
@@ -81,7 +84,7 @@ export function resolvePullRequestCreateBranches(
 
   if (sourceBranch === undefined) {
     if (!currentBranch) {
-      throw new Error(
+      throw pullRequestCommandError(
         'Could not detect current branch. Please specify --head branch explicitly.'
       );
     }
@@ -224,7 +227,9 @@ async function createPullRequest(
 }> {
   const hostContext = getAideHostContext(argv);
   if (hostContext === null) {
-    throw new Error('Pull request provider services are unavailable.');
+    throw pullRequestCommandError(
+      'Pull request provider services are unavailable.'
+    );
   }
 
   const remoteUrl = getGitRemoteUrl();
@@ -237,13 +242,13 @@ async function createPullRequest(
           hostContext.services,
           args
         );
-      const result = await Effect.runPromise(
+      const result = await runPullRequestCommandEffect(
         hostContext.services.createPullRequestForRepository(repository, request)
       );
       return { result, autoDiscovered };
     }
     case 'remote': {
-      const result = await Effect.runPromise(
+      const result = await runPullRequestCommandEffect(
         hostContext.services.createPullRequestForRemote(
           target.remoteUrl,
           request
@@ -252,7 +257,7 @@ async function createPullRequest(
       return { result, autoDiscovered: true };
     }
     case 'missing':
-      throw new Error(
+      throw pullRequestCommandError(
         'Could not determine repository context. Run this command from a git repository with a supported remote or specify explicit repository options.'
       );
   }
@@ -299,7 +304,7 @@ async function handler(argv: ArgumentsCamelCase<PrCreateArgs>): Promise<void> {
     logCreateWarnings(resolved.result, format);
     console.log(formatPullRequestCreateOutput(resolved.result, format));
   } catch (error) {
-    handleCommandError(error);
+    handlePullRequestCommandError(error);
   }
 }
 

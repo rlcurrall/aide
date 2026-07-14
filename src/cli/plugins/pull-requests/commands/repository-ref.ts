@@ -1,4 +1,3 @@
-import { Effect } from 'effect';
 import type { Options } from 'yargs';
 
 import type {
@@ -6,6 +5,7 @@ import type {
   AidePullRequestRepositoryRef,
 } from '@cli/host/plugin-descriptor.js';
 import type { AideHostServices } from '@cli/host/runtime-context.js';
+import { runPullRequestCommandEffect } from './error.js';
 
 export interface PullRequestRepositoryArgs {
   readonly provider?: string;
@@ -66,7 +66,7 @@ export async function resolveExplicitPullRequestRepositoryRef(
   args: PullRequestRepositoryArgs
 ): Promise<ResolvedPullRequestRepositoryRef> {
   const input = buildPullRequestRepositoryInput(args);
-  const provider = await Effect.runPromise(
+  const provider = await runPullRequestCommandEffect(
     services.resolvePullRequestProviderForRepositoryInput(input)
   );
 

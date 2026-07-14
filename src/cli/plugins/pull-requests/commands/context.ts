@@ -16,6 +16,10 @@ import { getCurrentBranch, getGitRemoteUrl } from '@lib/git-utils.js';
 import type { OutputFormat } from '@schemas/common.js';
 import { validatePullRequestId } from './pr-id.js';
 import {
+  pullRequestCommandError,
+  runPullRequestCommandEffect,
+} from './error.js';
+import {
   hasExplicitPullRequestRepositoryInput,
   resolveExplicitPullRequestRepositoryRef,
   type PullRequestRepositoryArgs,
@@ -54,13 +58,15 @@ export async function resolvePullRequestOperationContext(
 ): Promise<ResolvedPullRequestContext> {
   const hostContext = getAideHostContext(argv);
   if (hostContext === null) {
-    throw new Error('Pull request provider services are unavailable.');
+    throw pullRequestCommandError(
+      'Pull request provider services are unavailable.'
+    );
   }
 
   if (args.pr === undefined) {
     const branch = getCurrentBranch();
     if (!branch) {
-      throw new Error(
+      throw pullRequestCommandError(
         'Could not detect current git branch. Are you in a git repository? (Detached HEAD state is not supported)'
       );
     }
@@ -73,7 +79,7 @@ export async function resolvePullRequestOperationContext(
               hostContext.services,
               args
             );
-          const context = await Effect.runPromise(
+          const context = await runPullRequestCommandEffect(
             hostContext.services.findPullRequestForBranchContextForRepository(
               repository,
               { branch }
@@ -85,7 +91,7 @@ export async function resolvePullRequestOperationContext(
           const remoteUrl = gitRemoteOrThrow(
             'Could not determine repository context. Provide a PR ID, full PR URL, or run from a git repository with a supported remote.'
           );
-          const context = await Effect.runPromise(
+          const context = await runPullRequestCommandEffect(
             hostContext.services.findPullRequestForBranchContextForRemote(
               remoteUrl,
               { branch }
@@ -106,7 +112,7 @@ export async function resolvePullRequestOperationContext(
   }
 
   if (args.pr.startsWith('http')) {
-    const context = await Effect.runPromise(
+    const context = await runPullRequestCommandEffect(
       hostContext.services.getPullRequestContextForUrl(args.pr)
     );
     return { context, autoDiscovered: false };
@@ -114,7 +120,7 @@ export async function resolvePullRequestOperationContext(
 
   const validation = validatePullRequestId(args.pr);
   if (!validation.valid || validation.value === undefined) {
-    throw new Error(
+    throw pullRequestCommandError(
       `Could not parse '${args.pr}' as a PR ID. Expected a positive number or full PR URL.`
     );
   }
@@ -123,7 +129,7 @@ export async function resolvePullRequestOperationContext(
   if (hasExplicitPullRequestRepositoryInput(args)) {
     const { repository, autoDiscovered } =
       await resolveExplicitPullRequestRepositoryRef(hostContext.services, args);
-    const context = await Effect.runPromise(
+    const context = await runPullRequestCommandEffect(
       hostContext.services.getPullRequestContextForRepository(repository, {
         pullRequest: { number: prNumber },
       })
@@ -134,7 +140,7 @@ export async function resolvePullRequestOperationContext(
   const remoteUrl = gitRemoteOrThrow(
     'Could not determine repository context. Provide a full PR URL or run from a git repository with a supported remote.'
   );
-  const context = await Effect.runPromise(
+  const context = await runPullRequestCommandEffect(
     hostContext.services.getPullRequestContextForRemote(remoteUrl, {
       pullRequest: { number: prNumber },
     })
@@ -145,7 +151,7 @@ export async function resolvePullRequestOperationContext(
 function gitRemoteOrThrow(message: string): string {
   const remoteUrl = getGitRemoteUrl();
   if (!remoteUrl) {
-    throw new Error(message);
+    throw pullRequestCommandError(message);
   }
   return remoteUrl;
 }

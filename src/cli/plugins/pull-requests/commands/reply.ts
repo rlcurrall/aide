@@ -2,11 +2,13 @@
  * PR reply command - Reply to a comment thread on a pull request.
  */
 
-import { Effect } from 'effect';
 import type { ArgumentsCamelCase, Argv, CommandModule } from 'yargs';
 
 import { logProgress } from '@lib/cli-utils.js';
-import { handleCommandError } from '@lib/errors.js';
+import {
+  handlePullRequestCommandError,
+  runPullRequestCommandEffect,
+} from './error.js';
 import { validateArgs } from '@lib/validation.js';
 import { PrReplyArgsSchema, type PrReplyArgs } from '@schemas/pr/pr-reply.js';
 import { formatPullRequestCommentMutationOutput } from './comment.js';
@@ -54,7 +56,7 @@ async function handler(argv: ArgumentsCamelCase<PrReplyArgs>): Promise<void> {
     }
     logProgress('', format);
 
-    const result = await Effect.runPromise(
+    const result = await runPullRequestCommandEffect(
       resolved.context.replyToPullRequestComment({
         pullRequest: { number: prNumber },
         threadId: thread,
@@ -70,7 +72,7 @@ async function handler(argv: ArgumentsCamelCase<PrReplyArgs>): Promise<void> {
       })
     );
   } catch (error) {
-    handleCommandError(error);
+    handlePullRequestCommandError(error);
   }
 }
 
