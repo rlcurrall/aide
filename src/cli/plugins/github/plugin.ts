@@ -30,8 +30,9 @@ import {
   type AidePullRequestViewResult,
   type AidePluginAuthStatus,
 } from '@cli/host/plugin-descriptor.js';
+import { defineImmutableBuiltinPlugin } from '@cli/host/immutable-builtin-plugin.js';
 import {
-  probeGithubConfig,
+  probeGithubConfigEffect,
   readGithubEnvForMigration,
   type ConfigStatus,
   type GithubConfigValue,
@@ -53,9 +54,9 @@ import {
   parseGitHubRemote,
 } from '@lib/github-utils.js';
 import {
-  deleteAuthSecret,
+  deleteAuthSecretEffect,
   type AuthStoreScope,
-  writeAuthSecret,
+  writeAuthSecretEffect,
 } from '@lib/auth-store.js';
 import {
   GitHubAuthRequestError,
@@ -76,6 +77,10 @@ type ProbeGithubConfig = (options: {
   readonly host?: string;
   readonly scope?: AuthStoreScope;
 }) => Promise<ConfigStatus<GithubConfigValue>>;
+type ProbeGithubConfigEffect = (options: {
+  readonly host?: string;
+  readonly scope?: AuthStoreScope;
+}) => ReturnType<typeof probeGithubConfigEffect>;
 type GitHubPullRequestClient = Pick<
   GitHubClient,
   | 'listPullRequests'
@@ -109,16 +114,17 @@ interface GitHubPluginOptions {
   readonly ghAuthProbe?: GitHubAuthProbe;
 }
 
-const githubTokenField = {
-  kind: 'secret',
-  key: 'token',
-  label: 'GitHub token',
-  description: 'GitHub token',
-  required: true,
-  stdin: true,
-} as const satisfies AideAuthInputField;
-
-const githubLoginFields = Object.freeze([githubTokenField] as const);
+function createGitHubLoginFields() {
+  const tokenField = {
+    kind: 'secret',
+    key: 'token',
+    label: 'GitHub token',
+    description: 'GitHub token',
+    required: true,
+    stdin: true,
+  } as const satisfies AideAuthInputField;
+  return [tokenField] as const;
+}
 
 function mapGithubAuthStatus(
   status: ConfigStatus<GithubConfigValue>
@@ -199,7 +205,7 @@ function githubAuthAccounts(
 
 function loginGitHubAuth(
   request: AideAuthLoginRequest,
-  probeConfig: ProbeGithubConfig
+  probeConfig: ProbeGithubConfigEffect
 ) {
   return Effect.gen(function* () {
     const authRequest = resolveGitHubAuthRequest({ scope: request.scope });
@@ -232,7 +238,7 @@ function loginGitHubAuth(
         );
       }
 
-      yield* writeAuthSecret(
+      yield* writeAuthSecretEffect(
         'github',
         JSON.stringify(
           githubStoredCredentialPayload(authRequest, result.value.token)
@@ -249,10 +255,7 @@ function loginGitHubAuth(
     }
 
     if (request.scope === undefined) {
-      const status = yield* Effect.tryPromise({
-        try: () => probeConfig({}),
-        catch: (error) => error,
-      });
+      const status = yield* probeConfig({});
       if (status.kind === 'env' && status.value.source === 'gh-cli') {
         return {
           status: 'external' as const,
@@ -261,13 +264,13 @@ function loginGitHubAuth(
       }
     }
 
-    const token = yield* promptAuthField(request, githubTokenField);
+    const token = yield* promptAuthField(request, createGitHubLoginFields()[0]);
     const validated = yield* Effect.try({
       try: () => v.parse(StoredGithubSchema, { token }),
       catch: (error) => error,
     });
 
-    yield* writeAuthSecret(
+    yield* writeAuthSecretEffect(
       'github',
       JSON.stringify(
         githubStoredCredentialPayload(authRequest, validated.token)
@@ -294,7 +297,10 @@ function logoutGitHubAuth(request?: AideAuthLogoutRequest) {
         )
       );
     }
-    const removed = yield* deleteAuthSecret('github', authRequest.keyringScope);
+    const removed = yield* deleteAuthSecretEffect(
+      'github',
+      authRequest.keyringScope
+    );
     return {
       status: removed ? ('removed' as const) : ('not-found' as const),
       messages: [
@@ -321,10 +327,17 @@ function explicitGitHubHost(
 }
 
 export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
+  const githubLoginFields = createGitHubLoginFields();
   const ghAuthProbe: GitHubAuthProbe = opts.ghAuthProbe ?? probeGhCliAuth;
-  const probeConfig =
-    opts.probeConfig ??
-    ((options) => probeGithubConfig({ ...options, ghAuthProbe }));
+  const customProbeConfig = opts.probeConfig;
+  const probeConfigEffect: ProbeGithubConfigEffect =
+    customProbeConfig === undefined
+      ? (options) => probeGithubConfigEffect({ ...options, ghAuthProbe })
+      : (options) =>
+          Effect.tryPromise({
+            try: () => customProbeConfig(options),
+            catch: (error) => error,
+          });
   const createClient =
     opts.createClient ??
     ((options) => GitHubClient.create({ ...options, ghAuthProbe }));
@@ -336,23 +349,15 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         detail: authRequest.reason,
       });
     }
-    return Effect.tryPromise({
-      try: () =>
-        probeConfig({
-          scope: authRequest.keyringScope,
-        }),
-      catch: (error) => error,
+    return probeConfigEffect({
+      scope: authRequest.keyringScope,
     }).pipe(Effect.map(mapGithubAuthStatus));
   };
   const authAccounts = (request?: { readonly scope?: AuthStoreScope }) => {
     const authRequest = resolveGitHubAuthRequest({ scope: request?.scope });
     if (!authRequest.ok) return Effect.succeed([]);
-    return Effect.tryPromise({
-      try: () =>
-        probeConfig({
-          scope: authRequest.keyringScope,
-        }),
-      catch: (error) => error,
+    return probeConfigEffect({
+      scope: authRequest.keyringScope,
     }).pipe(Effect.map((status) => githubAuthAccounts(status, authRequest)));
   };
 
@@ -360,7 +365,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
     request: AidePullRequestListRequest
   ): Effect.Effect<AidePullRequestListResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'github') {
           throw new Error(
@@ -379,7 +384,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         let prs = await client.listPullRequests(
           repository.owner,
           repository.repo,
-          options
+          options,
+          signal
         );
 
         if (request.status === 'abandoned') {
@@ -411,7 +417,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
     request: AidePullRequestViewRequest
   ): Effect.Effect<AidePullRequestViewResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'github') {
           throw new Error(
@@ -426,7 +432,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         const pr = await client.getPullRequest(
           repository.owner,
           repository.repo,
-          request.pullRequest.number
+          request.pullRequest.number,
+          signal
         );
 
         return {
@@ -442,7 +449,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
     request: AidePullRequestCreateRequest
   ): Effect.Effect<AidePullRequestCreateResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'github') {
           throw new Error(
@@ -468,7 +475,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           request.targetBranch,
           request.title,
           request.description ?? '',
-          { draft: request.draft ?? false }
+          { draft: request.draft ?? false },
+          signal
         );
 
         let pr = created;
@@ -484,10 +492,11 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
                 repository.owner,
                 repository.repo,
                 created.number,
-                [...labels]
+                [...labels],
+                signal
               );
-            } catch (error) {
-              warnings.push(`Failed to add labels: ${errorMessage(error)}`);
+            } catch {
+              warnings.push('Failed to add labels: provider request failed');
             }
           }
 
@@ -496,10 +505,13 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
               pr = await client.getPullRequest(
                 repository.owner,
                 repository.repo,
-                created.number
+                created.number,
+                signal
               );
-            } catch (error) {
-              warnings.push(`Failed to refresh labels: ${errorMessage(error)}`);
+            } catch {
+              warnings.push(
+                'Failed to refresh labels: provider request failed'
+              );
             }
           }
         }
@@ -518,7 +530,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
     request: AidePullRequestUpdateRequest
   ): Effect.Effect<AidePullRequestUpdateResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'github') {
           throw new Error(
@@ -554,7 +566,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
             repository.owner,
             repository.repo,
             request.pullRequest.number,
-            updates
+            updates,
+            signal
           );
         }
 
@@ -567,7 +580,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           await client.convertToDraft(
             repository.owner,
             repository.repo,
-            request.pullRequest.number
+            request.pullRequest.number,
+            signal
           );
         } else if (request.draft === false) {
           if (client.publishDraftPR === undefined) {
@@ -578,7 +592,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           await client.publishDraftPR(
             repository.owner,
             repository.repo,
-            request.pullRequest.number
+            request.pullRequest.number,
+            signal
           );
         }
 
@@ -594,10 +609,11 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
                 repository.owner,
                 repository.repo,
                 request.pullRequest.number,
-                [...labelsToAdd]
+                [...labelsToAdd],
+                signal
               );
-            } catch (error) {
-              warnings.push(`Failed to add labels: ${errorMessage(error)}`);
+            } catch {
+              warnings.push('Failed to add labels: provider request failed');
             }
           }
         }
@@ -605,7 +621,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         for (const label of request.labelsToRemove ?? []) {
           if (client.removeLabel === undefined) {
             warnings.push(
-              `Failed to remove label '${label}': GitHub client does not support labels`
+              'Failed to remove label: GitHub client does not support labels'
             );
             continue;
           }
@@ -614,19 +630,19 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
               repository.owner,
               repository.repo,
               request.pullRequest.number,
-              label
+              label,
+              signal
             );
-          } catch (error) {
-            warnings.push(
-              `Failed to remove label '${label}': ${errorMessage(error)}`
-            );
+          } catch {
+            warnings.push('Failed to remove label: provider request failed');
           }
         }
 
         const pr = await client.getPullRequest(
           repository.owner,
           repository.repo,
-          request.pullRequest.number
+          request.pullRequest.number,
+          signal
         );
 
         return {
@@ -643,7 +659,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
     request: AidePullRequestDiffRequest
   ): Effect.Effect<AidePullRequestDiffResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'github') {
           throw new Error(
@@ -659,12 +675,14 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           client.getPullRequest(
             repository.owner,
             repository.repo,
-            request.pullRequest.number
+            request.pullRequest.number,
+            signal
           ),
           client.getPullRequestFiles(
             repository.owner,
             repository.repo,
-            request.pullRequest.number
+            request.pullRequest.number,
+            signal
           ),
         ]);
 
@@ -682,7 +700,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
     request: AidePullRequestCommentsRequest
   ): Effect.Effect<AidePullRequestCommentsResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'github') {
           throw new Error(
@@ -698,12 +716,14 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           client.getIssueComments(
             repository.owner,
             repository.repo,
-            request.pullRequest.number
+            request.pullRequest.number,
+            signal
           ),
           client.getReviewComments(
             repository.owner,
             repository.repo,
-            request.pullRequest.number
+            request.pullRequest.number,
+            signal
           ),
         ]);
 
@@ -721,7 +741,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
     request: AidePullRequestAddCommentRequest
   ): Effect.Effect<AidePullRequestCommentMutationResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'github') {
           throw new Error(
@@ -746,7 +766,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
                     repository.owner,
                     repository.repo,
                     request.pullRequest.number,
-                    request.body
+                    request.body,
+                    signal
                   )
                 );
               })()
@@ -759,7 +780,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
                 const pr = await client.getPullRequest(
                   repository.owner,
                   repository.repo,
-                  request.pullRequest.number
+                  request.pullRequest.number,
+                  signal
                 );
                 return githubReviewCommentToComment(
                   await client.createReviewComment(
@@ -774,7 +796,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
                       ...(position.endLineNumber === undefined
                         ? {}
                         : { start_line: position.lineNumber }),
-                    }
+                    },
+                    signal
                   ),
                   'review'
                 );
@@ -795,7 +818,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
     request: AidePullRequestReplyCommentRequest
   ): Effect.Effect<AidePullRequestCommentMutationResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'github') {
           throw new Error(
@@ -818,7 +841,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
             repository.repo,
             request.pullRequest.number,
             request.threadId,
-            request.body
+            request.body,
+            signal
           ),
           'reply'
         );
@@ -847,7 +871,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
     request: AidePullRequestBranchLookupRequest
   ): Effect.Effect<AidePullRequestBranchLookupResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'github') {
           throw new Error(
@@ -865,7 +889,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           {
             head: `${repository.owner}:${request.branch}`,
             state: 'all',
-          }
+          },
+          signal
         );
         const selected = selectGitHubPullRequestForBranch(prs);
         if (selected === undefined) {
@@ -877,7 +902,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         const pr = await client.getPullRequest(
           repository.owner,
           repository.repo,
-          selected.number
+          selected.number,
+          signal
         );
 
         return {
@@ -920,7 +946,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         status: authStatus,
         accounts: authAccounts,
         operations: {
-          login: (request) => loginGitHubAuth(request, probeConfig),
+          login: (request) => loginGitHubAuth(request, probeConfigEffect),
           logout: logoutGitHubAuth,
         },
       },
@@ -1042,7 +1068,7 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
   });
 }
 
-export const githubPlugin = createGitHubPlugin();
+export const githubPlugin = defineImmutableBuiltinPlugin(createGitHubPlugin());
 
 function githubPullRequestStatus(
   pr: GitHubPullRequest
@@ -1110,10 +1136,6 @@ function githubUpdateStatusToState(status: 'active' | 'abandoned') {
     case 'abandoned':
       return 'closed' as const;
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function githubPullRequestFileToDiffFile(file: GitHubPRFile) {

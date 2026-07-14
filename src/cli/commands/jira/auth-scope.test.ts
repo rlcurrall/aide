@@ -4,6 +4,8 @@ import yargs from 'yargs/yargs';
 
 import type { AideAuthProviderCapability } from '@cli/host/plugin-descriptor.js';
 import { createJiraPlugin } from '@cli/plugins/jira/plugin.js';
+import type { KeyringService } from '@lib/auth-keyring.js';
+import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
 import {
   installMockSecrets,
   restoreEnv,
@@ -21,7 +23,12 @@ const JIRA_ENV_VARS = [
   'JIRA_TOKEN',
 ];
 
-function jiraAuthProvider(): AideAuthProviderCapability {
+function jiraAuthProvider(): AideAuthProviderCapability<
+  KeyringService,
+  KeyringService,
+  KeyringService,
+  KeyringService
+> {
   const provider = createJiraPlugin().capabilities?.authProvider;
   if (provider === undefined) throw new Error('missing Jira auth provider');
   return provider;
@@ -31,11 +38,12 @@ let env: Map<string, string | undefined>;
 let restoreSecrets: () => void;
 let originalFetch: typeof globalThis.fetch;
 let originalLog: typeof console.log;
+let store: Store;
 
 beforeEach(() => {
   env = saveEnv(JIRA_ENV_VARS);
   Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
-  const store: Store = new Map();
+  store = new Map();
   restoreSecrets = installMockSecrets(store);
   originalFetch = globalThis.fetch;
   originalLog = console.log;
@@ -195,7 +203,7 @@ test('scoped provider login is consumed by a real Jira command selection', async
         host: 'example.atlassian.net',
         account: 'dev@example.com',
       },
-    })
+    }).pipe(Effect.provide(makeTestKeyring(store).layer))
   );
 
   let requestedUrl: string | undefined;

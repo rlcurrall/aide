@@ -17,6 +17,11 @@ import { createGitHubPlugin } from './github/plugin.js';
 import { createJiraPlugin } from './jira/plugin.js';
 import { loadAzureDevOpsConfig } from '@lib/config.js';
 import {
+  makeTestKeyring,
+  type TestKeyring,
+} from '@lib/auth-keyring.test-helper.js';
+import type { KeyringService } from '@lib/auth-keyring.js';
+import {
   authenticatedGitHubAuthProbe,
   installMockSecrets,
   restoreEnv,
@@ -63,20 +68,60 @@ class ScriptedAuthPrompt implements AideAuthPrompt {
   }
 }
 
+let testKeyring: TestKeyring;
+
 function authProvider(plugin: {
   readonly capabilities?: {
-    readonly authProvider?: AideAuthProviderCapability;
+    readonly authProvider?: AideAuthProviderCapability<
+      KeyringService,
+      KeyringService,
+      KeyringService,
+      KeyringService
+    >;
   };
 }): AideAuthProviderCapability {
   const provider = plugin.capabilities?.authProvider;
   if (provider === undefined) throw new Error('missing auth provider');
-  return provider;
+  return {
+    ...provider,
+    status: (request) =>
+      provider.status(request).pipe(Effect.provide(testKeyring.layer)),
+    accounts:
+      provider.accounts === undefined
+        ? undefined
+        : (request) =>
+            provider.accounts!(request).pipe(Effect.provide(testKeyring.layer)),
+    operations:
+      provider.operations === undefined
+        ? undefined
+        : {
+            login:
+              provider.operations.login === undefined
+                ? undefined
+                : (request) =>
+                    provider.operations!.login!(request).pipe(
+                      Effect.provide(testKeyring.layer)
+                    ),
+            logout:
+              provider.operations.logout === undefined
+                ? undefined
+                : (request) =>
+                    provider.operations!.logout!(request).pipe(
+                      Effect.provide(testKeyring.layer)
+                    ),
+          },
+  };
 }
 
 function discoveredAuthProvider(plugin: {
   readonly id: string;
   readonly capabilities?: {
-    readonly authProvider?: AideAuthProviderCapability;
+    readonly authProvider?: AideAuthProviderCapability<
+      KeyringService,
+      KeyringService,
+      KeyringService,
+      KeyringService
+    >;
   };
 }): AideDiscoveredCapability<AideAuthProviderCapability> {
   return Object.freeze({
@@ -93,6 +138,7 @@ describe('auth provider operations', () => {
   beforeEach(() => {
     envSnap = saveEnv(AUTH_ENV_VARS);
     store = new Map();
+    testKeyring = makeTestKeyring(store);
     Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = 'aide';
     restoreSecrets = installMockSecrets(store);
   });

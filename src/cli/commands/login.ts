@@ -12,7 +12,10 @@ import type {
   AideAuthInputValue,
   AideAuthLoginRequest,
 } from '@cli/host/plugin-descriptor.js';
-import type { AideHostServices } from '@cli/host/runtime-context.js';
+import {
+  getAideHostContext,
+  type AideInternalHostServices,
+} from '@cli/host/runtime-context.js';
 import type { AideHostAwareCommandModule } from '@cli/host/yargs-adapter.js';
 import {
   authScopeFromArgs,
@@ -22,8 +25,8 @@ import {
   authProviderCommandRoutes,
   providerHasAuthOperation,
   readStdin,
-  runAuthProviderLogin,
-  type DiscoveredAuthProvider,
+  runDynamicAuthProviderLogin,
+  type DynamicAuthProvider,
 } from './auth-provider-command-utils.js';
 
 interface DynamicLoginArgs {
@@ -73,7 +76,7 @@ function configureFieldOption(
 
 function configureLoginOptions(
   yargs: Argv<object>,
-  provider: DiscoveredAuthProvider
+  provider: DynamicAuthProvider
 ): Argv<object> {
   assertNoReservedAuthScopeFlags(provider);
 
@@ -91,7 +94,6 @@ function configureLoginOptions(
     configured = configured.option('from-env', {
       type: 'boolean',
       describe: metadata.envMigration.description,
-      default: false,
     });
     const conflicts = fieldFlagNames(fields);
     if (conflicts.length > 0) {
@@ -118,7 +120,7 @@ async function valueFromStdin(
 }
 
 async function loginRequestFromArgs(
-  provider: DiscoveredAuthProvider,
+  provider: DynamicAuthProvider,
   argv: ArgumentsCamelCase<DynamicLoginArgs>
 ): Promise<AideAuthLoginRequest> {
   const scope = authScopeFromArgs(provider, argv);
@@ -150,7 +152,7 @@ async function loginRequestFromArgs(
 }
 
 function loginCommandForProvider(
-  provider: DiscoveredAuthProvider
+  provider: DynamicAuthProvider
 ): CommandModule<object, DynamicLoginArgs> {
   return {
     command: authProviderCommandRoutes(provider, 'login'),
@@ -159,24 +161,29 @@ function loginCommandForProvider(
       `Save ${provider.capability.label} credentials`,
     builder: (yargs) => configureLoginOptions(yargs, provider),
     handler: async (argv) => {
-      await runAuthProviderLogin(
+      const services = getAideHostContext(argv)?.services;
+      if (services === undefined) {
+        throw new Error('Host services are unavailable for login');
+      }
+      await runDynamicAuthProviderLogin(
         provider,
-        await loginRequestFromArgs(provider, argv)
+        await loginRequestFromArgs(provider, argv),
+        services
       );
     },
   };
 }
 
-function loginProviderCommandName(provider: DiscoveredAuthProvider): string {
+function loginProviderCommandName(provider: DynamicAuthProvider): string {
   const route = authProviderCommandRoutes(provider, 'login');
   return typeof route === 'string' ? route : route[0]!;
 }
 
 function loginProviders(
-  services: AideHostServices
-): readonly DiscoveredAuthProvider[] {
+  services: AideInternalHostServices
+): readonly DynamicAuthProvider[] {
   return services
-    .authProviders()
+    .authProviderRegistrations()
     .filter((provider) => providerHasAuthOperation(provider, 'login'));
 }
 

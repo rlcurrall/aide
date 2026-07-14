@@ -1,8 +1,15 @@
 import { isProxy } from 'node:util/types';
 
 import { spawnSync } from 'bun';
+import { Cause, Data, Effect, Exit, Option } from 'effect';
 
-import { resolveAuthSecretPromise, type AuthStoreScope } from './auth-store.js';
+import {
+  type AuthIndexProviderError,
+  type AuthStoreValidationError,
+  resolveAuthSecretEffect,
+  type AuthStoreScope,
+  type ResolvedAuthSecret,
+} from './auth-store.js';
 import {
   canonicalizeGitHubAuthAccount,
   canonicalizeGitHubAuthHost,
@@ -21,7 +28,19 @@ import {
   type GitHubAuthProbe,
   type GitHubCliAuthProbe,
 } from './gh-utils.js';
-import { KeyringUnavailableError } from './secrets.js';
+import {
+  KeyringLive,
+  KeyringService,
+  type KeyringUnavailableError,
+} from './auth-keyring.js';
+
+const arrayIsArray = Array.isArray;
+const objectCreate = Object.create;
+const objectDefineProperty = Object.defineProperty;
+const objectFreeze = Object.freeze;
+const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const objectGetPrototypeOf = Object.getPrototypeOf;
+const objectHasOwn = Object.hasOwn;
 
 export interface GitHubCredentialResolverOptions {
   readonly ghAuthProbe?: GitHubAuthProbe;
@@ -63,9 +82,9 @@ function snapshotOwnDataProperty(
   name: string
 ): OwnDataPropertySnapshot {
   try {
-    const descriptor = Object.getOwnPropertyDescriptor(input, name);
+    const descriptor = objectGetOwnPropertyDescriptor(input, name);
     if (descriptor === undefined) return { kind: 'absent' };
-    return Object.hasOwn(descriptor, 'value')
+    return objectHasOwn(descriptor, 'value')
       ? { kind: 'data', value: descriptor.value }
       : { kind: 'invalid' };
   } catch {
@@ -90,13 +109,13 @@ function snapshotResolverOptionProperty(
   if (ownProperty.kind !== 'absent') return ownProperty;
 
   try {
-    let prototype = Object.getPrototypeOf(input);
+    let prototype = objectGetPrototypeOf(input);
     while (prototype !== null) {
       if (isProxy(prototype)) return { kind: 'invalid' };
-      if (Object.getOwnPropertyDescriptor(prototype, name) !== undefined) {
+      if (objectGetOwnPropertyDescriptor(prototype, name) !== undefined) {
         return { kind: 'invalid' };
       }
-      prototype = Object.getPrototypeOf(prototype);
+      prototype = objectGetPrototypeOf(prototype);
     }
     return { kind: 'absent' };
   } catch {
@@ -107,9 +126,55 @@ function snapshotResolverOptionProperty(
 function frozenNullSnapshot<T extends object>(
   fields: ReadonlyArray<readonly [string, unknown]>
 ): T {
-  const result = Object.create(null) as Record<string, unknown>;
-  for (const [name, value] of fields) result[name] = value;
-  return Object.freeze(result) as T;
+  const result = objectCreate(null) as Record<string, unknown>;
+  const lengthDescriptor = objectGetOwnPropertyDescriptor(fields, 'length');
+  if (
+    lengthDescriptor === undefined ||
+    !objectHasOwn(lengthDescriptor, 'value') ||
+    typeof lengthDescriptor.value !== 'number' ||
+    !Number.isSafeInteger(lengthDescriptor.value) ||
+    lengthDescriptor.value < 0
+  ) {
+    throw new TypeError('Invalid host GitHub credential snapshot fields');
+  }
+  for (let index = 0; index < lengthDescriptor.value; index += 1) {
+    const fieldDescriptor = objectGetOwnPropertyDescriptor(
+      fields,
+      String(index)
+    );
+    if (
+      fieldDescriptor === undefined ||
+      !objectHasOwn(fieldDescriptor, 'value') ||
+      typeof fieldDescriptor.value !== 'object' ||
+      fieldDescriptor.value === null
+    ) {
+      throw new TypeError('Invalid host GitHub credential snapshot field');
+    }
+    const nameDescriptor = objectGetOwnPropertyDescriptor(
+      fieldDescriptor.value,
+      '0'
+    );
+    const valueDescriptor = objectGetOwnPropertyDescriptor(
+      fieldDescriptor.value,
+      '1'
+    );
+    if (
+      nameDescriptor === undefined ||
+      !objectHasOwn(nameDescriptor, 'value') ||
+      typeof nameDescriptor.value !== 'string' ||
+      valueDescriptor === undefined ||
+      !objectHasOwn(valueDescriptor, 'value')
+    ) {
+      throw new TypeError('Invalid host GitHub credential snapshot field');
+    }
+    objectDefineProperty(result, nameDescriptor.value, {
+      configurable: true,
+      enumerable: true,
+      value: valueDescriptor.value,
+      writable: true,
+    });
+  }
+  return objectFreeze(result) as T;
 }
 
 type FrozenRequestSnapshot =
@@ -320,9 +385,9 @@ function snapshotProbeProperty(
   name: string
 ): ProbePropertySnapshot {
   try {
-    const descriptor = Object.getOwnPropertyDescriptor(probe, name);
+    const descriptor = objectGetOwnPropertyDescriptor(probe, name);
     if (descriptor === undefined) return { kind: 'absent' };
-    return 'value' in descriptor
+    return objectHasOwn(descriptor, 'value')
       ? { kind: 'data', value: descriptor.value }
       : { kind: 'invalid' };
   } catch {
@@ -351,7 +416,7 @@ export function validateGitHubAuthProbeResult(
     return invalid('proxy results are not allowed.');
   }
   try {
-    if (Array.isArray(result)) {
+    if (arrayIsArray(result)) {
       return invalid('expected a structured result.');
     }
   } catch {
@@ -495,160 +560,225 @@ function runGhProbe(
  * Account-qualified: matching active gh account, exact account key. Standard
  * env tokens are never candidates because they carry no provable account.
  */
+export class GitHubCredentialProbeError extends Data.TaggedError(
+  'GitHubCredentialProbeError'
+)<{ readonly cause: unknown }> {}
+
+export type GitHubCredentialResolverError =
+  | AuthIndexProviderError
+  | AuthStoreValidationError
+  | GitHubCredentialProbeError;
+
+type ResolveStoredAuthSecretEffect = (
+  scope: AuthStoreScope | undefined
+) => Effect.Effect<
+  ResolvedAuthSecret | null,
+  GitHubCredentialResolverError | KeyringUnavailableError,
+  KeyringService
+>;
+
+const keyringUnavailable = Symbol('github-keyring-unavailable');
+
+function resolveGitHubCredentialWithEffect(
+  request: CanonicalGitHubAuthRequest,
+  options: GitHubCredentialResolverOptions,
+  resolveStoredAuthSecret: ResolveStoredAuthSecretEffect
+): Effect.Effect<
+  GitHubCredentialResolution,
+  GitHubCredentialResolverError,
+  KeyringService
+> {
+  return Effect.gen(function* () {
+    const requestSnapshot = frozenRequestSnapshot(request);
+    if (!requestSnapshot.ok) {
+      return {
+        kind: 'failure',
+        code: requestSnapshot.code,
+        reason: requestSnapshot.reason,
+      };
+    }
+    const privateRequest = requestSnapshot.request;
+    const probeRequestSnapshot = frozenRequestSnapshot(privateRequest);
+    if (!probeRequestSnapshot.ok) {
+      return {
+        kind: 'failure',
+        code: probeRequestSnapshot.code,
+        reason: probeRequestSnapshot.reason,
+      };
+    }
+    const probeRequest = probeRequestSnapshot.request;
+
+    if (
+      typeof options !== 'object' ||
+      options === null ||
+      isProxy(options) ||
+      arrayIsArray(options)
+    ) {
+      return {
+        kind: 'failure',
+        code: 'malformed-credential',
+        reason: 'Invalid GitHub credential resolver options.',
+      };
+    }
+
+    const envProperty = snapshotResolverOptionProperty(options, 'env');
+    const probeProperty = snapshotResolverOptionProperty(
+      options,
+      'ghAuthProbe'
+    );
+    const spawnProperty = snapshotResolverOptionProperty(options, 'spawn');
+    if (
+      envProperty.kind === 'invalid' ||
+      probeProperty.kind === 'invalid' ||
+      spawnProperty.kind === 'invalid' ||
+      (probeProperty.kind === 'data' &&
+        probeProperty.value !== undefined &&
+        typeof probeProperty.value !== 'function') ||
+      (spawnProperty.kind === 'data' &&
+        spawnProperty.value !== undefined &&
+        typeof spawnProperty.value !== 'function')
+    ) {
+      return {
+        kind: 'failure',
+        code: 'malformed-credential',
+        reason: 'Invalid GitHub credential resolver options.',
+      };
+    }
+    const envSource =
+      envProperty.kind === 'data' && envProperty.value !== undefined
+        ? envProperty.value
+        : Bun.env;
+    if (typeof envSource !== 'object' || envSource === null) {
+      return {
+        kind: 'failure',
+        code: 'malformed-credential',
+        reason: 'Invalid GitHub authentication environment.',
+      };
+    }
+    const privateEnvironment = snapshotGitHubAuthEnvironment(
+      envSource as GitHubAuthEnvironment
+    );
+    if (privateEnvironment === null) {
+      return {
+        kind: 'failure',
+        code: 'malformed-credential',
+        reason: 'Invalid GitHub authentication environment.',
+      };
+    }
+    const environment = githubEnvironmentCredential(
+      privateRequest.host,
+      privateEnvironment,
+      privateRequest.account
+    );
+    const ghEnvironment = githubCliEnvironment(
+      envSource as GitHubAuthEnvironment
+    );
+    const ghAuthProbe =
+      probeProperty.kind === 'data'
+        ? (probeProperty.value as GitHubAuthProbe | undefined)
+        : undefined;
+    const selectedSpawn =
+      spawnProperty.kind === 'data' && spawnProperty.value !== undefined
+        ? (spawnProperty.value as typeof spawnSync)
+        : spawnSync;
+
+    const gh = yield* Effect.try({
+      try: () =>
+        runGhProbe(
+          privateRequest,
+          probeRequest,
+          ghAuthProbe,
+          selectedSpawn,
+          ghEnvironment
+        ),
+      catch: (cause) => new GitHubCredentialProbeError({ cause }),
+    });
+    if (gh.kind === 'authenticated') {
+      return {
+        kind: 'gh-cli',
+        host: privateRequest.host,
+        account: privateRequest.account,
+      };
+    }
+
+    if (environment !== null) {
+      return { kind: 'env', credential: environment };
+    }
+
+    const resolved = yield* resolveStoredAuthSecret(
+      privateRequest.keyringScope
+    ).pipe(
+      Effect.catchTag('KeyringUnavailableError', () =>
+        Effect.succeed(keyringUnavailable)
+      )
+    );
+    if (resolved === keyringUnavailable) return { kind: 'unreachable' };
+
+    if (resolved === null) {
+      return gh.kind === 'account-mismatch'
+        ? { kind: 'failure', code: gh.code, reason: gh.reason }
+        : { kind: 'missing' };
+    }
+
+    let stored;
+    try {
+      stored = validateGitHubStoredCredential(
+        privateRequest,
+        resolved.kind,
+        resolved.value
+      );
+    } catch {
+      return {
+        kind: 'failure',
+        code: 'malformed-credential',
+        reason:
+          "Stored GitHub credentials are malformed. Re-run 'aide login github' to reconfigure.",
+      };
+    }
+    if (!stored.ok) {
+      return { kind: 'failure', code: stored.code, reason: stored.reason };
+    }
+    return {
+      kind: 'stored',
+      host: stored.host,
+      token: stored.token,
+      account: privateRequest.account,
+    };
+  });
+}
+
+/** Injectable resolver used by trusted host/plugin composition. */
+export function resolveGitHubCredentialEffect(
+  request: CanonicalGitHubAuthRequest,
+  options: GitHubCredentialResolverOptions = {}
+): Effect.Effect<
+  GitHubCredentialResolution,
+  GitHubCredentialResolverError,
+  KeyringService
+> {
+  return resolveGitHubCredentialWithEffect(request, options, (scope) =>
+    resolveAuthSecretEffect('github', scope)
+  );
+}
+
+/** @deprecated Live compatibility adapter. Use resolveGitHubCredentialEffect. */
 export async function resolveGitHubCredential(
   request: CanonicalGitHubAuthRequest,
   options: GitHubCredentialResolverOptions = {}
 ): Promise<GitHubCredentialResolution> {
-  const requestSnapshot = frozenRequestSnapshot(request);
-  if (!requestSnapshot.ok) {
-    return {
-      kind: 'failure',
-      code: requestSnapshot.code,
-      reason: requestSnapshot.reason,
-    };
-  }
-  const privateRequest = requestSnapshot.request;
-  const probeRequestSnapshot = frozenRequestSnapshot(privateRequest);
-  if (!probeRequestSnapshot.ok) {
-    return {
-      kind: 'failure',
-      code: probeRequestSnapshot.code,
-      reason: probeRequestSnapshot.reason,
-    };
-  }
-  const probeRequest = probeRequestSnapshot.request;
-
-  if (
-    typeof options !== 'object' ||
-    options === null ||
-    isProxy(options) ||
-    Array.isArray(options)
-  ) {
-    return {
-      kind: 'failure',
-      code: 'malformed-credential',
-      reason: 'Invalid GitHub credential resolver options.',
-    };
-  }
-
-  const envProperty = snapshotResolverOptionProperty(options, 'env');
-  const probeProperty = snapshotResolverOptionProperty(options, 'ghAuthProbe');
-  const spawnProperty = snapshotResolverOptionProperty(options, 'spawn');
-  if (
-    envProperty.kind === 'invalid' ||
-    probeProperty.kind === 'invalid' ||
-    spawnProperty.kind === 'invalid' ||
-    (probeProperty.kind === 'data' &&
-      probeProperty.value !== undefined &&
-      typeof probeProperty.value !== 'function') ||
-    (spawnProperty.kind === 'data' &&
-      spawnProperty.value !== undefined &&
-      typeof spawnProperty.value !== 'function')
-  ) {
-    return {
-      kind: 'failure',
-      code: 'malformed-credential',
-      reason: 'Invalid GitHub credential resolver options.',
-    };
-  }
-  const envSource =
-    envProperty.kind === 'data' && envProperty.value !== undefined
-      ? envProperty.value
-      : Bun.env;
-  if (typeof envSource !== 'object' || envSource === null) {
-    return {
-      kind: 'failure',
-      code: 'malformed-credential',
-      reason: 'Invalid GitHub authentication environment.',
-    };
-  }
-  const privateEnvironment = snapshotGitHubAuthEnvironment(
-    envSource as GitHubAuthEnvironment
+  const exit = await Effect.runPromiseExit(
+    resolveGitHubCredentialEffect(request, options).pipe(
+      Effect.provide(KeyringLive)
+    )
   );
-  if (privateEnvironment === null) {
-    return {
-      kind: 'failure',
-      code: 'malformed-credential',
-      reason: 'Invalid GitHub authentication environment.',
-    };
-  }
-  const environment = githubEnvironmentCredential(
-    privateRequest.host,
-    privateEnvironment,
-    privateRequest.account
-  );
-  const ghEnvironment = githubCliEnvironment(
-    envSource as GitHubAuthEnvironment
-  );
-  const ghAuthProbe =
-    probeProperty.kind === 'data'
-      ? (probeProperty.value as GitHubAuthProbe | undefined)
-      : undefined;
-  const selectedSpawn =
-    spawnProperty.kind === 'data' && spawnProperty.value !== undefined
-      ? (spawnProperty.value as typeof spawnSync)
-      : spawnSync;
+  if (Exit.isSuccess(exit)) return exit.value;
 
-  const gh = runGhProbe(
-    privateRequest,
-    probeRequest,
-    ghAuthProbe,
-    selectedSpawn,
-    ghEnvironment
-  );
-  if (gh.kind === 'authenticated') {
-    return {
-      kind: 'gh-cli',
-      host: privateRequest.host,
-      account: privateRequest.account,
-    };
-  }
-
-  if (environment !== null) {
-    return { kind: 'env', credential: environment };
-  }
-
-  let resolved;
-  try {
-    resolved = await resolveAuthSecretPromise(
-      'github',
-      privateRequest.keyringScope as AuthStoreScope | undefined
-    );
-  } catch (error) {
-    if (error instanceof KeyringUnavailableError) {
-      return { kind: 'unreachable' };
+  const failure = Cause.failureOption(exit.cause);
+  if (Option.isSome(failure)) {
+    if (failure.value instanceof GitHubCredentialProbeError) {
+      throw failure.value.cause;
     }
-    throw error;
+    throw failure.value;
   }
-
-  if (resolved === null) {
-    return gh.kind === 'account-mismatch'
-      ? { kind: 'failure', code: gh.code, reason: gh.reason }
-      : { kind: 'missing' };
-  }
-
-  let stored;
-  try {
-    stored = validateGitHubStoredCredential(
-      privateRequest,
-      resolved.kind,
-      resolved.value
-    );
-  } catch {
-    return {
-      kind: 'failure',
-      code: 'malformed-credential',
-      reason:
-        "Stored GitHub credentials are malformed. Re-run 'aide login github' to reconfigure.",
-    };
-  }
-  if (!stored.ok) {
-    return { kind: 'failure', code: stored.code, reason: stored.reason };
-  }
-  return {
-    kind: 'stored',
-    host: stored.host,
-    token: stored.token,
-    account: privateRequest.account,
-  };
+  throw Cause.squash(exit.cause);
 }

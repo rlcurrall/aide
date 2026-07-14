@@ -1736,3 +1736,288 @@ describe('GitHubClient transport — token (fetch stub)', () => {
     }
   );
 });
+
+describe('GitHubClient AbortSignal transport contract', () => {
+  let envSnap: ReturnType<typeof clearGhEnv>;
+
+  beforeEach(() => {
+    envSnap = clearGhEnv();
+    Bun.env.AIDE_SECRET_SERVICE_OVERRIDE = MOCK_SERVICE;
+    Bun.env.GITHUB_TOKEN = 'signal-test-token';
+  });
+
+  afterEach(() => {
+    restoreGhEnv(envSnap);
+    delete Bun.env.AIDE_SECRET_SERVICE_OVERRIDE;
+  });
+
+  test('forwards one signal through PR reads and create/update/comment/reply fetches', async () => {
+    const seenSignals: Array<AbortSignal | null | undefined> = [];
+    const fetchFn = (async (
+      _input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      seenSignals.push(init?.signal);
+      return Response.json({ number: 7, id: 11 });
+    }) as unknown as FetchFn;
+    const client = await GitHubClient.create({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+      fetch: fetchFn,
+    });
+    const controller = new AbortController();
+
+    await client.getPullRequest('acme', 'widgets', 7, controller.signal);
+    await client.createPullRequest(
+      'acme',
+      'widgets',
+      'feature',
+      'main',
+      'Title',
+      'Body',
+      {},
+      controller.signal
+    );
+    await client.updatePullRequest(
+      'acme',
+      'widgets',
+      7,
+      { title: 'Updated' },
+      controller.signal
+    );
+    await client.createIssueComment(
+      'acme',
+      'widgets',
+      7,
+      'Comment',
+      controller.signal
+    );
+    await client.replyToReviewComment(
+      'acme',
+      'widgets',
+      7,
+      11,
+      'Reply',
+      controller.signal
+    );
+
+    expect(seenSignals).toEqual(Array(5).fill(controller.signal));
+  });
+
+  test('aborting a read cancels fetch and prevents post-exit completion', async () => {
+    let aborted = 0;
+    let completed = 0;
+    const fetchFn = (async (
+      _input: string | URL | Request,
+      init?: RequestInit
+    ) =>
+      new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          completed += 1;
+          resolve(Response.json({ number: 7 }));
+        }, 40);
+        init?.signal?.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            aborted += 1;
+            reject(init.signal?.reason);
+          },
+          { once: true }
+        );
+      })) as unknown as FetchFn;
+    const client = await GitHubClient.create({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+      fetch: fetchFn,
+    });
+    const controller = new AbortController();
+    const pending = client.getPullRequest(
+      'acme',
+      'widgets',
+      7,
+      controller.signal
+    );
+    controller.abort();
+
+    expect(
+      await pending.then(
+        () => 'resolved',
+        () => 'rejected'
+      )
+    ).toBe('rejected');
+    expect({ aborted, completed }).toEqual({ aborted: 1, completed: 0 });
+    await Bun.sleep(60);
+    expect({ aborted, completed }).toEqual({ aborted: 1, completed: 0 });
+  });
+
+  test('pagination carries one signal to the next page and aborts without post-exit work', async () => {
+    const page1 = 'https://api.github.com/repos/acme/widgets/issues/7/comments';
+    const page2 = `${page1}?page=2`;
+    const seen: Array<{
+      readonly url: string;
+      readonly signal: AbortSignal | null | undefined;
+    }> = [];
+    let secondPageStarted = 0;
+    let secondPageAborted = 0;
+    let secondPageCompleted = 0;
+    const fetchFn = (async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const url = String(input);
+      seen.push({ url, signal: init?.signal });
+      if (url === page1) {
+        return Response.json([], {
+          headers: { Link: `<${page2}>; rel="next"` },
+        });
+      }
+      secondPageStarted += 1;
+      return new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          secondPageCompleted += 1;
+          resolve(Response.json([]));
+        }, 40);
+        init?.signal?.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            secondPageAborted += 1;
+            reject(init.signal?.reason);
+          },
+          { once: true }
+        );
+      });
+    }) as unknown as FetchFn;
+    const client = await GitHubClient.create({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+      fetch: fetchFn,
+    });
+    const controller = new AbortController();
+    const pending = client.getIssueComments(
+      'acme',
+      'widgets',
+      7,
+      controller.signal
+    );
+    while (secondPageStarted === 0) await Bun.sleep(1);
+    controller.abort();
+
+    await expect(pending).rejects.toBeDefined();
+    expect(seen).toEqual([
+      { url: page1, signal: controller.signal },
+      { url: page2, signal: controller.signal },
+    ]);
+    expect({ secondPageAborted, secondPageCompleted }).toEqual({
+      secondPageAborted: 1,
+      secondPageCompleted: 0,
+    });
+    await Bun.sleep(60);
+    expect({ secondPageAborted, secondPageCompleted }).toEqual({
+      secondPageAborted: 1,
+      secondPageCompleted: 0,
+    });
+  });
+
+  test('same-origin redirects preserve signal and label mutation request semantics', async () => {
+    const requests: Array<{
+      readonly url: string;
+      readonly method: string | undefined;
+      readonly body: RequestInit['body'];
+      readonly signal: AbortSignal | null | undefined;
+    }> = [];
+    const addUrl = 'https://api.github.com/repos/acme/widgets/issues/7/labels';
+    const redirectedAddUrl = `${addUrl}?redirected=1`;
+    const removeUrl = `${addUrl}/needs%20review`;
+    const fetchFn = (async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const url = String(input);
+      requests.push({
+        url,
+        method: init?.method,
+        body: init?.body,
+        signal: init?.signal,
+      });
+      if (url === addUrl) {
+        return new Response(null, {
+          status: 307,
+          headers: { Location: redirectedAddUrl },
+        });
+      }
+      return url === removeUrl
+        ? new Response(null, { status: 204 })
+        : Response.json([]);
+    }) as unknown as FetchFn;
+    const client = await GitHubClient.create({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+      fetch: fetchFn,
+    });
+    const controller = new AbortController();
+
+    await client.addLabels('acme', 'widgets', 7, ['ready'], controller.signal);
+    await client.removeLabel(
+      'acme',
+      'widgets',
+      7,
+      'needs review',
+      controller.signal
+    );
+
+    expect(requests.map(({ url }) => url)).toEqual([
+      addUrl,
+      redirectedAddUrl,
+      removeUrl,
+    ]);
+    expect(requests.map(({ method }) => method)).toEqual([
+      'POST',
+      'POST',
+      'DELETE',
+    ]);
+    expect(requests[1]?.body).toBe(requests[0]?.body);
+    expect(requests.every(({ signal }) => signal === controller.signal)).toBe(
+      true
+    );
+  });
+
+  test('draft GraphQL transitions carry one signal through REST lookup and mutation', async () => {
+    const requests: Array<{
+      readonly url: string;
+      readonly method: string | undefined;
+      readonly signal: AbortSignal | null | undefined;
+    }> = [];
+    const fetchFn = (async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const url = String(input);
+      requests.push({ url, method: init?.method, signal: init?.signal });
+      return url === 'https://api.github.com/graphql'
+        ? Response.json({})
+        : Response.json({ number: 7, node_id: 'PR_7' });
+    }) as unknown as FetchFn;
+    const client = await GitHubClient.create({
+      ghAuthProbe: unavailableGitHubAuthProbe,
+      fetch: fetchFn,
+    });
+    const controller = new AbortController();
+
+    await client.convertToDraft('acme', 'widgets', 7, controller.signal);
+    await client.publishDraftPR('acme', 'widgets', 7, controller.signal);
+
+    expect(requests.map(({ url }) => url)).toEqual([
+      'https://api.github.com/repos/acme/widgets/pulls/7',
+      'https://api.github.com/graphql',
+      'https://api.github.com/repos/acme/widgets/pulls/7',
+      'https://api.github.com/graphql',
+    ]);
+    expect(requests.map(({ method }) => method)).toEqual([
+      'GET',
+      'POST',
+      'GET',
+      'POST',
+    ]);
+    expect(requests.every(({ signal }) => signal === controller.signal)).toBe(
+      true
+    );
+  });
+});

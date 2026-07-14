@@ -1,6 +1,18 @@
-import { Cause, Effect, Exit, Option } from 'effect';
+import { Cause, Effect, Exit, Option, type Layer } from 'effect';
+import { KeyringLive, type KeyringService } from '@lib/auth-keyring.js';
 
-export async function runLegacyCommandEffect<A>(
+/** Trusted CLI boundary for internal auth-provider operations. */
+export async function runAuthProviderCommandEffect<A>(
+  effect: Effect.Effect<A, unknown, KeyringService>,
+  keyringLayer: Layer.Layer<KeyringService>
+): Promise<A> {
+  return runServiceFreeAuthProviderCommandEffect(
+    effect.pipe(Effect.provide(keyringLayer))
+  );
+}
+
+/** Host command boundary after provenance-specific service composition. */
+export async function runServiceFreeAuthProviderCommandEffect<A>(
   effect: Effect.Effect<A, unknown, never>
 ): Promise<A> {
   const exit = await Effect.runPromiseExit(effect);
@@ -10,4 +22,11 @@ export async function runLegacyCommandEffect<A>(
   if (Option.isSome(failure)) throw failure.value;
 
   throw Cause.squash(exit.cause);
+}
+
+/** @deprecated Standalone Promise/live compatibility adapter. */
+export async function runLiveAuthProviderCommandEffect<A>(
+  effect: Effect.Effect<A, unknown, KeyringService>
+): Promise<A> {
+  return runAuthProviderCommandEffect(effect, KeyringLive);
 }

@@ -10,8 +10,17 @@ import { hideBin } from 'yargs/helpers';
 import { VERSION, CLI_NAME } from './help.js';
 import { cleanupOldBackup } from './update.js';
 import { UserCancelledError } from '@lib/prompts.js';
-import { registerCommands } from './host/yargs-adapter.js';
+import {
+  assertYargsRuntimeIntegrity,
+  registerCommands,
+} from './host/yargs-adapter.js';
 import { createBuiltinCommandRegistry } from './plugins/builtin.js';
+import { KeyringLive } from '@lib/auth-keyring.js';
+import { safeCliErrorMessage } from './plugins/pull-requests/commands/error.js';
+
+export function renderTopLevelError(error: unknown): string {
+  return `Error: ${safeCliErrorMessage(error)}`;
+}
 
 async function main(): Promise<number> {
   // Clean up any old backup files from previous upgrades
@@ -19,6 +28,7 @@ async function main(): Promise<number> {
   const registry = createBuiltinCommandRegistry();
 
   try {
+    assertYargsRuntimeIntegrity();
     await registerCommands(
       yargs(hideBin(process.argv))
         .scriptName(CLI_NAME)
@@ -26,7 +36,8 @@ async function main(): Promise<number> {
         .help()
         .alias('h', 'help')
         .alias('v', 'version'),
-      registry
+      registry,
+      { keyringLayer: KeyringLive }
     )
       .demandCommand(1, registry.demandMessage())
       .strict()
@@ -45,7 +56,7 @@ async function main(): Promise<number> {
     if (error instanceof UserCancelledError) {
       return error.exitCode; // 130, silent
     }
-    console.error(`Error: ${error instanceof Error ? error.message : error}`);
+    console.error(renderTopLevelError(error));
     return 1;
   }
 }

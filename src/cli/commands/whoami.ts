@@ -90,7 +90,7 @@ export function buildWhoamiCommandEffect(
 export function makeWhoamiCommandDescriptor(
   opts: { ghAuthProbe?: GitHubAuthProbe } = {}
 ): AideCommandDescriptor<Args, WhoamiError, never> {
-  return defineAideCommand<Args, WhoamiError, never>({
+  return defineAideCommand.none<Args, WhoamiError>({
     id: 'whoami',
     route: 'whoami [service]',
     summary: 'Show configured credentials and their source',

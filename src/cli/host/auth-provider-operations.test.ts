@@ -445,7 +445,8 @@ describe('auth provider operation invocation', () => {
     );
 
     expect(error).toBeInstanceOf(AuthProviderOperationError);
-    expect(error.message).toContain('sync account boom');
+    expect(error.message).toContain('accounts callback threw');
+    expect(error.message).not.toContain('sync account boom');
   });
 
   test('applies timeouts to account discovery operations', async () => {
@@ -502,7 +503,8 @@ describe('auth provider operation invocation', () => {
     );
 
     expect(error).toBeInstanceOf(AuthProviderOperationError);
-    expect(error.message).toContain('sync boom');
+    expect(error.message).toContain('login callback threw');
+    expect(error.message).not.toContain('sync boom');
   });
 
   test('rejects malformed login statuses', async () => {

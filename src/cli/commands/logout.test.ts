@@ -6,15 +6,28 @@ import type {
 } from '@cli/host/plugin-descriptor.js';
 import { AuthProviderOperationError } from '@cli/host/auth-provider-operations.js';
 import { createJiraPlugin } from '@cli/plugins/jira/plugin.js';
+import type { KeyringService } from '@lib/auth-keyring.js';
 import { installMockSecrets, type Store } from '@lib/test-helpers.js';
 import { runAuthProviderLogout } from './auth-provider-command-utils.js';
 
 function authProvider(plugin: {
   readonly id: string;
   readonly capabilities?: {
-    readonly authProvider?: AideAuthProviderCapability;
+    readonly authProvider?: AideAuthProviderCapability<
+      KeyringService,
+      KeyringService,
+      KeyringService,
+      KeyringService
+    >;
   };
-}): AideDiscoveredCapability<AideAuthProviderCapability> {
+}): AideDiscoveredCapability<
+  AideAuthProviderCapability<
+    KeyringService,
+    KeyringService,
+    KeyringService,
+    KeyringService
+  >
+> {
   const provider = plugin.capabilities?.authProvider;
   if (provider === undefined) throw new Error('Plugin has no auth provider');
   return Object.freeze({ pluginId: plugin.id, capability: provider });

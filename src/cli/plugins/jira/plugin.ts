@@ -12,14 +12,14 @@ import {
   pluginCommandModule,
 } from '@cli/host/plugin-descriptor.js';
 import {
-  probeJiraConfig,
+  probeJiraConfigEffect,
   readJiraEnvForMigration,
   type ConfigStatus,
 } from '@lib/config.js';
 import {
   authSecretScopesMatch,
-  deleteAuthSecret,
-  writeAuthSecret,
+  deleteAuthSecretEffect,
+  writeAuthSecretEffect,
   type AuthStoreScope,
 } from '@lib/auth-store.js';
 import { StoredJiraSchema, type JiraConfig } from '@schemas/config.js';
@@ -32,7 +32,9 @@ import {
   validateUrl,
 } from '../auth-operation-utils.js';
 
-type ProbeJiraConfig = () => Promise<ConfigStatus<JiraConfig>>;
+type ProbeJiraConfig = (
+  scope?: AuthStoreScope
+) => Promise<ConfigStatus<JiraConfig>>;
 
 interface JiraPluginOptions {
   readonly probeConfig?: ProbeJiraConfig;
@@ -211,7 +213,7 @@ function loginJiraAuth(request: AideAuthLoginRequest) {
       const scopeError = jiraScopeValidationError(result.value, request.scope);
       if (scopeError !== null) return yield* Effect.fail(scopeError);
 
-      yield* writeAuthSecret(
+      yield* writeAuthSecretEffect(
         'jira',
         JSON.stringify(result.value),
         request.scope
@@ -242,7 +244,11 @@ function loginJiraAuth(request: AideAuthLoginRequest) {
     const scopeError = jiraScopeValidationError(validated, request.scope);
     if (scopeError !== null) return yield* Effect.fail(scopeError);
 
-    yield* writeAuthSecret('jira', JSON.stringify(validated), request.scope);
+    yield* writeAuthSecretEffect(
+      'jira',
+      JSON.stringify(validated),
+      request.scope
+    );
 
     return {
       status: 'stored' as const,
@@ -253,7 +259,7 @@ function loginJiraAuth(request: AideAuthLoginRequest) {
 
 function logoutJiraAuth(request?: AideAuthLogoutRequest) {
   return Effect.gen(function* () {
-    const removed = yield* deleteAuthSecret('jira', request?.scope);
+    const removed = yield* deleteAuthSecretEffect('jira', request?.scope);
     return {
       status: removed ? ('removed' as const) : ('not-found' as const),
       messages: [
@@ -266,17 +272,19 @@ function logoutJiraAuth(request?: AideAuthLogoutRequest) {
 }
 
 export function createJiraPlugin(opts: JiraPluginOptions = {}) {
-  const probeConfig = opts.probeConfig ?? (() => probeJiraConfig());
-  const authStatus = () =>
-    Effect.tryPromise({
-      try: () => probeConfig(),
-      catch: (error) => error,
-    }).pipe(Effect.map(mapJiraAuthStatus));
-  const authAccounts = () =>
-    Effect.tryPromise({
-      try: () => probeConfig(),
-      catch: (error) => error,
-    }).pipe(Effect.map(jiraAuthAccounts));
+  const customProbeConfig = opts.probeConfig;
+  const probeConfigEffect =
+    customProbeConfig === undefined
+      ? probeJiraConfigEffect
+      : (scope?: AuthStoreScope) =>
+          Effect.tryPromise({
+            try: () => customProbeConfig(scope),
+            catch: (error) => error,
+          });
+  const authStatus = (request?: { readonly scope?: AuthStoreScope }) =>
+    probeConfigEffect(request?.scope).pipe(Effect.map(mapJiraAuthStatus));
+  const authAccounts = (request?: { readonly scope?: AuthStoreScope }) =>
+    probeConfigEffect(request?.scope).pipe(Effect.map(jiraAuthAccounts));
 
   return defineAidePlugin({
     id: 'jira',

@@ -8,6 +8,7 @@ import { AuthProviderOperationError } from '@cli/host/auth-provider-operations.j
 import { createAzureDevOpsPlugin } from '@cli/plugins/azure-devops/plugin.js';
 import { createGitHubPlugin } from '@cli/plugins/github/plugin.js';
 import { createJiraPlugin } from '@cli/plugins/jira/plugin.js';
+import type { KeyringService } from '@lib/auth-keyring.js';
 import type { Prompter, ReadLineOptions } from '@lib/prompts.js';
 import {
   authenticatedGitHubAuthProbe,
@@ -55,9 +56,21 @@ class ScriptedPrompter implements Prompter {
 function authProvider(plugin: {
   readonly id: string;
   readonly capabilities?: {
-    readonly authProvider?: AideAuthProviderCapability;
+    readonly authProvider?: AideAuthProviderCapability<
+      KeyringService,
+      KeyringService,
+      KeyringService,
+      KeyringService
+    >;
   };
-}): AideDiscoveredCapability<AideAuthProviderCapability> {
+}): AideDiscoveredCapability<
+  AideAuthProviderCapability<
+    KeyringService,
+    KeyringService,
+    KeyringService,
+    KeyringService
+  >
+> {
   const provider = plugin.capabilities?.authProvider;
   if (provider === undefined) throw new Error('Plugin has no auth provider');
   return Object.freeze({ pluginId: plugin.id, capability: provider });

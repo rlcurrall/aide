@@ -13,6 +13,6 @@ export const legacyAuthPlugin = defineAidePlugin({
   commands: [
     pluginCommandModule('login', loginCommand),
     pluginCommandModule('logout', logoutCommand),
-    pluginCommandDescriptor(whoamiCommandDescriptor),
+    pluginCommandDescriptor.none(whoamiCommandDescriptor),
   ],
 });

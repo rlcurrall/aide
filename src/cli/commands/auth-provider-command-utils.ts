@@ -1,6 +1,7 @@
 import type { Argv } from 'yargs';
+import { isProxy } from 'node:util/types';
 
-import { Effect } from 'effect';
+import { Effect, type Layer } from 'effect';
 
 import {
   getAuthProviderStatus,
@@ -29,12 +30,38 @@ import {
   type Prompter,
 } from '@lib/prompts.js';
 import { authInputFieldFlagName } from '@cli/host/auth-input-fields.js';
-import { runLegacyCommandEffect } from './effect-bridge.js';
+import type { KeyringService } from '@lib/auth-keyring.js';
+import type {
+  AideAuthProviderRegistration,
+  AideInternalHostServices,
+} from '@cli/host/runtime-context.js';
+import {
+  runAuthProviderCommandEffect,
+  runLiveAuthProviderCommandEffect,
+  runServiceFreeAuthProviderCommandEffect,
+} from './effect-bridge.js';
+import {
+  defineHostArrayIndex,
+  ownArrayDataValue,
+  ownArrayLength,
+} from '@cli/host/host-owned-array.js';
 
-export type DiscoveredAuthProvider =
-  AideDiscoveredCapability<AideAuthProviderCapability>;
+export type DiscoveredAuthProvider = AideDiscoveredCapability<
+  AideAuthProviderCapability<
+    KeyringService,
+    KeyringService,
+    KeyringService,
+    KeyringService
+  >
+>;
+
+export type DynamicAuthProvider = AideAuthProviderRegistration;
 
 export type AuthProviderOperationName = 'login' | 'logout';
+
+const objectFreeze = Object.freeze;
+const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const objectHasOwn = Object.hasOwn;
 
 const authScopeFlagKeys = [
   'scope-id',
@@ -43,7 +70,21 @@ const authScopeFlagKeys = [
   'scope-account',
   'scope-label',
 ] as const;
-const authScopeFlagSet = new Set<string>(authScopeFlagKeys);
+const authScopeFlagSet = new Set<string>();
+for (let index = 0; index < authScopeFlagKeys.length; index += 1) {
+  const entry = ownArrayDataValue<string>(authScopeFlagKeys, index);
+  if (entry.found) authScopeFlagSet.add(entry.value);
+}
+
+function trustedAuthProviderRegistration(
+  provider: DiscoveredAuthProvider
+): DiscoveredAuthProvider & { readonly provenance: 'trusted' } {
+  return objectFreeze({
+    provenance: 'trusted' as const,
+    pluginId: provider.pluginId,
+    capability: provider.capability,
+  });
+}
 
 export interface AuthScopeArgv {
   readonly 'scope-id'?: unknown;
@@ -62,43 +103,68 @@ export async function readStdin(): Promise<string> {
 }
 
 function commandNames(
-  provider: DiscoveredAuthProvider,
+  provider: DiscoveredAuthProvider | DynamicAuthProvider,
   operation: AuthProviderOperationName
 ): readonly string[] {
   const capability = provider.capability;
   const metadata = operation === 'login' ? capability.login : capability.logout;
   const primary = metadata?.command?.name ?? capability.providerId;
-  return Array.from(
-    new Set([
-      primary,
-      ...(metadata?.command?.aliases ?? []),
-      capability.providerId,
-    ])
-  );
+  const names: string[] = [];
+  const seen = new Set<string>();
+  const add = (name: string): void => {
+    if (seen.has(name)) return;
+    seen.add(name);
+    const index = ownArrayLength(names);
+    if (index !== undefined) defineHostArrayIndex(names, index, name);
+  };
+  add(primary);
+  const aliases = metadata?.command?.aliases;
+  const aliasCount = aliases === undefined ? 0 : ownArrayLength(aliases);
+  if (aliasCount !== undefined) {
+    for (let index = 0; index < aliasCount; index += 1) {
+      const alias = ownArrayDataValue<string>(aliases!, index);
+      if (alias.found) add(alias.value);
+    }
+  }
+  add(capability.providerId);
+  return names;
 }
 
 export function authProviderCommandRoutes(
-  provider: DiscoveredAuthProvider,
+  provider: DiscoveredAuthProvider | DynamicAuthProvider,
   operation: AuthProviderOperationName
 ): string | readonly string[] {
   const names = commandNames(provider, operation);
-  return names.length === 1 ? names[0]! : names;
+  const length = ownArrayLength(names);
+  const first = ownArrayDataValue<string>(names, 0);
+  return length === 1 && first.found ? first.value : names;
 }
 
-export function findAuthProviderByCommandName(
-  providers: readonly DiscoveredAuthProvider[],
+export function findAuthProviderByCommandName<
+  TProvider extends DiscoveredAuthProvider | DynamicAuthProvider,
+>(
+  providers: readonly TProvider[],
   name: string,
   operation: AuthProviderOperationName
-): DiscoveredAuthProvider | null {
-  return (
-    providers.find((provider) =>
-      commandNames(provider, operation).includes(name)
-    ) ?? null
-  );
+): TProvider | null {
+  const providerCount = ownArrayLength(providers);
+  if (providerCount === undefined) return null;
+  for (let index = 0; index < providerCount; index += 1) {
+    const provider = ownArrayDataValue<TProvider>(providers, index);
+    if (!provider.found) continue;
+    const names = commandNames(provider.value, operation);
+    const nameCount = ownArrayLength(names);
+    if (nameCount === undefined) continue;
+    for (let nameIndex = 0; nameIndex < nameCount; nameIndex += 1) {
+      const candidate = ownArrayDataValue<string>(names, nameIndex);
+      if (candidate.found && candidate.value === name) return provider.value;
+    }
+  }
+  return null;
 }
 
 export function providerHasAuthOperation(
-  provider: DiscoveredAuthProvider,
+  provider: DiscoveredAuthProvider | DynamicAuthProvider,
   operation: AuthProviderOperationName
 ): boolean {
   return typeof provider.capability.operations?.[operation] === 'function';
@@ -107,9 +173,21 @@ export function providerHasAuthOperation(
 export const authFieldFlagName = authInputFieldFlagName;
 
 export function assertNoReservedAuthScopeFlags(
-  provider: DiscoveredAuthProvider
+  provider: DiscoveredAuthProvider | DynamicAuthProvider
 ): void {
-  for (const field of provider.capability.login?.fields ?? []) {
+  const fields = provider.capability.login?.fields;
+  const fieldCount = fields === undefined ? 0 : ownArrayLength(fields);
+  if (fieldCount === undefined) return;
+  for (let index = 0; index < fieldCount; index += 1) {
+    const entry = ownArrayDataValue<
+      NonNullable<AideAuthProviderCapability['login']>['fields'] extends
+        | readonly (infer T)[]
+        | undefined
+        ? T
+        : never
+    >(fields!, index);
+    if (!entry.found) continue;
+    const field = entry.value;
     const flagName = authFieldFlagName(field);
     if (authScopeFlagSet.has(flagName)) {
       throw new Error(
@@ -124,41 +202,71 @@ interface ScopeArgValue {
   readonly value: string | undefined;
 }
 
+type ScopeArgProperty =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'data'; readonly value: unknown }
+  | { readonly kind: 'invalid' };
+
+function scopeArgProperty(
+  argv: Readonly<Record<string, unknown>>,
+  key: string
+): ScopeArgProperty {
+  if (isProxy(argv)) return { kind: 'invalid' };
+  try {
+    const descriptor = objectGetOwnPropertyDescriptor(argv, key);
+    if (descriptor === undefined) return { kind: 'absent' };
+    return objectHasOwn(descriptor, 'value')
+      ? { kind: 'data', value: descriptor.value }
+      : { kind: 'invalid' };
+  } catch {
+    return { kind: 'invalid' };
+  }
+}
+
 function readScopeArg(
-  provider: DiscoveredAuthProvider,
+  provider: DiscoveredAuthProvider | DynamicAuthProvider,
   argv: Readonly<Record<string, unknown>>,
   dashed: string,
   camel: string
 ): ScopeArgValue {
-  const keys = [dashed, camel].filter((key) =>
-    Object.prototype.hasOwnProperty.call(argv, key)
-  );
-  if (keys.length === 0) return { present: false, value: undefined };
+  const dashedProperty = scopeArgProperty(argv, dashed);
+  const camelProperty = scopeArgProperty(argv, camel);
+  if (dashedProperty.kind === 'absent' && camelProperty.kind === 'absent') {
+    return { present: false, value: undefined };
+  }
 
-  const values = keys.map((key) => {
-    const value = argv[key];
+  const readValue = (property: ScopeArgProperty): string | undefined => {
+    if (property.kind === 'absent') return undefined;
+    const value = property.kind === 'data' ? property.value : undefined;
     if (typeof value !== 'string' || value.trim() === '') {
       throw new Error(
         `Auth provider '${provider.capability.providerId}' requires '--${dashed}' to be a non-empty string.`
       );
     }
     return value.trim();
-  });
+  };
+
+  const dashedValue = readValue(dashedProperty);
+  const camelValue = readValue(camelProperty);
 
   // Yargs normally emits equivalent dashed and camel aliases. Independently
   // supplied aliases must also agree after trimming or scope selection fails;
   // repeated flags become arrays and fail the string validation above.
-  if (values.some((value) => value !== values[0])) {
+  if (
+    dashedValue !== undefined &&
+    camelValue !== undefined &&
+    dashedValue !== camelValue
+  ) {
     throw new Error(
       `Auth provider '${provider.capability.providerId}' received conflicting values for '--${dashed}' and '--${camel}'.`
     );
   }
 
-  return { present: true, value: values[0]! };
+  return { present: true, value: dashedValue ?? camelValue };
 }
 
 function scopeFromArgValues(
-  provider: DiscoveredAuthProvider,
+  provider: DiscoveredAuthProvider | DynamicAuthProvider,
   args: {
     readonly id?: string;
     readonly host?: string;
@@ -167,11 +275,18 @@ function scopeFromArgValues(
     readonly label?: string;
   }
 ): AideAuthScope {
-  const derivedId =
-    args.id ??
-    [args.host, args.org, args.account, args.label]
-      .filter((part) => part !== undefined)
-      .join(':');
+  let derivedId = args.id;
+  if (derivedId === undefined) {
+    const parts = [args.host, args.org, args.account, args.label] as const;
+    let joined = '';
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = ownArrayDataValue<string | undefined>(parts, index);
+      if (!part.found || part.value === undefined) continue;
+      if (joined !== '') joined += ':';
+      joined += part.value;
+    }
+    derivedId = joined;
+  }
 
   if (derivedId === undefined || derivedId === '') {
     throw new Error(
@@ -180,7 +295,7 @@ function scopeFromArgValues(
     );
   }
 
-  return Object.freeze({
+  return objectFreeze({
     id: derivedId,
     providerId: provider.capability.providerId,
     ...(args.host === undefined ? {} : { host: args.host }),
@@ -215,7 +330,7 @@ export function configureAuthScopeOptions<T>(yargs: Argv<T>): Argv<T> {
 }
 
 export function authScopeFromArgs(
-  provider: DiscoveredAuthProvider,
+  provider: DiscoveredAuthProvider | DynamicAuthProvider,
   argv: Readonly<Record<string, unknown>> & Partial<AuthScopeArgv>
 ): AideAuthScope | undefined {
   const id = readScopeArg(provider, argv, 'scope-id', 'scopeId');
@@ -224,7 +339,13 @@ export function authScopeFromArgs(
   const account = readScopeArg(provider, argv, 'scope-account', 'scopeAccount');
   const label = readScopeArg(provider, argv, 'scope-label', 'scopeLabel');
 
-  if (![id, host, org, account, label].some((arg) => arg.present)) {
+  if (
+    !id.present &&
+    !host.present &&
+    !org.present &&
+    !account.present &&
+    !label.present
+  ) {
     return undefined;
   }
 
@@ -282,18 +403,172 @@ export function authPrompt(prompter: Prompter | undefined): AideAuthPrompt {
 }
 
 function printMessages(messages: readonly string[] | undefined): void {
-  for (const message of messages ?? []) {
-    console.log(message);
+  if (messages === undefined) return;
+  const messageCount = ownArrayLength(messages);
+  if (messageCount === undefined) return;
+  for (let index = 0; index < messageCount; index += 1) {
+    const message = ownArrayDataValue<string>(messages, index);
+    if (message.found) console.log(message.value);
   }
 }
 
+function runDynamicAuthProviderEffect<A>(
+  provider: DynamicAuthProvider,
+  services: AideInternalHostServices,
+  makeTrusted: (
+    trusted: Extract<DynamicAuthProvider, { readonly provenance: 'trusted' }>
+  ) => Effect.Effect<A, unknown, KeyringService>,
+  makeExternal: (
+    external: Extract<DynamicAuthProvider, { readonly provenance: 'external' }>
+  ) => Effect.Effect<A, unknown, never>
+): Promise<A> {
+  return provider.provenance === 'trusted'
+    ? runServiceFreeAuthProviderCommandEffect(
+        services.provideTrustedKeyring(
+          Effect.suspend(() => makeTrusted(provider))
+        )
+      )
+    : runServiceFreeAuthProviderCommandEffect(
+        services.isolatePublicEffect(
+          Effect.suspend(() => makeExternal(provider))
+        )
+      );
+}
+
+export async function runDynamicAuthProviderLogin(
+  provider: DynamicAuthProvider,
+  request: AideAuthLoginRequest,
+  services: AideInternalHostServices,
+  opts: { readonly prompter?: Prompter } = {}
+): Promise<AideAuthLoginResult> {
+  const operationRequest = {
+    ...request,
+    prompt: request.prompt ?? authPrompt(opts.prompter),
+  };
+  const result = await runDynamicAuthProviderEffect(
+    provider,
+    services,
+    (trusted) => loginWithAuthProvider(trusted, operationRequest),
+    (external) => loginWithAuthProvider(external, operationRequest)
+  );
+  printMessages(result.messages);
+  return result;
+}
+
+export async function runDynamicAuthProviderLogout(
+  provider: DynamicAuthProvider,
+  services: AideInternalHostServices,
+  request?: AideAuthLogoutRequest
+): Promise<AideAuthLogoutResult> {
+  const result = await runDynamicAuthProviderEffect(
+    provider,
+    services,
+    (trusted) =>
+      request === undefined
+        ? logoutWithAuthProvider(trusted)
+        : logoutWithAuthProvider(trusted, request),
+    (external) =>
+      request === undefined
+        ? logoutWithAuthProvider(external)
+        : logoutWithAuthProvider(external, request)
+  );
+  printMessages(result.messages);
+  return result;
+}
+
+export function runDynamicAuthProviderStatus(
+  provider: DynamicAuthProvider,
+  services: AideInternalHostServices,
+  request: AideAuthStatusRequest = {}
+): Promise<AidePluginAuthStatus> {
+  return runDynamicAuthProviderEffect(
+    provider,
+    services,
+    (trusted) => getAuthProviderStatus(trusted, request),
+    (external) => getAuthProviderStatus(external, request)
+  );
+}
+
+export function runDynamicAuthProviderAccounts(
+  provider: DynamicAuthProvider,
+  services: AideInternalHostServices,
+  request: AideAuthAccountDiscoveryRequest = {}
+): Promise<readonly AideAuthAccount[]> {
+  return runDynamicAuthProviderEffect(
+    provider,
+    services,
+    (trusted) => listAuthProviderAccounts(trusted, request),
+    (external) => listAuthProviderAccounts(external, request)
+  );
+}
+
+export async function runAuthProviderLoginWithLayer(
+  provider: DiscoveredAuthProvider,
+  request: AideAuthLoginRequest,
+  keyringLayer: Layer.Layer<KeyringService>,
+  opts: { readonly prompter?: Prompter } = {}
+): Promise<AideAuthLoginResult> {
+  const trustedProvider = trustedAuthProviderRegistration(provider);
+  const result = await runAuthProviderCommandEffect(
+    loginWithAuthProvider(trustedProvider, {
+      ...request,
+      prompt: request.prompt ?? authPrompt(opts.prompter),
+    }),
+    keyringLayer
+  );
+  printMessages(result.messages);
+  return result;
+}
+
+export async function runAuthProviderLogoutWithLayer(
+  provider: DiscoveredAuthProvider,
+  keyringLayer: Layer.Layer<KeyringService>,
+  request?: AideAuthLogoutRequest
+): Promise<AideAuthLogoutResult> {
+  const trustedProvider = trustedAuthProviderRegistration(provider);
+  const result = await runAuthProviderCommandEffect(
+    request === undefined
+      ? logoutWithAuthProvider(trustedProvider)
+      : logoutWithAuthProvider(trustedProvider, request),
+    keyringLayer
+  );
+  printMessages(result.messages);
+  return result;
+}
+
+export async function runAuthProviderStatusWithLayer(
+  provider: DiscoveredAuthProvider,
+  keyringLayer: Layer.Layer<KeyringService>,
+  request: AideAuthStatusRequest = {}
+): Promise<AidePluginAuthStatus> {
+  const trustedProvider = trustedAuthProviderRegistration(provider);
+  return await runAuthProviderCommandEffect(
+    getAuthProviderStatus(trustedProvider, request),
+    keyringLayer
+  );
+}
+
+export async function runAuthProviderAccountsWithLayer(
+  provider: DiscoveredAuthProvider,
+  keyringLayer: Layer.Layer<KeyringService>,
+  request: AideAuthAccountDiscoveryRequest = {}
+): Promise<readonly AideAuthAccount[]> {
+  const trustedProvider = trustedAuthProviderRegistration(provider);
+  return await runAuthProviderCommandEffect(
+    listAuthProviderAccounts(trustedProvider, request),
+    keyringLayer
+  );
+}
+
+/** @deprecated Standalone Promise/live compatibility adapter. */
 export async function runAuthProviderLogin(
   provider: DiscoveredAuthProvider,
   request: AideAuthLoginRequest,
   opts: { readonly prompter?: Prompter } = {}
 ): Promise<AideAuthLoginResult> {
-  const result = await runLegacyCommandEffect(
-    loginWithAuthProvider(provider, {
+  const trustedProvider = trustedAuthProviderRegistration(provider);
+  const result = await runLiveAuthProviderCommandEffect(
+    loginWithAuthProvider(trustedProvider, {
       ...request,
       prompt: request.prompt ?? authPrompt(opts.prompter),
     })
@@ -302,31 +577,39 @@ export async function runAuthProviderLogin(
   return result;
 }
 
+/** @deprecated Standalone Promise/live compatibility adapter. */
 export async function runAuthProviderLogout(
   provider: DiscoveredAuthProvider,
   request?: AideAuthLogoutRequest
 ): Promise<AideAuthLogoutResult> {
-  const result = await runLegacyCommandEffect(
+  const trustedProvider = trustedAuthProviderRegistration(provider);
+  const result = await runLiveAuthProviderCommandEffect(
     request === undefined
-      ? logoutWithAuthProvider(provider)
-      : logoutWithAuthProvider(provider, request)
+      ? logoutWithAuthProvider(trustedProvider)
+      : logoutWithAuthProvider(trustedProvider, request)
   );
   printMessages(result.messages);
   return result;
 }
 
+/** @deprecated Standalone Promise/live compatibility adapter. */
 export async function runAuthProviderStatus(
   provider: DiscoveredAuthProvider,
   request: AideAuthStatusRequest = {}
 ): Promise<AidePluginAuthStatus> {
-  return await runLegacyCommandEffect(getAuthProviderStatus(provider, request));
+  const trustedProvider = trustedAuthProviderRegistration(provider);
+  return runLiveAuthProviderCommandEffect(
+    getAuthProviderStatus(trustedProvider, request)
+  );
 }
 
+/** @deprecated Standalone Promise/live compatibility adapter. */
 export async function runAuthProviderAccounts(
   provider: DiscoveredAuthProvider,
   request: AideAuthAccountDiscoveryRequest = {}
 ): Promise<readonly AideAuthAccount[]> {
-  return await runLegacyCommandEffect(
-    listAuthProviderAccounts(provider, request)
+  const trustedProvider = trustedAuthProviderRegistration(provider);
+  return runLiveAuthProviderCommandEffect(
+    listAuthProviderAccounts(trustedProvider, request)
   );
 }

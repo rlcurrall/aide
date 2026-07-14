@@ -31,6 +31,7 @@ import {
   type AidePullRequestViewResult,
   type AidePluginAuthStatus,
 } from '@cli/host/plugin-descriptor.js';
+import { defineImmutableBuiltinPlugin } from '@cli/host/immutable-builtin-plugin.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import {
   MissingRepoContextError,
@@ -41,16 +42,16 @@ import {
 } from '@lib/ado-utils.js';
 import {
   loadAzureDevOpsConfig,
-  probeAdoConfig,
+  probeAdoConfigEffect,
   readAdoEnvForMigration,
   type ConfigStatus,
 } from '@lib/config.js';
 import { ensureRefPrefix, extractBranchName } from '@lib/git-utils.js';
 import {
   authSecretScopesMatch,
-  deleteAuthSecret,
+  deleteAuthSecretEffect,
   type AuthStoreScope,
-  writeAuthSecret,
+  writeAuthSecretEffect,
 } from '@lib/auth-store.js';
 import { azureDevOpsRepositoryAuthScope } from '@lib/repository-auth-scope.js';
 import {
@@ -81,7 +82,9 @@ import {
   validateUrl,
 } from '../auth-operation-utils.js';
 
-type ProbeAdoConfig = () => Promise<ConfigStatus<AzureDevOpsConfig>>;
+type ProbeAdoConfig = (
+  scope?: AuthStoreScope
+) => Promise<ConfigStatus<AzureDevOpsConfig>>;
 type AzureDevOpsPullRequestClient = Pick<
   AzureDevOpsClient,
   | 'listPullRequests'
@@ -131,41 +134,36 @@ function azureDevOpsScopeValidationError(
   );
 }
 
-const azureDevOpsOrgUrlField = {
-  kind: 'text',
-  key: 'orgUrl',
-  label: 'Azure DevOps org URL',
-  description: 'ADO org URL',
-  required: true,
-  validate: validateUrl,
-} as const satisfies AideAuthInputField;
-
-const azureDevOpsPatField = {
-  kind: 'secret',
-  key: 'pat',
-  label: 'PAT',
-  description: 'ADO PAT',
-  required: true,
-  stdin: true,
-} as const satisfies AideAuthInputField;
-
-const azureDevOpsAuthMethodField = {
-  kind: 'select',
-  key: 'authMethod',
-  label: 'Auth method',
-  description: 'Auth method',
-  choices: [
-    { value: 'pat', label: 'PAT' },
-    { value: 'bearer', label: 'Bearer' },
-  ],
-  default: 'pat',
-} as const satisfies AideAuthInputField;
-
-const azureDevOpsLoginFields = Object.freeze([
-  azureDevOpsOrgUrlField,
-  azureDevOpsPatField,
-  azureDevOpsAuthMethodField,
-] as const);
+function createAzureDevOpsLoginFields() {
+  const orgUrlField = {
+    kind: 'text',
+    key: 'orgUrl',
+    label: 'Azure DevOps org URL',
+    description: 'ADO org URL',
+    required: true,
+    validate: validateUrl,
+  } as const satisfies AideAuthInputField;
+  const patField = {
+    kind: 'secret',
+    key: 'pat',
+    label: 'PAT',
+    description: 'ADO PAT',
+    required: true,
+    stdin: true,
+  } as const satisfies AideAuthInputField;
+  const authMethodField = {
+    kind: 'select',
+    key: 'authMethod',
+    label: 'Auth method',
+    description: 'Auth method',
+    choices: [
+      { value: 'pat', label: 'PAT' },
+      { value: 'bearer', label: 'Bearer' },
+    ],
+    default: 'pat',
+  } as const satisfies AideAuthInputField;
+  return [orgUrlField, patField, authMethodField] as const;
+}
 
 function mapAzureDevOpsAuthStatus(
   status: ConfigStatus<AzureDevOpsConfig>
@@ -255,7 +253,7 @@ function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
       );
       if (scopeError !== null) return yield* Effect.fail(scopeError);
 
-      yield* writeAuthSecret(
+      yield* writeAuthSecretEffect(
         'azure-devops',
         JSON.stringify(result.value),
         request.scope
@@ -269,8 +267,9 @@ function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
       };
     }
 
-    const orgUrl = yield* promptAuthField(request, azureDevOpsOrgUrlField);
-    const pat = yield* promptAuthField(request, azureDevOpsPatField);
+    const [orgUrlField, patField] = createAzureDevOpsLoginFields();
+    const orgUrl = yield* promptAuthField(request, orgUrlField);
+    const pat = yield* promptAuthField(request, patField);
     const authMethod = (authInputString(request, 'authMethod') ??
       'pat') as AuthMethod;
 
@@ -290,7 +289,7 @@ function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
     );
     if (scopeError !== null) return yield* Effect.fail(scopeError);
 
-    yield* writeAuthSecret(
+    yield* writeAuthSecretEffect(
       'azure-devops',
       JSON.stringify(validated),
       request.scope
@@ -305,7 +304,10 @@ function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
 
 function logoutAzureDevOpsAuth(request?: AideAuthLogoutRequest) {
   return Effect.gen(function* () {
-    const removed = yield* deleteAuthSecret('azure-devops', request?.scope);
+    const removed = yield* deleteAuthSecretEffect(
+      'azure-devops',
+      request?.scope
+    );
     return {
       status: removed ? ('removed' as const) : ('not-found' as const),
       messages: [
@@ -318,29 +320,34 @@ function logoutAzureDevOpsAuth(request?: AideAuthLogoutRequest) {
 }
 
 export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
-  const probeConfig = opts.probeConfig ?? (() => probeAdoConfig());
+  const azureDevOpsLoginFields = createAzureDevOpsLoginFields();
+  const customProbeConfig = opts.probeConfig;
+  const probeConfigEffect =
+    customProbeConfig === undefined
+      ? probeAdoConfigEffect
+      : (scope?: AuthStoreScope) =>
+          Effect.tryPromise({
+            try: () => customProbeConfig(scope),
+            catch: (error) => error,
+          });
   const createClient =
     opts.createClient ??
     (async ({ scope } = {}) => {
       const { config } = await loadAzureDevOpsConfig(scope);
       return { client: new AzureDevOpsClient(config), config };
     });
-  const authStatus = () =>
-    Effect.tryPromise({
-      try: () => probeConfig(),
-      catch: (error) => error,
-    }).pipe(Effect.map(mapAzureDevOpsAuthStatus));
-  const authAccounts = () =>
-    Effect.tryPromise({
-      try: () => probeConfig(),
-      catch: (error) => error,
-    }).pipe(Effect.map(azureDevOpsAuthAccounts));
+  const authStatus = (request?: { readonly scope?: AuthStoreScope }) =>
+    probeConfigEffect(request?.scope).pipe(
+      Effect.map(mapAzureDevOpsAuthStatus)
+    );
+  const authAccounts = (request?: { readonly scope?: AuthStoreScope }) =>
+    probeConfigEffect(request?.scope).pipe(Effect.map(azureDevOpsAuthAccounts));
 
   const listPullRequests = (
     request: AidePullRequestListRequest
   ): Effect.Effect<AidePullRequestListResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'azure-devops') {
           throw new Error(
@@ -359,7 +366,8 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           {
             status: request.status,
             top: request.limit,
-          }
+          },
+          signal
         );
 
         let prs = response.value;
@@ -388,7 +396,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
     request: AidePullRequestViewRequest
   ): Effect.Effect<AidePullRequestViewResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'azure-devops') {
           throw new Error(
@@ -405,12 +413,14 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           client.getPullRequest(
             repository.project,
             repository.repo,
-            request.pullRequest.number
+            request.pullRequest.number,
+            signal
           ),
           client.getPullRequestLabels(
             repository.project,
             repository.repo,
-            request.pullRequest.number
+            request.pullRequest.number,
+            signal
           ),
         ]);
 
@@ -432,7 +442,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
     request: AidePullRequestCreateRequest
   ): Effect.Effect<AidePullRequestCreateResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'azure-devops') {
           throw new Error(
@@ -458,14 +468,15 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           ensureRefPrefix(request.targetBranch),
           request.title,
           request.description ?? '',
-          { isDraft: request.draft ?? false }
+          { isDraft: request.draft ?? false },
+          signal
         );
 
         const addedLabels: string[] = [];
         for (const labelName of request.labels ?? []) {
           if (client.addPullRequestLabel === undefined) {
             warnings.push(
-              `Failed to add tag '${labelName}': Azure DevOps client does not support labels`
+              'Failed to add tag: Azure DevOps client does not support labels'
             );
             continue;
           }
@@ -474,13 +485,12 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
               repository.project,
               repository.repo,
               pr.pullRequestId,
-              labelName
+              labelName,
+              signal
             );
             addedLabels.push(labelName);
-          } catch (error) {
-            warnings.push(
-              `Failed to add tag '${labelName}': ${errorMessage(error)}`
-            );
+          } catch {
+            warnings.push('Failed to add tag: provider request failed');
           }
         }
 
@@ -489,13 +499,14 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           const labelsResponse = await client.getPullRequestLabels(
             repository.project,
             repository.repo,
-            pr.pullRequestId
+            pr.pullRequestId,
+            signal
           );
           labels = labelsResponse.value
             .filter((label) => label.active)
             .map((label) => label.name);
-        } catch (error) {
-          warnings.push(`Failed to refresh labels: ${errorMessage(error)}`);
+        } catch {
+          warnings.push('Failed to refresh labels: provider request failed');
         }
         const url = buildPrUrl(
           {
@@ -521,7 +532,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
     request: AidePullRequestUpdateRequest
   ): Effect.Effect<AidePullRequestUpdateResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'azure-devops') {
           throw new Error(
@@ -563,13 +574,15 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
             repository.project,
             repository.repo,
             request.pullRequest.number,
-            updates
+            updates,
+            signal
           );
         } else {
           pr = await client.getPullRequest(
             repository.project,
             repository.repo,
-            request.pullRequest.number
+            request.pullRequest.number,
+            signal
           );
         }
 
@@ -578,7 +591,8 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           const labelsResponse = await client.getPullRequestLabels(
             repository.project,
             repository.repo,
-            request.pullRequest.number
+            request.pullRequest.number,
+            signal
           );
           for (const labelName of labelsToRemove) {
             const label = labelsResponse.value.find(
@@ -586,13 +600,13 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
             );
             if (label === undefined) {
               warnings.push(
-                `Tag '${labelName}' not found on PR #${request.pullRequest.number}`
+                'Failed to remove tag: requested tag was not found on the pull request'
               );
               continue;
             }
             if (client.removePullRequestLabel === undefined) {
               warnings.push(
-                `Failed to remove tag '${labelName}': Azure DevOps client does not support labels`
+                'Failed to remove tag: Azure DevOps client does not support labels'
               );
               continue;
             }
@@ -601,12 +615,11 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
                 repository.project,
                 repository.repo,
                 request.pullRequest.number,
-                label.id
+                label.id,
+                signal
               );
-            } catch (error) {
-              warnings.push(
-                `Failed to remove tag '${labelName}': ${errorMessage(error)}`
-              );
+            } catch {
+              warnings.push('Failed to remove tag: provider request failed');
             }
           }
         }
@@ -614,7 +627,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
         for (const labelName of request.labelsToAdd ?? []) {
           if (client.addPullRequestLabel === undefined) {
             warnings.push(
-              `Failed to add tag '${labelName}': Azure DevOps client does not support labels`
+              'Failed to add tag: Azure DevOps client does not support labels'
             );
             continue;
           }
@@ -623,19 +636,19 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
               repository.project,
               repository.repo,
               request.pullRequest.number,
-              labelName
+              labelName,
+              signal
             );
-          } catch (error) {
-            warnings.push(
-              `Failed to add tag '${labelName}': ${errorMessage(error)}`
-            );
+          } catch {
+            warnings.push('Failed to add tag: provider request failed');
           }
         }
 
         const labelsResponse = await client.getPullRequestLabels(
           repository.project,
           repository.repo,
-          request.pullRequest.number
+          request.pullRequest.number,
+          signal
         );
         const url = buildPrUrl(
           {
@@ -667,7 +680,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
     request: AidePullRequestDiffRequest
   ): Effect.Effect<AidePullRequestDiffResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'azure-devops') {
           throw new Error(
@@ -684,17 +697,20 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           client.getPullRequest(
             repository.project,
             repository.repo,
-            request.pullRequest.number
+            request.pullRequest.number,
+            signal
           ),
           client.getPullRequestLabels(
             repository.project,
             repository.repo,
-            request.pullRequest.number
+            request.pullRequest.number,
+            signal
           ),
           client.getAllPullRequestChanges(
             repository.project,
             repository.repo,
-            request.pullRequest.number
+            request.pullRequest.number,
+            signal
           ),
         ]);
 
@@ -717,7 +733,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
     request: AidePullRequestCommentsRequest
   ): Effect.Effect<AidePullRequestCommentsResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'azure-devops') {
           throw new Error(
@@ -733,7 +749,8 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
         const comments = await client.getAllComments(
           repository.project,
           repository.repo,
-          request.pullRequest.number
+          request.pullRequest.number,
+          signal
         );
 
         return {
@@ -750,7 +767,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
     request: AidePullRequestAddCommentRequest
   ): Effect.Effect<AidePullRequestCommentMutationResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'azure-devops') {
           throw new Error(
@@ -779,7 +796,8 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
                 filePath: request.position.filePath,
                 line: request.position.lineNumber,
                 endLine: request.position.endLineNumber,
-              }
+              },
+          signal
         );
 
         return azureDevOpsThreadMutationResult(
@@ -795,7 +813,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
     request: AidePullRequestReplyCommentRequest
   ): Effect.Effect<AidePullRequestCommentMutationResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'azure-devops') {
           throw new Error(
@@ -819,7 +837,8 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           request.pullRequest.number,
           request.threadId,
           request.body,
-          request.parentCommentId
+          request.parentCommentId,
+          signal
         );
         const comment = azureDevOpsCreatedReplyToComment(response);
 
@@ -841,7 +860,7 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
     request: AidePullRequestBranchLookupRequest
   ): Effect.Effect<AidePullRequestBranchLookupResult, unknown, never> =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const repository = request.match.repository;
         if (repository.kind !== 'azure-devops') {
           throw new Error(
@@ -860,7 +879,8 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           {
             sourceRefName: `refs/heads/${request.branch}`,
             status: 'all',
-          }
+          },
+          signal
         );
         const selected = selectAzureDevOpsPullRequestForBranch(response.value);
         if (selected === undefined) {
@@ -873,12 +893,14 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
           client.getPullRequest(
             repository.project,
             repository.repo,
-            selected.pullRequestId
+            selected.pullRequestId,
+            signal
           ),
           client.getPullRequestLabels(
             repository.project,
             repository.repo,
-            selected.pullRequestId
+            selected.pullRequestId,
+            signal
           ),
         ]);
 
@@ -1055,7 +1077,9 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
   });
 }
 
-export const azureDevOpsPlugin = createAzureDevOpsPlugin();
+export const azureDevOpsPlugin = defineImmutableBuiltinPlugin(
+  createAzureDevOpsPlugin()
+);
 
 function azureDevOpsOrgFromHost(
   host: string | undefined
@@ -1156,10 +1180,6 @@ function azureDevOpsPullRequestToViewItem(
     ...(url === undefined ? {} : { url }),
     labels,
   } as const;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function azureDevOpsPullRequestChangeToDiffFile(entry: AzureDevOpsPRChange) {

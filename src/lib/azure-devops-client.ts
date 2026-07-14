@@ -37,7 +37,7 @@ export class AzureDevOpsClient {
   /**
    * Make a GET request to Azure DevOps API
    */
-  private async get<T>(url: string): Promise<T> {
+  private async get<T>(url: string, signal?: AbortSignal): Promise<T> {
     const response = await fetch(url, {
       method: 'GET',
       headers: {
@@ -45,6 +45,7 @@ export class AzureDevOpsClient {
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
+      signal,
     });
 
     if (!response.ok) {
@@ -61,7 +62,11 @@ export class AzureDevOpsClient {
    * Make a POST request to Azure DevOps API
    * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/?view=azure-devops-rest-7.1
    */
-  private async post<T>(url: string, body: unknown): Promise<T> {
+  private async post<T>(
+    url: string,
+    body: unknown,
+    signal?: AbortSignal
+  ): Promise<T> {
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -70,6 +75,7 @@ export class AzureDevOpsClient {
         Accept: 'application/json',
       },
       body: JSON.stringify(body),
+      signal,
     });
 
     if (!response.ok) {
@@ -86,7 +92,11 @@ export class AzureDevOpsClient {
    * Make a PATCH request to Azure DevOps API
    * @see https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/update?view=azure-devops-rest-7.1
    */
-  private async patch<T>(url: string, body: unknown): Promise<T> {
+  private async patch<T>(
+    url: string,
+    body: unknown,
+    signal?: AbortSignal
+  ): Promise<T> {
     const response = await fetch(url, {
       method: 'PATCH',
       headers: {
@@ -95,6 +105,7 @@ export class AzureDevOpsClient {
         Accept: 'application/json',
       },
       body: JSON.stringify(body),
+      signal,
     });
 
     if (!response.ok) {
@@ -110,13 +121,14 @@ export class AzureDevOpsClient {
   /**
    * Make a DELETE request to Azure DevOps API
    */
-  private async delete(url: string): Promise<void> {
+  private async delete(url: string, signal?: AbortSignal): Promise<void> {
     const response = await fetch(url, {
       method: 'DELETE',
       headers: {
         Authorization: this.getAuthHeader(),
         Accept: 'application/json',
       },
+      signal,
     });
 
     if (!response.ok) {
@@ -134,10 +146,11 @@ export class AzureDevOpsClient {
   async getPullRequest(
     project: string,
     repo: string,
-    prId: number
+    prId: number,
+    signal?: AbortSignal
   ): Promise<AzureDevOpsPullRequest> {
     const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}?api-version=7.2-preview.1`;
-    return this.get<AzureDevOpsPullRequest>(url);
+    return this.get<AzureDevOpsPullRequest>(url, signal);
   }
 
   /**
@@ -147,10 +160,11 @@ export class AzureDevOpsClient {
   async getPullRequestThreads(
     project: string,
     repo: string,
-    prId: number
+    prId: number,
+    signal?: AbortSignal
   ): Promise<{ value: AzureDevOpsPRThread[] }> {
     const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/threads?api-version=7.2-preview.1`;
-    return this.get<{ value: AzureDevOpsPRThread[] }>(url);
+    return this.get<{ value: AzureDevOpsPRThread[] }>(url, signal);
   }
 
   /**
@@ -165,7 +179,8 @@ export class AzureDevOpsClient {
       creatorId?: string;
       top?: number;
       sourceRefName?: string;
-    }
+    },
+    signal?: AbortSignal
   ): Promise<{ value: AzureDevOpsPullRequest[] }> {
     const params = new URLSearchParams();
     params.append('api-version', '7.2-preview.1');
@@ -184,7 +199,7 @@ export class AzureDevOpsClient {
     }
 
     const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests?${params.toString()}`;
-    return this.get<{ value: AzureDevOpsPullRequest[] }>(url);
+    return this.get<{ value: AzureDevOpsPullRequest[] }>(url, signal);
   }
 
   /**
@@ -194,12 +209,14 @@ export class AzureDevOpsClient {
   async getAllComments(
     project: string,
     repo: string,
-    prId: number
+    prId: number,
+    signal?: AbortSignal
   ): Promise<AdoFlattenedComment[]> {
     const threadsResponse = await this.getPullRequestThreads(
       project,
       repo,
-      prId
+      prId,
+      signal
     );
 
     const allComments: AdoFlattenedComment[] = [];
@@ -243,7 +260,8 @@ export class AzureDevOpsClient {
     repo: string,
     prId: number,
     content: string,
-    options?: CreateThreadOptions
+    options?: CreateThreadOptions,
+    signal?: AbortSignal
   ): Promise<CreateThreadResponse> {
     const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/threads?api-version=7.1`;
 
@@ -284,7 +302,7 @@ export class AzureDevOpsClient {
       };
     }
 
-    return this.post<CreateThreadResponse>(url, body);
+    return this.post<CreateThreadResponse>(url, body, signal);
   }
 
   /**
@@ -305,7 +323,8 @@ export class AzureDevOpsClient {
     prId: number,
     threadId: number,
     content: string,
-    parentCommentId?: number
+    parentCommentId?: number,
+    signal?: AbortSignal
   ): Promise<AzureDevOpsCreateCommentResponse> {
     const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/threads/${threadId}/comments?api-version=7.1`;
 
@@ -319,7 +338,7 @@ export class AzureDevOpsClient {
       commentType: 1, // 1 = text comment
     };
 
-    return this.post<AzureDevOpsCreateCommentResponse>(url, body);
+    return this.post<AzureDevOpsCreateCommentResponse>(url, body, signal);
   }
 
   /**
@@ -345,7 +364,8 @@ export class AzureDevOpsClient {
     options?: {
       isDraft?: boolean;
       reviewers?: Array<{ id: string }>;
-    }
+    },
+    signal?: AbortSignal
   ): Promise<AzureDevOpsPullRequest> {
     const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullrequests?api-version=7.2-preview.1`;
 
@@ -371,7 +391,7 @@ export class AzureDevOpsClient {
       body.reviewers = options.reviewers;
     }
 
-    return this.post<AzureDevOpsPullRequest>(url, body);
+    return this.post<AzureDevOpsPullRequest>(url, body, signal);
   }
 
   /**
@@ -388,7 +408,8 @@ export class AzureDevOpsClient {
     project: string,
     repo: string,
     prId: number,
-    updates: PullRequestUpdateOptions
+    updates: PullRequestUpdateOptions,
+    signal?: AbortSignal
   ): Promise<AzureDevOpsPullRequest> {
     const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}?api-version=7.1`;
 
@@ -411,7 +432,7 @@ export class AzureDevOpsClient {
       body.targetRefName = updates.targetRefName;
     }
 
-    return this.patch<AzureDevOpsPullRequest>(url, body);
+    return this.patch<AzureDevOpsPullRequest>(url, body, signal);
   }
 
   /**
@@ -426,10 +447,11 @@ export class AzureDevOpsClient {
   async getPullRequestIterations(
     project: string,
     repo: string,
-    prId: number
+    prId: number,
+    signal?: AbortSignal
   ): Promise<{ value: AzureDevOpsPRIteration[] }> {
     const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/iterations?api-version=7.1`;
-    return this.get<{ value: AzureDevOpsPRIteration[] }>(url);
+    return this.get<{ value: AzureDevOpsPRIteration[] }>(url, signal);
   }
 
   /**
@@ -448,7 +470,8 @@ export class AzureDevOpsClient {
     repo: string,
     prId: number,
     iterationId: number,
-    options?: { top?: number; skip?: number }
+    options?: { top?: number; skip?: number },
+    signal?: AbortSignal
   ): Promise<AzureDevOpsPRIterationChanges> {
     const params = new URLSearchParams();
     params.append('api-version', '7.1');
@@ -456,7 +479,7 @@ export class AzureDevOpsClient {
     if (options?.skip) params.append('$skip', options.skip.toString());
 
     const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/iterations/${iterationId}/changes?${params.toString()}`;
-    return this.get<AzureDevOpsPRIterationChanges>(url);
+    return this.get<AzureDevOpsPRIterationChanges>(url, signal);
   }
 
   /**
@@ -470,10 +493,16 @@ export class AzureDevOpsClient {
   async getAllPullRequestChanges(
     project: string,
     repo: string,
-    prId: number
+    prId: number,
+    signal?: AbortSignal
   ): Promise<AzureDevOpsPRChange[]> {
     // Get latest iteration
-    const iterations = await this.getPullRequestIterations(project, repo, prId);
+    const iterations = await this.getPullRequestIterations(
+      project,
+      repo,
+      prId,
+      signal
+    );
     if (iterations.value.length === 0) return [];
 
     const latestIteration = Math.max(...iterations.value.map((i) => i.id));
@@ -489,7 +518,8 @@ export class AzureDevOpsClient {
         repo,
         prId,
         latestIteration,
-        { top, skip }
+        { top, skip },
+        signal
       );
       allChanges.push(...response.changeEntries);
 
@@ -507,10 +537,11 @@ export class AzureDevOpsClient {
   async getPullRequestLabels(
     project: string,
     repo: string,
-    prId: number
+    prId: number,
+    signal?: AbortSignal
   ): Promise<{ value: AzureDevOpsPRLabel[] }> {
     const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/labels?api-version=7.1`;
-    return this.get<{ value: AzureDevOpsPRLabel[] }>(url);
+    return this.get<{ value: AzureDevOpsPRLabel[] }>(url, signal);
   }
 
   /**
@@ -521,10 +552,11 @@ export class AzureDevOpsClient {
     project: string,
     repo: string,
     prId: number,
-    name: string
+    name: string,
+    signal?: AbortSignal
   ): Promise<AzureDevOpsPRLabel> {
     const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/labels?api-version=7.1`;
-    return this.post<AzureDevOpsPRLabel>(url, { name });
+    return this.post<AzureDevOpsPRLabel>(url, { name }, signal);
   }
 
   /**
@@ -535,9 +567,10 @@ export class AzureDevOpsClient {
     project: string,
     repo: string,
     prId: number,
-    labelId: string
+    labelId: string,
+    signal?: AbortSignal
   ): Promise<void> {
     const url = `${this.baseUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/labels/${encodeURIComponent(labelId)}?api-version=7.1`;
-    return this.delete(url);
+    return this.delete(url, signal);
   }
 }

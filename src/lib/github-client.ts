@@ -211,6 +211,15 @@ function redirectedRequestInit(init: RequestInit, status: number): RequestInit {
 /**
  * Error thrown when GitHub authentication is not available.
  */
+const githubAuthErrorDiagnostics = new WeakMap<object, string>();
+
+export function githubAuthErrorDiagnostic(error: unknown): string | undefined {
+  return (typeof error === 'object' && error !== null) ||
+    typeof error === 'function'
+    ? githubAuthErrorDiagnostics.get(error)
+    : undefined;
+}
+
 export class GitHubAuthError extends Error {
   readonly code: GitHubAuthErrorCode;
   readonly host: string;
@@ -244,6 +253,7 @@ export class GitHubAuthError extends Error {
     this.code = code;
     this.host = host;
     this.account = account;
+    githubAuthErrorDiagnostics.set(this, message);
   }
 }
 
@@ -459,12 +469,16 @@ export class GitHubClient {
   private async apiCall<T>(
     method: string,
     endpoint: string,
-    body?: unknown
+    body?: unknown,
+    signal?: AbortSignal
   ): Promise<T> {
     if (this.mode === 'gh-cli') {
-      return this.ghApiCall<T>(method, endpoint, body);
+      signal?.throwIfAborted();
+      const result = this.ghApiCall<T>(method, endpoint, body);
+      signal?.throwIfAborted();
+      return result;
     }
-    return this.fetchApiCall<T>(method, endpoint, body);
+    return this.fetchApiCall<T>(method, endpoint, body, signal);
   }
 
   private ghApiCall<T>(method: string, endpoint: string, body?: unknown): T {
@@ -560,7 +574,8 @@ export class GitHubClient {
   private async fetchApiCall<T>(
     method: string,
     endpoint: string,
-    body?: unknown
+    body?: unknown,
+    signal?: AbortSignal
   ): Promise<T> {
     const response = await this.authenticatedFetch(
       `${githubApiBase(this.host)}${endpoint}`,
@@ -572,6 +587,7 @@ export class GitHubClient {
           'Content-Type': 'application/json',
         },
         body: body ? JSON.stringify(body) : undefined,
+        signal,
       }
     );
 
@@ -638,7 +654,10 @@ export class GitHubClient {
   /**
    * Make a paginated GET request via fetch, following Link headers
    */
-  private async fetchApiCallPaginated<T>(endpoint: string): Promise<T[]> {
+  private async fetchApiCallPaginated<T>(
+    endpoint: string,
+    signal?: AbortSignal
+  ): Promise<T[]> {
     const results: T[] = [];
     const apiBase = githubApiBase(this.host);
     let nextUrl: string | null = `${apiBase}${endpoint}`;
@@ -653,6 +672,7 @@ export class GitHubClient {
           Accept: 'application/vnd.github+json',
           'X-GitHub-Api-Version': '2022-11-28',
         },
+        signal,
       });
 
       if (!resp.ok) {
@@ -687,18 +707,22 @@ export class GitHubClient {
   async getPullRequest(
     owner: string,
     repo: string,
-    number: number
+    number: number,
+    signal?: AbortSignal
   ): Promise<GitHubPullRequest> {
     return this.apiCall<GitHubPullRequest>(
       'GET',
-      `/repos/${owner}/${repo}/pulls/${number}`
+      `/repos/${owner}/${repo}/pulls/${number}`,
+      undefined,
+      signal
     );
   }
 
   async listPullRequests(
     owner: string,
     repo: string,
-    options?: GitHubListPROptions
+    options?: GitHubListPROptions,
+    signal?: AbortSignal
   ): Promise<GitHubPullRequest[]> {
     const params = new URLSearchParams();
     if (options?.state) params.set('state', options.state);
@@ -717,13 +741,19 @@ export class GitHubClient {
 
     // Skip pagination when a small limit is requested (fits in one page)
     if (limit && limit <= 100) {
-      return this.apiCall<GitHubPullRequest[]>('GET', endpoint);
+      return this.apiCall<GitHubPullRequest[]>(
+        'GET',
+        endpoint,
+        undefined,
+        signal
+      );
     }
 
     if (this.mode === 'gh-cli') {
+      signal?.throwIfAborted();
       return this.ghApiCallPaginated<GitHubPullRequest>(endpoint);
     }
-    return this.fetchApiCallPaginated<GitHubPullRequest>(endpoint);
+    return this.fetchApiCallPaginated<GitHubPullRequest>(endpoint, signal);
   }
 
   async createPullRequest(
@@ -733,7 +763,8 @@ export class GitHubClient {
     base: string,
     title: string,
     body?: string,
-    options?: { draft?: boolean }
+    options?: { draft?: boolean },
+    signal?: AbortSignal
   ): Promise<GitHubPullRequest> {
     return this.apiCall<GitHubPullRequest>(
       'POST',
@@ -744,7 +775,8 @@ export class GitHubClient {
         base,
         body: body ?? '',
         draft: options?.draft ?? false,
-      }
+      },
+      signal
     );
   }
 
@@ -752,12 +784,14 @@ export class GitHubClient {
     owner: string,
     repo: string,
     number: number,
-    updates: GitHubPRUpdateOptions
+    updates: GitHubPRUpdateOptions,
+    signal?: AbortSignal
   ): Promise<GitHubPullRequest> {
     return this.apiCall<GitHubPullRequest>(
       'PATCH',
       `/repos/${owner}/${repo}/pulls/${number}`,
-      updates
+      updates,
+      signal
     );
   }
 
@@ -772,9 +806,11 @@ export class GitHubClient {
   private async graphqlMutation(
     query: string,
     variables: Record<string, string>,
-    errorPrefix: string
+    errorPrefix: string,
+    signal?: AbortSignal
   ): Promise<void> {
     if (this.mode === 'gh-cli') {
+      signal?.throwIfAborted();
       const args = [
         'gh',
         'api',
@@ -792,6 +828,7 @@ export class GitHubClient {
         stderr: 'pipe',
         stdout: 'pipe',
       });
+      signal?.throwIfAborted();
       if (result.exitCode !== 0) {
         throw new Error(`${errorPrefix}: ${result.stderr.toString().trim()}`);
       }
@@ -816,6 +853,7 @@ export class GitHubClient {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({ query, variables }),
+          signal,
         }
       );
       if (!response.ok) {
@@ -840,13 +878,15 @@ export class GitHubClient {
   async publishDraftPR(
     owner: string,
     repo: string,
-    number: number
+    number: number,
+    signal?: AbortSignal
   ): Promise<void> {
-    const pr = await this.getPullRequest(owner, repo, number);
+    const pr = await this.getPullRequest(owner, repo, number, signal);
     await this.graphqlMutation(
       `mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { number } } }`,
       { id: pr.node_id },
-      'Failed to publish draft PR'
+      'Failed to publish draft PR',
+      signal
     );
   }
 
@@ -857,13 +897,15 @@ export class GitHubClient {
   async convertToDraft(
     owner: string,
     repo: string,
-    number: number
+    number: number,
+    signal?: AbortSignal
   ): Promise<void> {
-    const pr = await this.getPullRequest(owner, repo, number);
+    const pr = await this.getPullRequest(owner, repo, number, signal);
     await this.graphqlMutation(
       `mutation($id: ID!) { convertPullRequestToDraft(input: { pullRequestId: $id }) { pullRequest { number } } }`,
       { id: pr.node_id },
-      'Failed to convert PR to draft'
+      'Failed to convert PR to draft',
+      signal
     );
   }
 
@@ -877,13 +919,15 @@ export class GitHubClient {
   async getIssueComments(
     owner: string,
     repo: string,
-    number: number
+    number: number,
+    signal?: AbortSignal
   ): Promise<GitHubIssueComment[]> {
     const endpoint = `/repos/${owner}/${repo}/issues/${number}/comments`;
     if (this.mode === 'gh-cli') {
+      signal?.throwIfAborted();
       return this.ghApiCallPaginated<GitHubIssueComment>(endpoint);
     }
-    return this.fetchApiCallPaginated<GitHubIssueComment>(endpoint);
+    return this.fetchApiCallPaginated<GitHubIssueComment>(endpoint, signal);
   }
 
   /**
@@ -892,13 +936,15 @@ export class GitHubClient {
   async getReviewComments(
     owner: string,
     repo: string,
-    number: number
+    number: number,
+    signal?: AbortSignal
   ): Promise<GitHubReviewComment[]> {
     const endpoint = `/repos/${owner}/${repo}/pulls/${number}/comments`;
     if (this.mode === 'gh-cli') {
+      signal?.throwIfAborted();
       return this.ghApiCallPaginated<GitHubReviewComment>(endpoint);
     }
-    return this.fetchApiCallPaginated<GitHubReviewComment>(endpoint);
+    return this.fetchApiCallPaginated<GitHubReviewComment>(endpoint, signal);
   }
 
   /**
@@ -908,12 +954,14 @@ export class GitHubClient {
     owner: string,
     repo: string,
     number: number,
-    body: string
+    body: string,
+    signal?: AbortSignal
   ): Promise<GitHubIssueComment> {
     return this.apiCall<GitHubIssueComment>(
       'POST',
       `/repos/${owner}/${repo}/issues/${number}/comments`,
-      { body }
+      { body },
+      signal
     );
   }
 
@@ -925,7 +973,8 @@ export class GitHubClient {
     repo: string,
     number: number,
     body: string,
-    options: GitHubCreateReviewCommentOptions
+    options: GitHubCreateReviewCommentOptions,
+    signal?: AbortSignal
   ): Promise<GitHubReviewComment> {
     return this.apiCall<GitHubReviewComment>(
       'POST',
@@ -937,7 +986,8 @@ export class GitHubClient {
         commit_id: options.commit_id,
         side: options.side ?? 'RIGHT',
         ...(options.start_line ? { start_line: options.start_line } : {}),
-      }
+      },
+      signal
     );
   }
 
@@ -949,12 +999,14 @@ export class GitHubClient {
     repo: string,
     number: number,
     commentId: number,
-    body: string
+    body: string,
+    signal?: AbortSignal
   ): Promise<GitHubReviewComment> {
     return this.apiCall<GitHubReviewComment>(
       'POST',
       `/repos/${owner}/${repo}/pulls/${number}/comments/${commentId}/replies`,
-      { body }
+      { body },
+      signal
     );
   }
 
@@ -968,13 +1020,15 @@ export class GitHubClient {
   async getPullRequestFiles(
     owner: string,
     repo: string,
-    number: number
+    number: number,
+    signal?: AbortSignal
   ): Promise<GitHubPRFile[]> {
     const endpoint = `/repos/${owner}/${repo}/pulls/${number}/files`;
     if (this.mode === 'gh-cli') {
+      signal?.throwIfAborted();
       return this.ghApiCallPaginated<GitHubPRFile>(endpoint);
     }
-    return this.fetchApiCallPaginated<GitHubPRFile>(endpoint);
+    return this.fetchApiCallPaginated<GitHubPRFile>(endpoint, signal);
   }
 
   // ===========================================================================
@@ -985,12 +1039,14 @@ export class GitHubClient {
     owner: string,
     repo: string,
     number: number,
-    labels: string[]
+    labels: string[],
+    signal?: AbortSignal
   ): Promise<GitHubLabel[]> {
     return this.apiCall<GitHubLabel[]>(
       'POST',
       `/repos/${owner}/${repo}/issues/${number}/labels`,
-      { labels }
+      { labels },
+      signal
     );
   }
 
@@ -998,11 +1054,14 @@ export class GitHubClient {
     owner: string,
     repo: string,
     number: number,
-    label: string
+    label: string,
+    signal?: AbortSignal
   ): Promise<void> {
     await this.apiCall<void>(
       'DELETE',
-      `/repos/${owner}/${repo}/issues/${number}/labels/${encodeURIComponent(label)}`
+      `/repos/${owner}/${repo}/issues/${number}/labels/${encodeURIComponent(label)}`,
+      undefined,
+      signal
     );
   }
 }

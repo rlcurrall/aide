@@ -8,12 +8,25 @@ import {
   defineAidePlugin as definePublicAidePlugin,
 } from '@aide/plugin-api';
 import { createCommandRegistry } from '@cli/host/command-registry.js';
-import { registerCommands } from '@cli/host/yargs-adapter.js';
+import { registerCommands as registerCommandsWithKeyring } from '@cli/host/yargs-adapter.js';
 import { legacyAuthPlugin } from '@cli/plugins/legacy-auth/plugin.js';
+import { createBuiltinCommandRegistry } from '@cli/plugins/builtin.js';
 import type {
   AideAuthLoginRequest,
   AideAuthLogoutRequest,
 } from '@cli/host/plugin-descriptor.js';
+import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+
+const testKeyringLayer = makeTestKeyring().layer;
+
+function registerCommands(
+  yargsInstance: Parameters<typeof registerCommandsWithKeyring>[0],
+  registry: Parameters<typeof registerCommandsWithKeyring>[1]
+) {
+  return registerCommandsWithKeyring(yargsInstance, registry, {
+    keyringLayer: testKeyringLayer,
+  });
+}
 
 function externalManifest(id: string) {
   return {
@@ -92,6 +105,7 @@ describe('dynamic auth provider commands', () => {
     expect(observedRequest?.values).toMatchObject({
       apiToken: 'secret-token',
     });
+    expect(observedRequest?.fromEnv).toBe(false);
     expect(Object.isFrozen(observedRequest?.values)).toBe(true);
     expect(lines).toEqual(['external login stored']);
   });
@@ -629,6 +643,30 @@ describe('dynamic auth provider commands', () => {
     expect(observedRequest).toMatchObject({ fromEnv: true });
     expect(observedRequest?.scope).toBeUndefined();
     expect(observedRequest?.values).toBeUndefined();
+  });
+
+  test('built-in Jira rejects --from-env combined with a provider field', async () => {
+    await expect(
+      Promise.resolve().then(() =>
+        registerCommands(
+          yargsParser([
+            'login',
+            'jira',
+            '--from-env',
+            '--url',
+            'https://acme.atlassian.net',
+          ])
+            .scriptName('aide')
+            .exitProcess(false),
+          createBuiltinCommandRegistry()
+        )
+          .strict()
+          .fail((message, error) => {
+            throw error ?? new Error(message ?? 'parse failed');
+          })
+          .parseAsync()
+      )
+    ).rejects.toThrow('Arguments from-env and url are mutually exclusive');
   });
 
   test('login --from-env with scope flags passes scope and omits values', async () => {

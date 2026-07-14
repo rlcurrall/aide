@@ -1,4 +1,5 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   resolveGitHubAuthRequest,
@@ -10,6 +11,63 @@ import {
 } from './github-credential-resolver.js';
 import type { GitHubAuthProbe } from './gh-utils.js';
 import { installMockSecrets } from './test-helpers.js';
+
+const probeFixturePath = fileURLToPath(
+  new URL('./github-credential-resolver-probe.fixture.ts', import.meta.url)
+);
+type ProbeFixtureMode = 'reachability-control' | 'production';
+const probeFixtureChildren = new Set<ReturnType<typeof Bun.spawn>>();
+const parentValueDescriptor = Object.getOwnPropertyDescriptor(
+  Object.prototype,
+  'value'
+);
+
+afterEach(async () => {
+  for (const child of probeFixtureChildren) child.kill('SIGKILL');
+  await Promise.allSettled(
+    [...probeFixtureChildren].map((child) => child.exited)
+  );
+  probeFixtureChildren.clear();
+});
+
+async function runProbeFixture(mode: ProbeFixtureMode) {
+  const environment = { ...Bun.env };
+  delete environment.FORCE_COLOR;
+  delete environment.NO_COLOR;
+  const child = Bun.spawn({
+    cmd: [process.execPath, 'run', probeFixturePath, mode],
+    cwd: import.meta.dir,
+    env: environment,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  probeFixtureChildren.add(child);
+
+  const outcome = await Promise.race([
+    Promise.all([
+      child.exited,
+      new Response(child.stdout as ReadableStream<Uint8Array>).text(),
+      new Response(child.stderr as ReadableStream<Uint8Array>).text(),
+    ]).then(([exitCode, stdout, stderr]) => ({
+      status: 'exited' as const,
+      exitCode,
+      stdout,
+      stderr,
+    })),
+    Bun.sleep(2_000).then(() => ({ status: 'deadline' as const })),
+  ]);
+  if (outcome.status === 'deadline') {
+    child.kill('SIGKILL');
+    await child.exited;
+    probeFixtureChildren.delete(child);
+    throw new Error(`Probe fixture '${mode}' exceeded its hard deadline`);
+  }
+  probeFixtureChildren.delete(child);
+  return {
+    ...outcome,
+    value: JSON.parse(outcome.stdout.trim()) as Record<string, unknown>,
+  };
+}
 
 function accountRequest() {
   const request = resolveGitHubAuthRequest({
@@ -33,16 +91,6 @@ function publicHostRequest() {
   const request = resolveGitHubAuthRequest({ host: 'github.com' });
   if (!request.ok) throw new Error(request.reason);
   return request;
-}
-
-function restoreObjectPrototypeProperty(
-  name: string,
-  descriptor: PropertyDescriptor | undefined
-): void {
-  Reflect.deleteProperty(Object.prototype, name);
-  if (descriptor !== undefined) {
-    Object.defineProperty(Object.prototype, name, descriptor);
-  }
 }
 
 describe('validateGitHubAuthProbeResult', () => {
@@ -227,6 +275,51 @@ describe('validateGitHubAuthProbeResult', () => {
     expect(getterCalls).toBe(0);
   });
 
+  test('proves the old prototype-consulting probe path reaches Object.prototype.value', async () => {
+    const result = await runProbeFixture('reachability-control');
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).not.toContain('ATTACKER');
+    expect(result.value).toEqual({
+      schemaVersion: 1,
+      mode: 'reachability-control',
+      controlReached: true,
+      result: null,
+      kindGetterGets: 0,
+      prototypeValueGets: 1,
+      restored: true,
+    });
+    expect(Object.getOwnPropertyDescriptor(Object.prototype, 'value')).toEqual(
+      parentValueDescriptor
+    );
+  }, 4_000);
+
+  test('does not execute Object.prototype.value when validating accessor-backed probes', async () => {
+    const result = await runProbeFixture('production');
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).not.toContain('ATTACKER');
+    expect(result.value).toEqual({
+      schemaVersion: 1,
+      mode: 'production',
+      controlReached: false,
+      result: {
+        kind: 'unavailable',
+        host: 'github.com',
+        reason:
+          'GitHub CLI auth probe returned an invalid result: kind must be an own data property.',
+      },
+      kindGetterGets: 0,
+      prototypeValueGets: 0,
+      restored: true,
+    });
+    expect(Object.getOwnPropertyDescriptor(Object.prototype, 'value')).toEqual(
+      parentValueDescriptor
+    );
+  }, 4_000);
+
   test('turns an authenticated wrong account into a typed mismatch', () => {
     const result = validateGitHubAuthProbeResult(accountRequest(), {
       kind: 'authenticated',
@@ -355,30 +448,10 @@ describe('resolveGitHubCredential hostile probe results', () => {
     }
   });
 
-  test('passes a second frozen null-prototype request snapshot to the probe', async () => {
+  test('passes a detached frozen null-prototype request snapshot to the probe', async () => {
     const request = accountRequest();
-    const frozenCanonicalRequests: CanonicalGitHubAuthRequest[] = [];
-    const freezeDescriptor = Object.getOwnPropertyDescriptor(Object, 'freeze');
-    const originalFreeze = Object.freeze;
     const restoreSecrets = installMockSecrets(new Map());
     let probedRequest: CanonicalGitHubAuthRequest | undefined;
-
-    Object.defineProperty(Object, 'freeze', {
-      configurable: true,
-      value: (<T>(value: T): Readonly<T> => {
-        if (
-          typeof value === 'object' &&
-          value !== null &&
-          Object.hasOwn(value, 'ok')
-        ) {
-          frozenCanonicalRequests.push(
-            value as unknown as CanonicalGitHubAuthRequest
-          );
-        }
-        return originalFreeze(value);
-      }) as typeof Object.freeze,
-      writable: true,
-    });
 
     try {
       await resolveGitHubCredential(request, {
@@ -389,22 +462,13 @@ describe('resolveGitHubCredential hostile probe results', () => {
         },
       });
 
-      expect(frozenCanonicalRequests).toHaveLength(2);
-      expect(probedRequest).toBe(frozenCanonicalRequests[1]);
-      expect(probedRequest).not.toBe(frozenCanonicalRequests[0]);
-      expect(probedRequest?.keyringScope).not.toBe(
-        frozenCanonicalRequests[0]?.keyringScope
-      );
+      expect(probedRequest).not.toBe(request);
+      expect(probedRequest?.keyringScope).not.toBe(request.keyringScope);
       expect(Object.getPrototypeOf(probedRequest!)).toBeNull();
       expect(Object.getPrototypeOf(probedRequest?.keyringScope)).toBeNull();
       expect(Object.isFrozen(probedRequest)).toBe(true);
       expect(Object.isFrozen(probedRequest?.keyringScope)).toBe(true);
     } finally {
-      if (freezeDescriptor === undefined) {
-        Reflect.deleteProperty(Object, 'freeze');
-      } else {
-        Object.defineProperty(Object, 'freeze', freezeDescriptor);
-      }
       restoreSecrets();
     }
   });
@@ -479,18 +543,7 @@ describe('resolveGitHubCredential hostile probe results', () => {
     }
   });
 
-  test('does not select inherited env bindings introduced during probe reflection', async () => {
-    const properties = [
-      'GITHUB_TOKEN',
-      'GH_ENTERPRISE_TOKEN',
-      'GH_HOST',
-    ] as const;
-    const originals = new Map(
-      properties.map((property) => [
-        property,
-        Object.getOwnPropertyDescriptor(Object.prototype, property),
-      ])
-    );
+  test('does not select inherited environment bindings', async () => {
     const restoreSecrets = installMockSecrets(new Map());
 
     try {
@@ -504,47 +557,27 @@ describe('resolveGitHubCredential hostile probe results', () => {
           },
         ],
       ] as const) {
+        const env = Object.create(injected) as Record<string, string>;
         const resolved = await resolveGitHubCredential(request, {
-          env: {},
-          ghAuthProbe: () =>
-            new Proxy(
-              { kind: 'unavailable' as const, host: request.host },
-              {
-                getOwnPropertyDescriptor(target, property) {
-                  if (property === 'kind') {
-                    for (const [name, value] of Object.entries(injected)) {
-                      Object.defineProperty(Object.prototype, name, {
-                        configurable: true,
-                        value,
-                        writable: true,
-                      });
-                    }
-                  }
-                  return Reflect.getOwnPropertyDescriptor(target, property);
-                },
-              }
-            ),
+          env,
+          ghAuthProbe: () => ({
+            kind: 'unavailable' as const,
+            host: request.host,
+          }),
         });
 
         expect(resolved).toEqual({ kind: 'missing' });
-        for (const property of properties) {
-          restoreObjectPrototypeProperty(property, originals.get(property));
-        }
       }
     } finally {
-      for (const property of properties) {
-        restoreObjectPrototypeProperty(property, originals.get(property));
-      }
       restoreSecrets();
     }
   });
 
-  test('keeps an inherited account out of key selection and rejects it in stored validation', async () => {
-    const request = publicHostRequest();
-    const originalAccountDescriptor = Object.getOwnPropertyDescriptor(
-      Object.prototype,
-      'account'
-    );
+  test('keeps an inherited request account out of key selection and stored validation', async () => {
+    const request = Object.assign(
+      Object.create({ account: 'attacker' }),
+      publicHostRequest()
+    ) as CanonicalGitHubAuthRequest;
     const requestedKeys: string[] = [];
     const store = new (class extends Map<string, string> {
       override get(key: string): string | undefined {
@@ -570,11 +603,15 @@ describe('resolveGitHubCredential hostile probe results', () => {
     const restoreSecrets = installMockSecrets(store);
 
     try {
-      Object.defineProperty(Object.prototype, 'account', {
-        configurable: true,
-        value: 'attacker',
-        writable: true,
-      });
+      expect(
+        Reflect.getOwnPropertyDescriptor(request, 'account')
+      ).toBeUndefined();
+      expect(
+        Reflect.getOwnPropertyDescriptor(
+          Object.getPrototypeOf(request) as object,
+          'account'
+        )
+      ).toMatchObject({ value: 'attacker' });
 
       const resolved = await resolveGitHubCredential(request, {
         env: {},
@@ -584,15 +621,19 @@ describe('resolveGitHubCredential hostile probe results', () => {
         }),
       });
 
+      // Inherited request data is outside the canonical identity. The resolver
+      // snapshots only own fields, so this remains a host-only request and its
+      // matching host-scoped credential is valid. The distinct global
+      // Object.prototype mutation case (which also affects parsed keyring JSON)
+      // remains covered by the isolated auth-provider boundary fixture.
       expect(requestedKeys).toEqual(['aide:auth:github:host:github.com']);
       expect(resolved).toEqual({
-        kind: 'failure',
-        code: 'malformed-credential',
-        reason:
-          "Stored GitHub credentials are malformed. Re-run 'aide login github' to reconfigure.",
+        kind: 'stored',
+        host: 'github.com',
+        account: undefined,
+        token: 'host-only-token',
       });
     } finally {
-      restoreObjectPrototypeProperty('account', originalAccountDescriptor);
       restoreSecrets();
     }
   });
@@ -649,12 +690,11 @@ describe('resolveGitHubCredential hostile probe results', () => {
     expect(probeCalls).toBe(0);
   });
 
-  test('keeps host-only env eligibility isolated from prototype mutation during result reflection', async () => {
-    const request = publicHostRequest();
-    const originalAccountDescriptor = Object.getOwnPropertyDescriptor(
-      Object.prototype,
-      'account'
-    );
+  test('keeps host-only env eligibility isolated from inherited account data', async () => {
+    const request = Object.assign(
+      Object.create({ account: 'attacker' }),
+      publicHostRequest()
+    ) as CanonicalGitHubAuthRequest;
     let descriptorCalls = 0;
     let probedRequest: Parameters<GitHubAuthProbe>[0] | undefined;
     const restoreSecrets = installMockSecrets(new Map());
@@ -668,14 +708,7 @@ describe('resolveGitHubCredential hostile probe results', () => {
             { kind: 'unavailable' as const, host: 'github.com' },
             {
               getOwnPropertyDescriptor(target, property) {
-                if (property === 'kind') {
-                  descriptorCalls += 1;
-                  Object.defineProperty(Object.prototype, 'account', {
-                    configurable: true,
-                    value: 'attacker',
-                    writable: true,
-                  });
-                }
+                if (property === 'kind') descriptorCalls += 1;
                 return Reflect.getOwnPropertyDescriptor(target, property);
               },
             }
@@ -712,17 +745,15 @@ describe('resolveGitHubCredential hostile probe results', () => {
       }
       expect(probedRequest?.keyringScope?.account).toBeUndefined();
     } finally {
-      restoreObjectPrototypeProperty('account', originalAccountDescriptor);
       restoreSecrets();
     }
   });
 
-  test('rejects a cross-account keyring payload after prototype mutation', async () => {
-    const request = publicHostRequest();
-    const originalAccountDescriptor = Object.getOwnPropertyDescriptor(
-      Object.prototype,
-      'account'
-    );
+  test('rejects a cross-account keyring payload with an inherited request account', async () => {
+    const request = Object.assign(
+      Object.create({ account: 'attacker' }),
+      publicHostRequest()
+    ) as CanonicalGitHubAuthRequest;
     const store = new Map([
       [
         'aide:auth:github:host:github.com',
@@ -744,14 +775,7 @@ describe('resolveGitHubCredential hostile probe results', () => {
     try {
       const resolved = await resolveGitHubCredential(request, {
         env: {},
-        ghAuthProbe: () => {
-          Object.defineProperty(Object.prototype, 'account', {
-            configurable: true,
-            value: 'attacker',
-            writable: true,
-          });
-          return { kind: 'unavailable', host: 'github.com' };
-        },
+        ghAuthProbe: () => ({ kind: 'unavailable', host: 'github.com' }),
       });
 
       expect(resolved).toEqual({
@@ -761,17 +785,23 @@ describe('resolveGitHubCredential hostile probe results', () => {
           "Stored GitHub credential account 'payload-attacker' does not match requested account '(host-only)'.",
       });
     } finally {
-      restoreObjectPrototypeProperty('account', originalAccountDescriptor);
       restoreSecrets();
     }
   });
 
-  test('fails closed when prototype corruption prevents stored payload validation', async () => {
-    const request = publicHostRequest();
-    const originalAccountDescriptor = Object.getOwnPropertyDescriptor(
-      Object.prototype,
-      'account'
-    );
+  test('does not read an inherited account getter while validating a stored host-only payload', async () => {
+    let inheritedReads = 0;
+    const requestPrototype = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(requestPrototype, 'account', {
+      get() {
+        inheritedReads += 1;
+        return 'attacker';
+      },
+    });
+    const request = Object.assign(
+      Object.create(requestPrototype),
+      publicHostRequest()
+    ) as CanonicalGitHubAuthRequest;
     const store = new Map([
       [
         'aide:auth:github:host:github.com',
@@ -786,27 +816,16 @@ describe('resolveGitHubCredential hostile probe results', () => {
     try {
       const resolved = await resolveGitHubCredential(request, {
         env: {},
-        ghAuthProbe: () => {
-          Object.defineProperty(Object.prototype, 'account', {
-            configurable: true,
-            get(this: object) {
-              return Object.hasOwn(this, 'ok') && Object.hasOwn(this, 'token')
-                ? 'attacker'
-                : undefined;
-            },
-          });
-          return { kind: 'unavailable', host: 'github.com' };
-        },
+        ghAuthProbe: () => ({ kind: 'unavailable', host: 'github.com' }),
       });
 
       expect(resolved).toEqual({
-        kind: 'failure',
-        code: 'malformed-credential',
-        reason:
-          "Stored GitHub credentials are malformed. Re-run 'aide login github' to reconfigure.",
+        kind: 'stored',
+        host: 'github.com',
+        token: 'host-only-token',
       });
+      expect(inheritedReads).toBe(0);
     } finally {
-      restoreObjectPrototypeProperty('account', originalAccountDescriptor);
       restoreSecrets();
     }
   });

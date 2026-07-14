@@ -7,7 +7,7 @@
 
 import type { ArgumentsCamelCase } from 'yargs';
 
-import type { AideHostServices } from '@cli/host/runtime-context.js';
+import type { AideInternalHostServices } from '@cli/host/runtime-context.js';
 import { getAideHostContext } from '@cli/host/runtime-context.js';
 import type { AideHostAwareCommandModule } from '@cli/host/yargs-adapter.js';
 import {
@@ -16,8 +16,8 @@ import {
   authProviderCommandRoutes,
   findAuthProviderByCommandName,
   providerHasAuthOperation,
-  runAuthProviderLogout,
-  type DiscoveredAuthProvider,
+  runDynamicAuthProviderLogout,
+  type DynamicAuthProvider,
 } from './auth-provider-command-utils.js';
 import type { AideAuthScope } from '@cli/host/plugin-descriptor.js';
 
@@ -33,28 +33,29 @@ interface Args {
 }
 
 function logoutProviders(
-  services: AideHostServices
-): readonly DiscoveredAuthProvider[] {
+  services: AideInternalHostServices
+): readonly DynamicAuthProvider[] {
   return services
-    .authProviders()
+    .authProviderRegistrations()
     .filter((provider) => providerHasAuthOperation(provider, 'logout'));
 }
 
 function logoutProviderCommandNames(
-  provider: DiscoveredAuthProvider
+  provider: DynamicAuthProvider
 ): readonly string[] {
   const route = authProviderCommandRoutes(provider, 'logout');
   return typeof route === 'string' ? [route] : route;
 }
 
 function allLogoutProviderCommandNames(
-  providers: readonly DiscoveredAuthProvider[]
+  providers: readonly DynamicAuthProvider[]
 ): readonly string[] {
   return Array.from(new Set(providers.flatMap(logoutProviderCommandNames)));
 }
 
 async function logoutProvider(
-  providers: readonly DiscoveredAuthProvider[],
+  providers: readonly DynamicAuthProvider[],
+  services: AideInternalHostServices,
   service: string,
   scopeArgv: Readonly<Record<string, unknown>> & {
     readonly 'scope-id'?: unknown;
@@ -73,8 +74,9 @@ async function logoutProvider(
     provider,
     scopeArgv
   );
-  const result = await runAuthProviderLogout(
+  const result = await runDynamicAuthProviderLogout(
     provider,
+    services,
     scope === undefined ? undefined : { scope }
   );
   return result.status;
@@ -95,12 +97,17 @@ const command: AideHostAwareCommandModule<object, Args> = {
     );
   },
   handler: async (argv: ArgumentsCamelCase<Args>) => {
-    const services = getAideHostContext(argv)?.services;
-    if (services === undefined) {
+    const context = getAideHostContext(argv);
+    if (context === null) {
       throw new Error('Host services are unavailable for logout');
     }
-    const contextProviders = logoutProviders(services);
-    await logoutProvider(contextProviders, argv.service, argv);
+    const contextProviders = logoutProviders(context.services);
+    await logoutProvider(
+      contextProviders,
+      context.services,
+      argv.service,
+      argv
+    );
   },
 };
 

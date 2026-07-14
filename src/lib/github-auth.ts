@@ -13,9 +13,17 @@ import {
   StoredGithubScopedSchema,
 } from '@schemas/config.js';
 
+const objectCreate = Object.create;
+const objectDefineProperty = Object.defineProperty;
+const objectFreeze = Object.freeze;
+const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const objectGetPrototypeOf = Object.getPrototypeOf;
+const objectHasOwn = Object.hasOwn;
+const reflectOwnKeys = Reflect.ownKeys;
+
 export const DEFAULT_GITHUB_HOST = 'github.com';
 
-export const GITHUB_AUTH_ENV_VARS = Object.freeze([
+export const GITHUB_AUTH_ENV_VARS = objectFreeze([
   'GH_TOKEN',
   'GITHUB_TOKEN',
   'GH_ENTERPRISE_TOKEN',
@@ -94,9 +102,9 @@ function snapshotOwnDataProperty(
   name: string
 ): OwnDataPropertySnapshot {
   try {
-    const descriptor = Object.getOwnPropertyDescriptor(input, name);
+    const descriptor = objectGetOwnPropertyDescriptor(input, name);
     if (descriptor === undefined) return { kind: 'absent' };
-    return Object.hasOwn(descriptor, 'value')
+    return objectHasOwn(descriptor, 'value')
       ? {
           kind: 'data',
           value: descriptor.value,
@@ -113,9 +121,82 @@ function snapshotOwnDataProperty(
 function frozenNullRecord<T extends object>(
   fields: ReadonlyArray<readonly [string, unknown]>
 ): T {
-  const result = Object.create(null) as Record<string, unknown>;
-  for (const [name, value] of fields) result[name] = value;
-  return Object.freeze(result) as T;
+  const result = objectCreate(null) as Record<string, unknown>;
+  const lengthDescriptor = objectGetOwnPropertyDescriptor(fields, 'length');
+  if (
+    lengthDescriptor === undefined ||
+    !objectHasOwn(lengthDescriptor, 'value') ||
+    typeof lengthDescriptor.value !== 'number' ||
+    !Number.isSafeInteger(lengthDescriptor.value) ||
+    lengthDescriptor.value < 0
+  ) {
+    throw new TypeError('Invalid host GitHub auth snapshot fields');
+  }
+  for (let index = 0; index < lengthDescriptor.value; index += 1) {
+    const fieldDescriptor = objectGetOwnPropertyDescriptor(
+      fields,
+      String(index)
+    );
+    if (
+      fieldDescriptor === undefined ||
+      !objectHasOwn(fieldDescriptor, 'value') ||
+      typeof fieldDescriptor.value !== 'object' ||
+      fieldDescriptor.value === null
+    ) {
+      throw new TypeError('Invalid host GitHub auth snapshot field');
+    }
+    const nameDescriptor = objectGetOwnPropertyDescriptor(
+      fieldDescriptor.value,
+      '0'
+    );
+    const valueDescriptor = objectGetOwnPropertyDescriptor(
+      fieldDescriptor.value,
+      '1'
+    );
+    if (
+      nameDescriptor === undefined ||
+      !objectHasOwn(nameDescriptor, 'value') ||
+      typeof nameDescriptor.value !== 'string' ||
+      valueDescriptor === undefined ||
+      !objectHasOwn(valueDescriptor, 'value')
+    ) {
+      throw new TypeError('Invalid host GitHub auth snapshot field');
+    }
+    objectDefineProperty(result, nameDescriptor.value, {
+      configurable: true,
+      enumerable: true,
+      value: valueDescriptor.value,
+      writable: true,
+    });
+  }
+  return objectFreeze(result) as T;
+}
+
+function ownHostArrayLength(value: object): number | undefined {
+  const descriptor = objectGetOwnPropertyDescriptor(value, 'length');
+  return descriptor !== undefined &&
+    objectHasOwn(descriptor, 'value') &&
+    typeof descriptor.value === 'number' &&
+    Number.isSafeInteger(descriptor.value) &&
+    descriptor.value >= 0
+    ? descriptor.value
+    : undefined;
+}
+
+function ownHostArrayValue<T>(value: object, index: number): T | undefined {
+  const descriptor = objectGetOwnPropertyDescriptor(value, String(index));
+  return descriptor !== undefined && objectHasOwn(descriptor, 'value')
+    ? (descriptor.value as T)
+    : undefined;
+}
+
+function defineHostArrayIndex<T>(target: T[], index: number, value: T): void {
+  objectDefineProperty(target, String(index), {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
 }
 
 function requestFailure(
@@ -473,7 +554,11 @@ export function snapshotGitHubAuthEnvironment(
   if (typeof env !== 'object' || env === null || isProxy(env)) return null;
 
   const fields: Array<readonly [string, unknown]> = [];
-  for (const variable of GITHUB_AUTH_ENV_VARS) {
+  const variableCount = ownHostArrayLength(GITHUB_AUTH_ENV_VARS);
+  if (variableCount === undefined) return null;
+  for (let index = 0; index < variableCount; index += 1) {
+    const variable = ownHostArrayValue<string>(GITHUB_AUTH_ENV_VARS, index);
+    if (variable === undefined) return null;
     const property = snapshotOwnDataProperty(env, variable);
     if (
       property.kind === 'invalid' ||
@@ -483,7 +568,7 @@ export function snapshotGitHubAuthEnvironment(
     ) {
       return null;
     }
-    fields.push([
+    defineHostArrayIndex(fields, index, [
       variable,
       property.kind === 'data' ? property.value : undefined,
     ]);
@@ -533,25 +618,36 @@ function hasJsonDataDescriptors(
   }
 
   try {
-    const prototype = Object.getPrototypeOf(input);
+    const prototype = objectGetPrototypeOf(input);
     if (prototype !== null) {
       if (
         prototype !== Object.prototype ||
-        Object.getPrototypeOf(prototype) !== null
+        objectGetPrototypeOf(prototype) !== null
       ) {
         return false;
       }
-      for (const name of inheritedCredentialFields) {
+      const inheritedFieldCount = ownHostArrayLength(inheritedCredentialFields);
+      if (inheritedFieldCount === undefined) return false;
+      for (let index = 0; index < inheritedFieldCount; index += 1) {
+        const name = ownHostArrayValue<string>(
+          inheritedCredentialFields,
+          index
+        );
+        if (name === undefined) return false;
         if (
-          Object.getOwnPropertyDescriptor(input, name) === undefined &&
-          Object.getOwnPropertyDescriptor(prototype, name) !== undefined
+          objectGetOwnPropertyDescriptor(input, name) === undefined &&
+          objectGetOwnPropertyDescriptor(prototype, name) !== undefined
         ) {
           return false;
         }
       }
     }
 
-    for (const key of Reflect.ownKeys(input)) {
+    const keys = reflectOwnKeys(input);
+    const keyCount = ownHostArrayLength(keys);
+    if (keyCount === undefined) return false;
+    for (let index = 0; index < keyCount; index += 1) {
+      const key = ownHostArrayValue<PropertyKey>(keys, index);
       if (typeof key !== 'string') return false;
       const property = snapshotOwnDataProperty(input, key);
       if (
@@ -751,16 +847,19 @@ export function githubStoredCredentialPayload(
 export function githubCliEnvironment(
   env: GitHubAuthEnvironment = Bun.env
 ): Record<string, string | undefined> {
-  const sanitized = Object.create(null) as Record<string, string | undefined>;
-  if (isProxy(env)) return Object.freeze(sanitized);
+  const sanitized = objectCreate(null) as Record<string, string | undefined>;
+  if (isProxy(env)) return objectFreeze(sanitized);
   let keys: readonly (string | symbol)[];
   try {
-    keys = Reflect.ownKeys(env);
+    keys = reflectOwnKeys(env);
   } catch {
-    return Object.freeze(sanitized);
+    return objectFreeze(sanitized);
   }
 
-  for (const key of keys) {
+  const keyCount = ownHostArrayLength(keys);
+  if (keyCount === undefined) return objectFreeze(sanitized);
+  for (let index = 0; index < keyCount; index += 1) {
+    const key = ownHostArrayValue<PropertyKey>(keys, index);
     if (
       typeof key !== 'string' ||
       key === 'GH_TOKEN' ||
@@ -779,7 +878,12 @@ export function githubCliEnvironment(
     ) {
       continue;
     }
-    sanitized[key] = property.value as string | undefined;
+    objectDefineProperty(sanitized, key, {
+      configurable: true,
+      enumerable: true,
+      value: property.value as string | undefined,
+      writable: true,
+    });
   }
-  return Object.freeze(sanitized);
+  return objectFreeze(sanitized);
 }
