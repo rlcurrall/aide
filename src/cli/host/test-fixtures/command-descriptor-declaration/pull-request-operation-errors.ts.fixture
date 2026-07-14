@@ -1,0 +1,86 @@
+import type { Effect } from 'effect';
+
+import type { AideHostServices } from '@aide/plugin-api';
+
+type EffectFailure<T> = T extends Effect.Effect<unknown, infer E, unknown>
+  ? E
+  : never;
+type MethodFailure<K extends keyof AideHostServices> =
+  AideHostServices[K] extends (...args: infer _Args) => infer TResult
+    ? EffectFailure<TResult>
+    : never;
+type DeadlineTag =
+  | 'PullRequestProviderOperationTimeoutError'
+  | 'PullRequestProviderMutationIndeterminateError';
+type DeadlineFailure<K extends keyof AideHostServices> = Extract<
+  MethodFailure<K>,
+  { readonly _tag: DeadlineTag }
+>;
+type DeadlineShape<K extends keyof AideHostServices> = readonly [
+  DeadlineFailure<K>['_tag'],
+  DeadlineFailure<K>['operation'],
+];
+
+type Equal<TLeft, TRight> =
+  (<T>() => T extends TLeft ? 1 : 2) extends <T>() =>
+    T extends TRight ? 1 : 2
+    ? true
+    : false;
+type Assert<T extends true> = T;
+
+type ActualDeadlineShapes = {
+  readonly list: DeadlineShape<'listPullRequestsForRemote'>;
+  readonly get: DeadlineShape<'getPullRequestForRemote'>;
+  readonly diff: DeadlineShape<'getPullRequestDiffForRemote'>;
+  readonly comments: DeadlineShape<'listPullRequestCommentsForRemote'>;
+  readonly branch: DeadlineShape<'findPullRequestForBranchForRemote'>;
+  readonly create: DeadlineShape<'createPullRequestForRemote'>;
+  readonly update: DeadlineShape<'updatePullRequestForRemote'>;
+  readonly comment: DeadlineShape<'addPullRequestCommentForRemote'>;
+  readonly reply: DeadlineShape<'replyToPullRequestCommentForRemote'>;
+};
+
+type ExpectedDeadlineShapes = {
+  readonly list: readonly [
+    'PullRequestProviderOperationTimeoutError',
+    'listPullRequests',
+  ];
+  readonly get: readonly [
+    'PullRequestProviderOperationTimeoutError',
+    'getPullRequest',
+  ];
+  readonly diff: readonly [
+    'PullRequestProviderOperationTimeoutError',
+    'getPullRequestDiff',
+  ];
+  readonly comments: readonly [
+    'PullRequestProviderOperationTimeoutError',
+    'listPullRequestComments',
+  ];
+  readonly branch: readonly [
+    'PullRequestProviderOperationTimeoutError',
+    'findPullRequestForBranch',
+  ];
+  readonly create: readonly [
+    'PullRequestProviderMutationIndeterminateError',
+    'createPullRequest',
+  ];
+  readonly update: readonly [
+    'PullRequestProviderMutationIndeterminateError',
+    'updatePullRequest',
+  ];
+  readonly comment: readonly [
+    'PullRequestProviderMutationIndeterminateError',
+    'addPullRequestComment',
+  ];
+  readonly reply: readonly [
+    'PullRequestProviderMutationIndeterminateError',
+    'replyToPullRequestComment',
+  ];
+};
+
+type OperationDeadlineErrorsAreExact = Assert<
+  Equal<ActualDeadlineShapes, ExpectedDeadlineShapes>
+>;
+
+void (0 as unknown as OperationDeadlineErrorsAreExact);

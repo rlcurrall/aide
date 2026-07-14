@@ -1,11 +1,19 @@
-import { Data, Effect, type Duration } from 'effect';
+import { isIP as nodeIsIP } from 'node:net';
+import {
+  domainToASCII as nodeDomainToASCII,
+  domainToUnicode as nodeDomainToUnicode,
+} from 'node:url';
+import { types as nodeUtilTypes } from 'node:util';
 
-import type {
-  CommandRegistry,
-  OwnedPluginCapability,
+import { Cause, Data, Effect, type Duration } from 'effect';
+
+import {
+  certifiedBuiltinPullRequestProviderDiagnostic,
+  type CommandRegistry,
+  type PluginCapability,
 } from './command-registry.js';
 import type {
-  AidePullRequestProviderCapability,
+  AideInternalPullRequestProviderCapability as AideInternalPullRequestProviderCapabilityShape,
   AidePullRequestAddCommentRequest,
   AidePullRequestBranchLookupRequest,
   AidePullRequestBranchLookupResult,
@@ -43,6 +51,311 @@ import type {
   AidePullRequestViewRequest,
   AidePullRequestViewResult,
 } from './plugin-descriptor.js';
+import {
+  isolatePublicCapabilityEffect,
+  invokePublicCapabilityEffect,
+} from './public-capability-invocation.js';
+import {
+  filterHostArray,
+  flattenHostArrayGroups,
+  mapHostArray,
+  selectHighestPriorityHostArray,
+} from './host-owned-array.js';
+type AidePullRequestProviderCapability = Omit<
+  AideInternalPullRequestProviderCapabilityShape<unknown>,
+  'authStatus'
+>;
+
+const arrayIsArray = Array.isArray;
+const objectCreate = Object.create;
+const objectDefineProperty = Object.defineProperty;
+const objectFreeze = Object.freeze;
+const objectHasOwn = Object.hasOwn;
+const reflectGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
+const reflectGetPrototypeOf = Reflect.getPrototypeOf;
+const reflectOwnKeys = Reflect.ownKeys;
+const hostUrlConstructor = URL;
+
+const REDACTED_PULL_REQUEST_PROVIDER_LOOKUP = '<redacted>';
+const MAX_PULL_REQUEST_PROVIDER_LOOKUP_LENGTH = 4_096;
+const MAX_DNS_HOST_LENGTH = 253;
+const MAX_DNS_LABEL_LENGTH = 63;
+const repositoryLookupKeys = new Set([
+  'provider',
+  'host',
+  'owner',
+  'org',
+  'project',
+  'repo',
+]);
+
+/**
+ * Validate an unbracketed display host before URL parsing can reinterpret it.
+ * A single trailing root dot is allowed. Numeric-looking hosts are IPv4 only
+ * when already written as canonical four-part decimal notation.
+ */
+function canonicalDisplayHostname(hostname: string): string | undefined {
+  const asciiHostname = nodeDomainToASCII(hostname);
+  if (asciiHostname.length === 0) return undefined;
+
+  const unicodeHostname = nodeDomainToUnicode(asciiHostname);
+  if (
+    unicodeHostname.length === 0 ||
+    nodeDomainToASCII(unicodeHostname).toLowerCase() !==
+      asciiHostname.toLowerCase()
+  ) {
+    return undefined;
+  }
+
+  const hasTrailingRootDot = asciiHostname.endsWith('.');
+  const unrootedHostname = hasTrailingRootDot
+    ? asciiHostname.slice(0, -1)
+    : asciiHostname;
+  if (
+    unrootedHostname.length === 0 ||
+    unrootedHostname.length > MAX_DNS_HOST_LENGTH
+  ) {
+    return undefined;
+  }
+
+  const labels = unrootedHostname.split('.');
+  if (
+    labels.some(
+      (label) =>
+        label.length === 0 ||
+        label.length > MAX_DNS_LABEL_LENGTH ||
+        !/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/u.test(label)
+    )
+  ) {
+    return undefined;
+  }
+
+  const isNumericLooking = labels.every((label) =>
+    /^(?:\d+|0x[0-9A-Fa-f]+)$/iu.test(label)
+  );
+  if (isNumericLooking) {
+    if (
+      hasTrailingRootDot ||
+      !/^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/u.test(
+        unrootedHostname
+      ) ||
+      nodeIsIP(unrootedHostname) !== 4
+    ) {
+      return undefined;
+    }
+  }
+
+  return asciiHostname.toLowerCase();
+}
+
+/**
+ * Total host policy for values retained by provider-resolution failures.
+ * Network lookups lose userinfo, query, and fragment data; repository
+ * descriptors apply the same policy to nested network values. Inputs that
+ * cannot be described with a bounded, unambiguous grammar fail closed.
+ */
+function describePullRequestProviderLookup(
+  source: PullRequestProviderLookupSource,
+  value: string
+): string {
+  try {
+    if (
+      value.length === 0 ||
+      value.length > MAX_PULL_REQUEST_PROVIDER_LOOKUP_LENGTH ||
+      // oxlint-disable-next-line no-control-regex -- lookup descriptors reject all ASCII control input
+      /[\u0000-\u001f\u007f]/u.test(value)
+    ) {
+      return REDACTED_PULL_REQUEST_PROVIDER_LOOKUP;
+    }
+
+    const describeNetworkValue = (candidate: string): string | undefined => {
+      if (
+        candidate.includes('\\') ||
+        /\s/u.test(candidate) ||
+        /%(?![0-9A-Fa-f]{2})/u.test(candidate)
+      ) {
+        return undefined;
+      }
+
+      const rawUrl =
+        /^(git|https?|ssh):\/\/([^/?#]+)(?:\/[^?#]*)?(?:\?[^#]*)?(?:#.*)?$/iu.exec(
+          candidate
+        );
+      if (rawUrl !== null) {
+        let urlCandidate = candidate;
+        const authority = rawUrl[2];
+        if (authority === undefined) return undefined;
+        const userinfoSeparator = authority.indexOf('@');
+        if (
+          userinfoSeparator === 0 ||
+          (userinfoSeparator >= 0 &&
+            userinfoSeparator !== authority.lastIndexOf('@'))
+        ) {
+          return undefined;
+        }
+        const hostAndPort = authority.slice(userinfoSeparator + 1);
+        let canonicalHostname: string | undefined;
+        if (hostAndPort.startsWith('[')) {
+          const bracket = hostAndPort.indexOf(']');
+          const suffix = hostAndPort.slice(bracket + 1);
+          if (
+            bracket <= 1 ||
+            hostAndPort.indexOf('[', 1) >= 0 ||
+            hostAndPort.indexOf(']', bracket + 1) >= 0 ||
+            (suffix.length > 0 && !/^:\d+$/u.test(suffix))
+          ) {
+            return undefined;
+          }
+          if (nodeIsIP(hostAndPort.slice(1, bracket)) !== 6) {
+            return undefined;
+          }
+        } else {
+          if (hostAndPort.includes('[') || hostAndPort.includes(']')) {
+            return undefined;
+          }
+          const portSeparator = hostAndPort.lastIndexOf(':');
+          if (
+            portSeparator !== hostAndPort.indexOf(':') ||
+            (portSeparator >= 0 &&
+              !/^\d+$/u.test(hostAndPort.slice(portSeparator + 1)))
+          ) {
+            return undefined;
+          }
+          const hostname = hostAndPort.slice(
+            0,
+            portSeparator >= 0 ? portSeparator : undefined
+          );
+          if (hostname.length === 0 || hostname.includes('%')) return undefined;
+          canonicalHostname = canonicalDisplayHostname(hostname);
+          if (canonicalHostname === undefined) return undefined;
+          if (hostname.toLowerCase() !== canonicalHostname) {
+            const hostnameStart =
+              candidate.indexOf('://') + 3 + userinfoSeparator + 1;
+            urlCandidate = `${candidate.slice(
+              0,
+              hostnameStart
+            )}${canonicalHostname}${candidate.slice(
+              hostnameStart + hostname.length
+            )}`;
+          }
+        }
+
+        let parsed: URL;
+        try {
+          parsed = new hostUrlConstructor(urlCandidate);
+        } catch {
+          return undefined;
+        }
+        if (
+          parsed.host.length === 0 ||
+          !['git:', 'http:', 'https:', 'ssh:'].includes(parsed.protocol) ||
+          (canonicalHostname !== undefined &&
+            parsed.hostname.toLowerCase() !== canonicalHostname)
+        ) {
+          return undefined;
+        }
+        parsed.username = '';
+        parsed.password = '';
+        parsed.search = '';
+        parsed.hash = '';
+        return parsed.toString();
+      }
+
+      if (
+        /^(?:git|https?|ssh):/iu.test(candidate) ||
+        candidate.includes('://')
+      ) {
+        return undefined;
+      }
+
+      const scpLike =
+        /^(?:[^@\s/:]+@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+):([\p{L}\p{M}\p{N}._~/-]+)(?:\?[^#]*)?(?:#.*)?$/u.exec(
+          candidate
+        );
+      if (scpLike === null) return undefined;
+      const host = scpLike[1];
+      const path = scpLike[2];
+      if (host === undefined || path === undefined) return undefined;
+      if (host.startsWith('[')) {
+        if (nodeIsIP(host.slice(1, -1)) !== 6) return undefined;
+      } else if (canonicalDisplayHostname(host) === undefined) {
+        return undefined;
+      }
+      return `${host}:${path}`;
+    };
+
+    if (source === 'git-remote' || source === 'pull-request-url') {
+      return (
+        describeNetworkValue(value) ?? REDACTED_PULL_REQUEST_PROVIDER_LOOKUP
+      );
+    }
+
+    if (
+      value === 'invalid repository input' ||
+      value === 'invalid repository ref'
+    ) {
+      return value;
+    }
+
+    const directNetworkValue = describeNetworkValue(value);
+    if (directNetworkValue !== undefined) {
+      return directNetworkValue;
+    }
+
+    const parts = value.split(' ');
+    if (parts.length > 1 || parts[0]?.includes('=')) {
+      const described: string[] = [];
+      for (const part of parts) {
+        const separator = part.indexOf('=');
+        if (separator <= 0 || separator === part.length - 1) {
+          return REDACTED_PULL_REQUEST_PROVIDER_LOOKUP;
+        }
+        const key = part.slice(0, separator);
+        const rawComponent = part.slice(separator + 1);
+        if (!repositoryLookupKeys.has(key)) {
+          return REDACTED_PULL_REQUEST_PROVIDER_LOOKUP;
+        }
+        const component =
+          rawComponent.includes('://') ||
+          (rawComponent.includes(':') &&
+            (rawComponent.includes('@') || key === 'repo'))
+            ? describeNetworkValue(rawComponent)
+            : /^[A-Za-z0-9._~/-]+$/u.test(rawComponent)
+              ? rawComponent
+              : undefined;
+        if (component === undefined) {
+          return REDACTED_PULL_REQUEST_PROVIDER_LOOKUP;
+        }
+        described.push(`${key}=${component}`);
+      }
+      return described.join(' ');
+    }
+
+    return /^[A-Za-z0-9][A-Za-z0-9 ._~/-]*$/u.test(value)
+      ? value
+      : REDACTED_PULL_REQUEST_PROVIDER_LOOKUP;
+  } catch {
+    return REDACTED_PULL_REQUEST_PROVIDER_LOOKUP;
+  }
+}
+
+function hostArrayLength(value: object): number | undefined {
+  const descriptor = reflectGetOwnPropertyDescriptor(value, 'length');
+  return descriptor !== undefined &&
+    objectHasOwn(descriptor, 'value') &&
+    typeof descriptor.value === 'number' &&
+    Number.isSafeInteger(descriptor.value) &&
+    descriptor.value >= 0
+    ? descriptor.value
+    : undefined;
+}
+
+function hostArrayDataValue<T>(value: object, index: number): T | undefined {
+  const descriptor = reflectGetOwnPropertyDescriptor(value, String(index));
+  return descriptor !== undefined && objectHasOwn(descriptor, 'value')
+    ? (descriptor.value as T)
+    : undefined;
+}
 
 export type PullRequestProviderLookupSource =
   AidePullRequestProviderMatchSource;
@@ -51,6 +364,25 @@ export interface PullRequestProviderCandidate {
   readonly pluginId: string;
   readonly providerId: string;
   readonly priority: number;
+}
+
+function formatPullRequestProviderCandidates(
+  candidates: readonly PullRequestProviderCandidate[]
+): string {
+  const length = hostArrayLength(candidates) ?? 0;
+  let formatted = '';
+  let found = false;
+  for (let index = 0; index < length; index += 1) {
+    const candidate = hostArrayDataValue<PullRequestProviderCandidate>(
+      candidates,
+      index
+    );
+    if (candidate === undefined) continue;
+    const summary = `${candidate.pluginId}/${candidate.providerId}`;
+    formatted = found ? `${formatted}, ${summary}` : summary;
+    found = true;
+  }
+  return formatted;
 }
 
 export interface ResolvedPullRequestProvider<
@@ -98,51 +430,80 @@ export interface PullRequestProviderOperationContext<
     options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
   ) => Effect.Effect<
     AidePullRequestDiffResult,
-    | UnsupportedPullRequestProviderOperationError
-    | InvalidPullRequestProviderOperationResultError
-    | PullRequestProviderOperationError
-    | PullRequestProviderOperationTimeoutError
+    PullRequestProviderOperationExecutionError<'getPullRequestDiff'>
   >;
   readonly updatePullRequest: (
     request: Omit<AidePullRequestUpdateRequest, 'match'>,
     options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
   ) => Effect.Effect<
     AidePullRequestUpdateResult,
-    | UnsupportedPullRequestProviderOperationError
-    | InvalidPullRequestProviderOperationResultError
-    | PullRequestProviderOperationError
-    | PullRequestProviderOperationTimeoutError
+    PullRequestProviderOperationExecutionError<'updatePullRequest'>
   >;
   readonly listPullRequestComments: (
     request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
     options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
   ) => Effect.Effect<
     AidePullRequestCommentsResult,
-    | UnsupportedPullRequestProviderOperationError
-    | InvalidPullRequestProviderOperationResultError
-    | PullRequestProviderOperationError
-    | PullRequestProviderOperationTimeoutError
+    PullRequestProviderOperationExecutionError<'listPullRequestComments'>
   >;
   readonly addPullRequestComment: (
     request: Omit<AidePullRequestAddCommentRequest, 'match'>,
     options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
-    | UnsupportedPullRequestProviderOperationError
-    | InvalidPullRequestProviderOperationResultError
-    | PullRequestProviderOperationError
-    | PullRequestProviderOperationTimeoutError
+    PullRequestProviderOperationExecutionError<'addPullRequestComment'>
   >;
   readonly replyToPullRequestComment: (
     request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
     options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
-    | UnsupportedPullRequestProviderOperationError
-    | InvalidPullRequestProviderOperationResultError
-    | PullRequestProviderOperationError
-    | PullRequestProviderOperationTimeoutError
+    PullRequestProviderOperationExecutionError<'replyToPullRequestComment'>
   >;
+}
+
+const MAX_HOST_PULL_REQUEST_DIAGNOSTIC_LENGTH = 16_384;
+const hostPullRequestProviderDiagnostics = new WeakMap<object, string>();
+const pullRequestProviderFailureCauses = new WeakMap<object, unknown>();
+const hostPullRequestProviderMatcherFailureReasons = new WeakMap<
+  object,
+  string
+>();
+const pullRequestProviderCandidateEntries = new WeakMap<
+  object,
+  PluginCapability<AidePullRequestProviderCapability>
+>();
+
+function certifiedPullRequestProviderDiagnostic(
+  entry: PluginCapability<AidePullRequestProviderCapability> | undefined,
+  failure: unknown
+): string | undefined {
+  return entry === undefined
+    ? undefined
+    : certifiedBuiltinPullRequestProviderDiagnostic(entry, failure);
+}
+
+function boundedHostPullRequestDiagnostic(message: string): string {
+  return message.length <= MAX_HOST_PULL_REQUEST_DIAGNOSTIC_LENGTH
+    ? message
+    : `${message.slice(0, MAX_HOST_PULL_REQUEST_DIAGNOSTIC_LENGTH - 3)}...`;
+}
+
+function captureHostPullRequestDiagnostic<T extends object>(
+  error: T,
+  message: string
+): T {
+  hostPullRequestProviderDiagnostics.set(
+    error,
+    boundedHostPullRequestDiagnostic(message)
+  );
+  return error;
+}
+
+function hostPullRequestProviderMatcherFailureCause(message: string): object {
+  const cause = objectFreeze(objectCreate(null) as object);
+  hostPullRequestProviderMatcherFailureReasons.set(cause, message);
+  return cause;
 }
 
 export class UnsupportedPullRequestProviderError extends Data.TaggedError(
@@ -151,6 +512,16 @@ export class UnsupportedPullRequestProviderError extends Data.TaggedError(
   readonly source: PullRequestProviderLookupSource;
   readonly value: string;
 }> {
+  constructor(args: {
+    readonly source: PullRequestProviderLookupSource;
+    readonly value: string;
+  }) {
+    super({
+      ...args,
+      value: describePullRequestProviderLookup(args.source, args.value),
+    });
+  }
+
   override get message(): string {
     return `No pull request provider matched ${this.source}: ${this.value}`;
   }
@@ -164,10 +535,20 @@ export class AmbiguousPullRequestProviderError extends Data.TaggedError(
   readonly priority: number;
   readonly candidates: readonly PullRequestProviderCandidate[];
 }> {
+  constructor(args: {
+    readonly source: PullRequestProviderLookupSource;
+    readonly value: string;
+    readonly priority: number;
+    readonly candidates: readonly PullRequestProviderCandidate[];
+  }) {
+    super({
+      ...args,
+      value: describePullRequestProviderLookup(args.source, args.value),
+    });
+  }
+
   override get message(): string {
-    const candidates = this.candidates
-      .map((candidate) => `${candidate.pluginId}/${candidate.providerId}`)
-      .join(', ');
+    const candidates = formatPullRequestProviderCandidates(this.candidates);
     return `Multiple pull request providers matched ${this.source}: ${this.value} (${candidates})`;
   }
 }
@@ -181,6 +562,19 @@ export class InvalidPullRequestProviderMatchError extends Data.TaggedError(
   readonly providerId: string;
   readonly reason: string;
 }> {
+  constructor(args: {
+    readonly source: PullRequestProviderLookupSource;
+    readonly value: string;
+    readonly pluginId: string;
+    readonly providerId: string;
+    readonly reason: string;
+  }) {
+    super({
+      ...args,
+      value: describePullRequestProviderLookup(args.source, args.value),
+    });
+  }
+
   override get message(): string {
     return `Pull request provider '${this.providerId}' from plugin '${this.pluginId}' returned invalid ${this.source} match for ${this.value}: ${this.reason}`;
   }
@@ -195,9 +589,43 @@ export class PullRequestProviderInvocationError extends Data.TaggedError(
   readonly providerId: string;
   readonly cause: unknown;
 }> {
+  constructor(args: {
+    readonly source: PullRequestProviderLookupSource;
+    readonly value: string;
+    readonly pluginId: string;
+    readonly providerId: string;
+    readonly cause: unknown;
+  }) {
+    const { cause, ...hostFields } = args;
+    super({
+      ...hostFields,
+      value: describePullRequestProviderLookup(
+        hostFields.source,
+        hostFields.value
+      ),
+    } as typeof hostFields & {
+      readonly cause: unknown;
+    });
+    const failureReason =
+      (typeof cause === 'object' && cause !== null) ||
+      typeof cause === 'function'
+        ? hostPullRequestProviderMatcherFailureReasons.get(cause)
+        : undefined;
+    pullRequestProviderFailureCauses.set(
+      this,
+      new Error(failureReason ?? 'Pull request provider matcher failed')
+    );
+  }
+
+  override get cause(): unknown {
+    return pullRequestProviderFailureCauses.get(this);
+  }
+
   override get message(): string {
-    const detail = this.cause instanceof Error ? `: ${this.cause.message}` : '';
-    return `Pull request provider '${this.providerId}' from plugin '${this.pluginId}' failed while matching ${this.source} ${this.value}${detail}`;
+    return (
+      hostPullRequestProviderDiagnostics.get(this) ??
+      `Pull request provider '${this.providerId}' from plugin '${this.pluginId}' failed while matching ${this.source} ${this.value}`
+    );
   }
 }
 
@@ -209,29 +637,60 @@ export class PullRequestProviderTimeoutError extends Data.TaggedError(
   readonly pluginId: string;
   readonly providerId: string;
 }> {
+  constructor(args: {
+    readonly source: PullRequestProviderLookupSource;
+    readonly value: string;
+    readonly pluginId: string;
+    readonly providerId: string;
+  }) {
+    super({
+      ...args,
+      value: describePullRequestProviderLookup(args.source, args.value),
+    });
+  }
+
   override get message(): string {
     return `Pull request provider '${this.providerId}' from plugin '${this.pluginId}' timed out while matching ${this.source} ${this.value}`;
   }
 }
 
-export class UnsupportedPullRequestProviderOperationError extends Data.TaggedError(
-  'UnsupportedPullRequestProviderOperationError'
-)<{
+export type PullRequestProviderReadOperationName =
+  | 'listPullRequests'
+  | 'getPullRequest'
+  | 'getPullRequestDiff'
+  | 'listPullRequestComments'
+  | 'findPullRequestForBranch';
+
+export type PullRequestProviderMutationOperationName =
+  | 'createPullRequest'
+  | 'updatePullRequest'
+  | 'addPullRequestComment'
+  | 'replyToPullRequestComment';
+
+export type PullRequestProviderOperationName =
+  | PullRequestProviderReadOperationName
+  | PullRequestProviderMutationOperationName;
+
+export class UnsupportedPullRequestProviderOperationError<
+  TOperation extends PullRequestProviderOperationName =
+    PullRequestProviderOperationName,
+> extends Data.TaggedError('UnsupportedPullRequestProviderOperationError')<{
   readonly pluginId: string;
   readonly providerId: string;
-  readonly operation: string;
+  readonly operation: TOperation;
 }> {
   override get message(): string {
     return `Pull request provider '${this.providerId}' from plugin '${this.pluginId}' does not implement ${this.operation}`;
   }
 }
 
-export class InvalidPullRequestProviderOperationResultError extends Data.TaggedError(
-  'InvalidPullRequestProviderOperationResultError'
-)<{
+export class InvalidPullRequestProviderOperationResultError<
+  TOperation extends PullRequestProviderOperationName =
+    PullRequestProviderOperationName,
+> extends Data.TaggedError('InvalidPullRequestProviderOperationResultError')<{
   readonly pluginId: string;
   readonly providerId: string;
-  readonly operation: string;
+  readonly operation: TOperation;
   readonly reason: string;
 }> {
   override get message(): string {
@@ -239,30 +698,236 @@ export class InvalidPullRequestProviderOperationResultError extends Data.TaggedE
   }
 }
 
-export class PullRequestProviderOperationError extends Data.TaggedError(
-  'PullRequestProviderOperationError'
-)<{
+export class PullRequestProviderOperationError<
+  TOperation extends PullRequestProviderOperationName =
+    PullRequestProviderOperationName,
+> extends Data.TaggedError('PullRequestProviderOperationError')<{
   readonly pluginId: string;
   readonly providerId: string;
-  readonly operation: string;
+  readonly operation: TOperation;
   readonly cause: unknown;
 }> {
+  constructor(args: {
+    readonly pluginId: string;
+    readonly providerId: string;
+    readonly operation: TOperation;
+    readonly cause: unknown;
+  }) {
+    const { cause, ...hostFields } = args;
+    super(
+      hostFields as typeof hostFields & {
+        readonly cause: unknown;
+      }
+    );
+    pullRequestProviderFailureCauses.set(this, cause);
+  }
+
+  override get cause(): unknown {
+    return pullRequestProviderFailureCauses.get(this);
+  }
+
   override get message(): string {
-    const detail = this.cause instanceof Error ? `: ${this.cause.message}` : '';
-    return `Pull request provider '${this.providerId}' from plugin '${this.pluginId}' failed during ${this.operation}${detail}`;
+    return (
+      hostPullRequestProviderDiagnostics.get(this) ??
+      `Pull request provider '${this.providerId}' from plugin '${this.pluginId}' failed during ${this.operation}`
+    );
   }
 }
 
-export class PullRequestProviderOperationTimeoutError extends Data.TaggedError(
-  'PullRequestProviderOperationTimeoutError'
-)<{
+export function pullRequestProviderErrorMessage(
+  error: unknown
+): string | undefined {
+  const message = hostPullRequestProviderDiagnostics.get(error as object);
+  return typeof message === 'string' &&
+    message.length > 0 &&
+    message.length <= MAX_HOST_PULL_REQUEST_DIAGNOSTIC_LENGTH
+    ? message
+    : undefined;
+}
+
+export class PullRequestProviderOperationTimeoutError<
+  TOperation extends PullRequestProviderReadOperationName =
+    PullRequestProviderReadOperationName,
+> extends Data.TaggedError('PullRequestProviderOperationTimeoutError')<{
   readonly pluginId: string;
   readonly providerId: string;
-  readonly operation: string;
+  readonly operation: TOperation;
 }> {
   override get message(): string {
     return `Pull request provider '${this.providerId}' from plugin '${this.pluginId}' timed out during ${this.operation}`;
   }
+}
+
+export class PullRequestProviderMutationIndeterminateError<
+  TOperation extends PullRequestProviderMutationOperationName =
+    PullRequestProviderMutationOperationName,
+> extends Data.TaggedError('PullRequestProviderMutationIndeterminateError')<{
+  readonly pluginId: string;
+  readonly providerId: string;
+  readonly operation: TOperation;
+}> {
+  override get message(): string {
+    return `Pull request mutation outcome is indeterminate for provider '${this.providerId}' from plugin '${this.pluginId}' during ${this.operation}: the operation may have succeeded; do not retry blindly. Verify the remote state before taking further action.`;
+  }
+}
+
+type UnsupportedProviderArgs = {
+  readonly source: PullRequestProviderLookupSource;
+  readonly value: string;
+};
+
+type AmbiguousProviderArgs = UnsupportedProviderArgs & {
+  readonly priority: number;
+  readonly candidates: readonly PullRequestProviderCandidate[];
+};
+
+type InvalidMatchArgs = UnsupportedProviderArgs & {
+  readonly pluginId: string;
+  readonly providerId: string;
+  readonly reason: string;
+};
+
+type InvocationArgs = UnsupportedProviderArgs & {
+  readonly pluginId: string;
+  readonly providerId: string;
+  readonly cause: unknown;
+};
+
+type MatcherTimeoutArgs = UnsupportedProviderArgs & {
+  readonly pluginId: string;
+  readonly providerId: string;
+};
+
+type OperationArgs<
+  TOperation extends PullRequestProviderOperationName =
+    PullRequestProviderOperationName,
+> = {
+  readonly pluginId: string;
+  readonly providerId: string;
+  readonly operation: TOperation;
+};
+
+type InvalidOperationResultArgs<
+  TOperation extends PullRequestProviderOperationName =
+    PullRequestProviderOperationName,
+> = OperationArgs<TOperation> & {
+  readonly reason: string;
+};
+
+type OperationFailureArgs<
+  TOperation extends PullRequestProviderOperationName =
+    PullRequestProviderOperationName,
+> = OperationArgs<TOperation> & {
+  readonly cause: unknown;
+};
+
+function hostUnsupportedPullRequestProviderError(
+  args: UnsupportedProviderArgs
+): UnsupportedPullRequestProviderError {
+  const error = new UnsupportedPullRequestProviderError(args);
+  return captureHostPullRequestDiagnostic(
+    error,
+    `No pull request provider matched ${error.source}: ${error.value}`
+  );
+}
+
+function hostAmbiguousPullRequestProviderError(
+  args: AmbiguousProviderArgs
+): AmbiguousPullRequestProviderError {
+  const candidates = formatPullRequestProviderCandidates(args.candidates);
+  const error = new AmbiguousPullRequestProviderError(args);
+  return captureHostPullRequestDiagnostic(
+    error,
+    `Multiple pull request providers matched ${error.source}: ${error.value} (${candidates})`
+  );
+}
+
+function hostInvalidPullRequestProviderMatchError(
+  args: InvalidMatchArgs
+): InvalidPullRequestProviderMatchError {
+  const error = new InvalidPullRequestProviderMatchError(args);
+  return captureHostPullRequestDiagnostic(
+    error,
+    `Pull request provider '${error.providerId}' from plugin '${error.pluginId}' returned invalid ${error.source} match for ${error.value}: ${error.reason}`
+  );
+}
+
+function hostPullRequestProviderInvocationError(
+  args: InvocationArgs
+): PullRequestProviderInvocationError {
+  const error = new PullRequestProviderInvocationError(args);
+  return captureHostPullRequestDiagnostic(
+    error,
+    `Pull request provider '${error.providerId}' from plugin '${error.pluginId}' failed while matching ${error.source} ${error.value}`
+  );
+}
+
+function hostPullRequestProviderTimeoutError(
+  args: MatcherTimeoutArgs
+): PullRequestProviderTimeoutError {
+  const error = new PullRequestProviderTimeoutError(args);
+  return captureHostPullRequestDiagnostic(
+    error,
+    `Pull request provider '${error.providerId}' from plugin '${error.pluginId}' timed out while matching ${error.source} ${error.value}`
+  );
+}
+
+function hostUnsupportedPullRequestProviderOperationError<
+  TOperation extends PullRequestProviderOperationName,
+>(
+  args: OperationArgs<TOperation>
+): UnsupportedPullRequestProviderOperationError<TOperation> {
+  return captureHostPullRequestDiagnostic(
+    new UnsupportedPullRequestProviderOperationError(args),
+    `Pull request provider '${args.providerId}' from plugin '${args.pluginId}' does not implement ${args.operation}`
+  );
+}
+
+function hostInvalidPullRequestProviderOperationResultError<
+  TOperation extends PullRequestProviderOperationName,
+>(
+  args: InvalidOperationResultArgs<TOperation>
+): InvalidPullRequestProviderOperationResultError<TOperation> {
+  return captureHostPullRequestDiagnostic(
+    new InvalidPullRequestProviderOperationResultError(args),
+    `Pull request provider '${args.providerId}' from plugin '${args.pluginId}' returned invalid ${args.operation} result: ${args.reason}`
+  );
+}
+
+function hostPullRequestProviderOperationError<
+  TOperation extends PullRequestProviderOperationName,
+>(
+  args: OperationFailureArgs<TOperation>,
+  entry?: PluginCapability<AidePullRequestProviderCapability>
+): PullRequestProviderOperationError<TOperation> {
+  const certified = certifiedPullRequestProviderDiagnostic(entry, args.cause);
+  return captureHostPullRequestDiagnostic(
+    new PullRequestProviderOperationError(args),
+    certified ??
+      `Pull request provider '${args.providerId}' from plugin '${args.pluginId}' failed during ${args.operation}`
+  );
+}
+
+function hostPullRequestProviderOperationTimeoutError<
+  TOperation extends PullRequestProviderReadOperationName,
+>(
+  args: OperationArgs<TOperation>
+): PullRequestProviderOperationTimeoutError<TOperation> {
+  return captureHostPullRequestDiagnostic(
+    new PullRequestProviderOperationTimeoutError(args),
+    `Pull request provider '${args.providerId}' from plugin '${args.pluginId}' timed out during ${args.operation}`
+  );
+}
+
+function hostPullRequestProviderMutationIndeterminateError<
+  TOperation extends PullRequestProviderMutationOperationName,
+>(
+  args: OperationArgs<TOperation>
+): PullRequestProviderMutationIndeterminateError<TOperation> {
+  return captureHostPullRequestDiagnostic(
+    new PullRequestProviderMutationIndeterminateError(args),
+    `Pull request mutation outcome is indeterminate for provider '${args.providerId}' from plugin '${args.pluginId}' during ${args.operation}: the operation may have succeeded; do not retry blindly. Verify the remote state before taking further action.`
+  );
 }
 
 export type PullRequestProviderResolutionError =
@@ -272,15 +937,761 @@ export type PullRequestProviderResolutionError =
   | PullRequestProviderInvocationError
   | PullRequestProviderTimeoutError;
 
-export type PullRequestProviderOperationInvocationError =
+export type PullRequestProviderOperationExecutionError<
+  TOperation extends PullRequestProviderOperationName =
+    PullRequestProviderOperationName,
+> =
+  | UnsupportedPullRequestProviderOperationError<TOperation>
+  | InvalidPullRequestProviderOperationResultError<TOperation>
+  | PullRequestProviderOperationError<TOperation>
+  | PullRequestProviderOperationDeadlineError<TOperation>;
+
+export type PullRequestProviderOperationInvocationError<
+  TOperation extends PullRequestProviderOperationName =
+    PullRequestProviderOperationName,
+> =
   | PullRequestProviderResolutionError
-  | UnsupportedPullRequestProviderOperationError
-  | InvalidPullRequestProviderOperationResultError
-  | PullRequestProviderOperationError
-  | PullRequestProviderOperationTimeoutError;
+  | PullRequestProviderOperationExecutionError<TOperation>;
 
 const defaultMatcherTimeout = '2 seconds' satisfies Duration.DurationInput;
 const defaultOperationTimeout = '10 seconds' satisfies Duration.DurationInput;
+
+const isNodeProxy = nodeUtilTypes.isProxy;
+const MAX_PR_RESULT_DEPTH = 8;
+const MAX_PR_RESULT_ARRAY_LENGTH = 1_000;
+const MAX_PR_RESULT_RECORD_FIELDS = 128;
+const MAX_PR_RESULT_NODES = 20_000;
+const MAX_PR_RESULT_STRING_LENGTH = 65_536;
+const MAX_PR_RESULT_STRING_UNITS = 1_048_576;
+
+type PullRequestCaptureSchema =
+  | { readonly kind: 'reject' }
+  | { readonly kind: 'scalar' }
+  | { readonly kind: 'boolean' }
+  | {
+      readonly kind: 'array';
+      readonly entry: PullRequestCaptureSchema;
+    }
+  | {
+      readonly kind: 'record';
+      readonly fields: Readonly<
+        Record<
+          string,
+          {
+            readonly schema: PullRequestCaptureSchema;
+            readonly optional: boolean;
+          }
+        >
+      >;
+    }
+  | {
+      readonly kind: 'dictionary';
+      readonly entry: PullRequestCaptureSchema;
+    }
+  | {
+      readonly kind: 'discriminated';
+      readonly field: string;
+      readonly variants: Readonly<Record<string, PullRequestCaptureSchema>>;
+      readonly fallback: PullRequestCaptureSchema;
+    };
+
+type PullRequestCaptureSchemaName =
+  | 'features'
+  | 'match'
+  | 'listPullRequests'
+  | 'getPullRequest'
+  | 'createPullRequest'
+  | 'updatePullRequest'
+  | 'getPullRequestDiff'
+  | 'listPullRequestComments'
+  | 'addPullRequestComment'
+  | 'replyToPullRequestComment'
+  | 'findPullRequestForBranch';
+
+type PullRequestOperationCaptureSchemaName = Exclude<
+  PullRequestCaptureSchemaName,
+  'features' | 'match'
+>;
+
+export type PullRequestProviderOperationDeadlineError<
+  TOperation extends PullRequestProviderOperationName,
+> = TOperation extends PullRequestProviderMutationOperationName
+  ? PullRequestProviderMutationIndeterminateError<TOperation>
+  : TOperation extends PullRequestProviderReadOperationName
+    ? PullRequestProviderOperationTimeoutError<TOperation>
+    : never;
+
+interface PullRequestCaptureState {
+  readonly active: WeakSet<object>;
+  nodes: number;
+  stringUnits: number;
+}
+
+type PullRequestCaptureResult =
+  | { readonly ok: true; readonly value: unknown }
+  | { readonly ok: false };
+
+const pullRequestCaptureFailure = objectFreeze({});
+
+type PullRequestCaptureField = {
+  readonly schema: PullRequestCaptureSchema;
+  readonly optional: boolean;
+};
+
+type PullRequestCaptureFields = Readonly<
+  Record<string, PullRequestCaptureField>
+>;
+
+function invalidPullRequestCaptureSchemaDefinition(): never {
+  throw new TypeError('Invalid host pull request capture schema definition');
+}
+
+function immutablePullRequestCaptureRecord<const T extends object>(
+  source: T
+): Readonly<T>;
+function immutablePullRequestCaptureRecord<
+  const TFirst extends object,
+  const TSecond extends object,
+>(first: TFirst, second: TSecond): Readonly<TFirst & TSecond>;
+function immutablePullRequestCaptureRecord(
+  ...sources: readonly object[]
+): Readonly<object> {
+  const snapshot = objectCreate(null) as Record<string, unknown>;
+  const seen = new Set<string>();
+  const sourceCount = hostArrayLength(sources);
+  if (sourceCount === undefined) invalidPullRequestCaptureSchemaDefinition();
+  for (let sourceIndex = 0; sourceIndex < sourceCount; sourceIndex += 1) {
+    const source = hostArrayDataValue<object>(sources, sourceIndex);
+    if (source === undefined) invalidPullRequestCaptureSchemaDefinition();
+    const prototype = isNodeProxy(source)
+      ? undefined
+      : reflectGetPrototypeOf(source);
+    if (
+      prototype === undefined ||
+      arrayIsArray(source) ||
+      (prototype !== Object.prototype && prototype !== null)
+    ) {
+      invalidPullRequestCaptureSchemaDefinition();
+    }
+    const keys = reflectOwnKeys(source);
+    const keyCount = hostArrayLength(keys);
+    if (keyCount === undefined) invalidPullRequestCaptureSchemaDefinition();
+    for (let keyIndex = 0; keyIndex < keyCount; keyIndex += 1) {
+      const key = hostArrayDataValue<PropertyKey>(keys, keyIndex);
+      if (typeof key !== 'string' || seen.has(key)) {
+        invalidPullRequestCaptureSchemaDefinition();
+      }
+      const descriptor = reflectGetOwnPropertyDescriptor(source, key);
+      if (
+        descriptor === undefined ||
+        !objectHasOwn(descriptor, 'value') ||
+        descriptor.enumerable !== true
+      ) {
+        invalidPullRequestCaptureSchemaDefinition();
+      }
+      seen.add(key);
+      objectDefineProperty(snapshot, key, {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: descriptor.value,
+      });
+    }
+  }
+  return objectFreeze(snapshot);
+}
+
+const scalarCaptureSchema: PullRequestCaptureSchema =
+  immutablePullRequestCaptureRecord({ kind: 'scalar' as const });
+const booleanCaptureSchema: PullRequestCaptureSchema =
+  immutablePullRequestCaptureRecord({ kind: 'boolean' as const });
+const rejectCaptureSchema: PullRequestCaptureSchema =
+  immutablePullRequestCaptureRecord({ kind: 'reject' as const });
+
+function optionalCaptureField(
+  schema: PullRequestCaptureSchema
+): PullRequestCaptureField {
+  return immutablePullRequestCaptureRecord({ schema, optional: true });
+}
+
+function requiredCaptureField(
+  schema: PullRequestCaptureSchema
+): PullRequestCaptureField {
+  return immutablePullRequestCaptureRecord({ schema, optional: false });
+}
+
+function recordCaptureSchema(
+  fields: PullRequestCaptureFields,
+  additionalFields?: PullRequestCaptureFields
+): PullRequestCaptureSchema {
+  const ownedFields =
+    additionalFields === undefined
+      ? immutablePullRequestCaptureRecord(fields)
+      : immutablePullRequestCaptureRecord(fields, additionalFields);
+  return immutablePullRequestCaptureRecord({
+    kind: 'record' as const,
+    fields: ownedFields,
+  });
+}
+
+function arrayCaptureSchema(
+  entry: PullRequestCaptureSchema
+): PullRequestCaptureSchema {
+  return immutablePullRequestCaptureRecord({ kind: 'array' as const, entry });
+}
+
+function dictionaryCaptureSchema(
+  entry: PullRequestCaptureSchema
+): PullRequestCaptureSchema {
+  return immutablePullRequestCaptureRecord({
+    kind: 'dictionary' as const,
+    entry,
+  });
+}
+
+function discriminatedCaptureSchema(
+  field: string,
+  variants: Readonly<Record<string, PullRequestCaptureSchema>>,
+  fallback: PullRequestCaptureSchema
+): PullRequestCaptureSchema {
+  return immutablePullRequestCaptureRecord({
+    kind: 'discriminated' as const,
+    field,
+    variants: immutablePullRequestCaptureRecord(variants),
+    fallback,
+  });
+}
+
+const repositoryMetadataCaptureSchema =
+  dictionaryCaptureSchema(scalarCaptureSchema);
+const githubRepositoryCaptureSchema = recordCaptureSchema({
+  kind: requiredCaptureField(scalarCaptureSchema),
+  host: requiredCaptureField(scalarCaptureSchema),
+  owner: requiredCaptureField(scalarCaptureSchema),
+  repo: requiredCaptureField(scalarCaptureSchema),
+});
+const azureRepositoryCaptureSchema = recordCaptureSchema({
+  kind: requiredCaptureField(scalarCaptureSchema),
+  org: requiredCaptureField(scalarCaptureSchema),
+  project: requiredCaptureField(scalarCaptureSchema),
+  repo: requiredCaptureField(scalarCaptureSchema),
+});
+const externalRepositoryCaptureSchema = recordCaptureSchema({
+  kind: requiredCaptureField(scalarCaptureSchema),
+  providerId: requiredCaptureField(scalarCaptureSchema),
+  displayName: requiredCaptureField(scalarCaptureSchema),
+  metadata: optionalCaptureField(repositoryMetadataCaptureSchema),
+});
+const repositoryCaptureSchema = discriminatedCaptureSchema(
+  'kind',
+  {
+    github: githubRepositoryCaptureSchema,
+    'azure-devops': azureRepositoryCaptureSchema,
+    external: externalRepositoryCaptureSchema,
+  },
+  rejectCaptureSchema
+);
+const pullRequestRefCaptureSchema = recordCaptureSchema({
+  number: requiredCaptureField(scalarCaptureSchema),
+});
+const authorCaptureSchema = recordCaptureSchema({
+  displayName: requiredCaptureField(scalarCaptureSchema),
+  username: optionalCaptureField(scalarCaptureSchema),
+  email: optionalCaptureField(scalarCaptureSchema),
+});
+const pullRequestListItemCaptureFields = immutablePullRequestCaptureRecord({
+  id: requiredCaptureField(scalarCaptureSchema),
+  title: requiredCaptureField(scalarCaptureSchema),
+  status: requiredCaptureField(scalarCaptureSchema),
+  createdAt: requiredCaptureField(scalarCaptureSchema),
+  author: requiredCaptureField(authorCaptureSchema),
+  description: optionalCaptureField(scalarCaptureSchema),
+  url: optionalCaptureField(scalarCaptureSchema),
+  draft: optionalCaptureField(scalarCaptureSchema),
+});
+const pullRequestListItemCaptureSchema = recordCaptureSchema(
+  pullRequestListItemCaptureFields
+);
+const stringArrayCaptureSchema = arrayCaptureSchema(scalarCaptureSchema);
+const pullRequestViewItemCaptureSchema = recordCaptureSchema(
+  pullRequestListItemCaptureFields,
+  {
+    sourceBranch: optionalCaptureField(scalarCaptureSchema),
+    targetBranch: optionalCaptureField(scalarCaptureSchema),
+    labels: optionalCaptureField(stringArrayCaptureSchema),
+  }
+);
+const diffFileCaptureSchema = recordCaptureSchema({
+  path: requiredCaptureField(scalarCaptureSchema),
+  status: requiredCaptureField(scalarCaptureSchema),
+  providerStatus: optionalCaptureField(scalarCaptureSchema),
+  previousPath: optionalCaptureField(scalarCaptureSchema),
+  additions: optionalCaptureField(scalarCaptureSchema),
+  deletions: optionalCaptureField(scalarCaptureSchema),
+  changes: optionalCaptureField(scalarCaptureSchema),
+  patch: optionalCaptureField(scalarCaptureSchema),
+});
+const commentCaptureSchema = recordCaptureSchema({
+  id: requiredCaptureField(scalarCaptureSchema),
+  kind: requiredCaptureField(scalarCaptureSchema),
+  author: requiredCaptureField(authorCaptureSchema),
+  body: requiredCaptureField(scalarCaptureSchema),
+  createdAt: requiredCaptureField(scalarCaptureSchema),
+  updatedAt: optionalCaptureField(scalarCaptureSchema),
+  url: optionalCaptureField(scalarCaptureSchema),
+  filePath: optionalCaptureField(scalarCaptureSchema),
+  lineNumber: optionalCaptureField(scalarCaptureSchema),
+  parentId: optionalCaptureField(scalarCaptureSchema),
+  providerType: optionalCaptureField(scalarCaptureSchema),
+});
+const commentThreadCaptureSchema = recordCaptureSchema({
+  id: requiredCaptureField(scalarCaptureSchema),
+  status: optionalCaptureField(scalarCaptureSchema),
+  filePath: optionalCaptureField(scalarCaptureSchema),
+  lineNumber: optionalCaptureField(scalarCaptureSchema),
+  rootComment: optionalCaptureField(commentCaptureSchema),
+  replies: requiredCaptureField(arrayCaptureSchema(commentCaptureSchema)),
+});
+const matchBaseCaptureFields = immutablePullRequestCaptureRecord({
+  priority: optionalCaptureField(scalarCaptureSchema),
+  detail: optionalCaptureField(scalarCaptureSchema),
+});
+const nonUrlMatchCaptureSchema = recordCaptureSchema({
+  source: requiredCaptureField(scalarCaptureSchema),
+  repository: requiredCaptureField(repositoryCaptureSchema),
+  pullRequest: optionalCaptureField(rejectCaptureSchema),
+  priority: optionalCaptureField(scalarCaptureSchema),
+  detail: optionalCaptureField(scalarCaptureSchema),
+});
+const urlMatchCaptureSchema = recordCaptureSchema(matchBaseCaptureFields, {
+  source: requiredCaptureField(scalarCaptureSchema),
+  repository: requiredCaptureField(repositoryCaptureSchema),
+  pullRequest: requiredCaptureField(pullRequestRefCaptureSchema),
+});
+const matchCaptureSchema = discriminatedCaptureSchema(
+  'source',
+  {
+    'git-remote': nonUrlMatchCaptureSchema,
+    'repository-ref': nonUrlMatchCaptureSchema,
+    'pull-request-url': urlMatchCaptureSchema,
+  },
+  rejectCaptureSchema
+);
+const featuresCaptureSchema = recordCaptureSchema({
+  draftPullRequests: optionalCaptureField(booleanCaptureSchema),
+  reviewComments: optionalCaptureField(booleanCaptureSchema),
+  threadedComments: optionalCaptureField(booleanCaptureSchema),
+  enterpriseHosts: optionalCaptureField(booleanCaptureSchema),
+});
+const viewResultCaptureFields = immutablePullRequestCaptureRecord({
+  repository: requiredCaptureField(repositoryCaptureSchema),
+  repositoryLabel: optionalCaptureField(scalarCaptureSchema),
+  pullRequest: requiredCaptureField(pullRequestViewItemCaptureSchema),
+});
+const pullRequestCaptureSchemas: Readonly<
+  Record<PullRequestCaptureSchemaName, PullRequestCaptureSchema>
+> = immutablePullRequestCaptureRecord({
+  features: featuresCaptureSchema,
+  match: matchCaptureSchema,
+  listPullRequests: recordCaptureSchema({
+    repository: requiredCaptureField(repositoryCaptureSchema),
+    repositoryLabel: optionalCaptureField(scalarCaptureSchema),
+    pullRequests: requiredCaptureField(
+      arrayCaptureSchema(pullRequestListItemCaptureSchema)
+    ),
+  }),
+  getPullRequest: recordCaptureSchema(viewResultCaptureFields),
+  createPullRequest: recordCaptureSchema(viewResultCaptureFields, {
+    warnings: optionalCaptureField(stringArrayCaptureSchema),
+  }),
+  updatePullRequest: recordCaptureSchema(viewResultCaptureFields, {
+    warnings: optionalCaptureField(stringArrayCaptureSchema),
+  }),
+  getPullRequestDiff: recordCaptureSchema(viewResultCaptureFields, {
+    files: requiredCaptureField(arrayCaptureSchema(diffFileCaptureSchema)),
+  }),
+  listPullRequestComments: recordCaptureSchema({
+    repository: requiredCaptureField(repositoryCaptureSchema),
+    repositoryLabel: optionalCaptureField(scalarCaptureSchema),
+    pullRequest: requiredCaptureField(pullRequestRefCaptureSchema),
+    threads: requiredCaptureField(
+      arrayCaptureSchema(commentThreadCaptureSchema)
+    ),
+  }),
+  addPullRequestComment: recordCaptureSchema({
+    repository: requiredCaptureField(repositoryCaptureSchema),
+    repositoryLabel: optionalCaptureField(scalarCaptureSchema),
+    pullRequest: requiredCaptureField(pullRequestRefCaptureSchema),
+    comment: requiredCaptureField(commentCaptureSchema),
+    thread: optionalCaptureField(commentThreadCaptureSchema),
+  }),
+  replyToPullRequestComment: recordCaptureSchema({
+    repository: requiredCaptureField(repositoryCaptureSchema),
+    repositoryLabel: optionalCaptureField(scalarCaptureSchema),
+    pullRequest: requiredCaptureField(pullRequestRefCaptureSchema),
+    comment: requiredCaptureField(commentCaptureSchema),
+    thread: optionalCaptureField(commentThreadCaptureSchema),
+  }),
+  findPullRequestForBranch: recordCaptureSchema(viewResultCaptureFields, {
+    branch: requiredCaptureField(scalarCaptureSchema),
+  }),
+});
+
+function failPullRequestCapture(): never {
+  throw pullRequestCaptureFailure;
+}
+
+function accountPullRequestCapture(
+  state: PullRequestCaptureState,
+  value: unknown,
+  depth: number,
+  countNode = true
+): void {
+  if (depth > MAX_PR_RESULT_DEPTH) failPullRequestCapture();
+  if (countNode) {
+    state.nodes += 1;
+    if (state.nodes > MAX_PR_RESULT_NODES) failPullRequestCapture();
+  }
+  if (typeof value !== 'string') return;
+  if (value.length > MAX_PR_RESULT_STRING_LENGTH) failPullRequestCapture();
+  state.stringUnits += value.length;
+  if (state.stringUnits > MAX_PR_RESULT_STRING_UNITS) {
+    failPullRequestCapture();
+  }
+}
+
+function guardedPullRequestRecord(value: unknown): object {
+  if (typeof value !== 'object' || value === null) failPullRequestCapture();
+  if (isNodeProxy(value) || arrayIsArray(value)) failPullRequestCapture();
+  const prototype = reflectGetPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    failPullRequestCapture();
+  }
+  return value;
+}
+
+const missingPullRequestOwnData = Symbol('missing-pull-request-own-data');
+
+function ownPullRequestDataValue(
+  value: object,
+  key: PropertyKey
+): unknown | typeof missingPullRequestOwnData {
+  const descriptor = reflectGetOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined) return missingPullRequestOwnData;
+  if (!objectHasOwn(descriptor, 'value')) failPullRequestCapture();
+  return descriptor.value;
+}
+
+function definePullRequestArrayEntry<T>(
+  target: T[],
+  index: number,
+  value: T
+): void {
+  objectDefineProperty(target, String(index), {
+    configurable: false,
+    enumerable: true,
+    writable: false,
+    value,
+  });
+}
+
+function pullRequestCaptureSchemaProperty<T>(
+  schemaRecord: object,
+  key: PropertyKey
+): T {
+  const value = ownPullRequestDataValue(schemaRecord, key);
+  if (value === missingPullRequestOwnData) failPullRequestCapture();
+  return value as T;
+}
+
+function asPullRequestCaptureSchema(value: unknown): PullRequestCaptureSchema {
+  if (typeof value !== 'object' || value === null) failPullRequestCapture();
+  return value as PullRequestCaptureSchema;
+}
+
+function asPullRequestCaptureSchemaRecord(value: unknown): object {
+  if (typeof value !== 'object' || value === null) failPullRequestCapture();
+  return value;
+}
+
+function capturePullRequestArray(
+  value: unknown,
+  schema: PullRequestCaptureSchema,
+  state: PullRequestCaptureState,
+  depth: number
+): readonly unknown[] {
+  if (typeof value !== 'object' || value === null || isNodeProxy(value)) {
+    failPullRequestCapture();
+  }
+  if (
+    !arrayIsArray(value) ||
+    reflectGetPrototypeOf(value) !== Array.prototype
+  ) {
+    failPullRequestCapture();
+  }
+  const source = value as object;
+  if (state.active.has(source)) failPullRequestCapture();
+  state.active.add(source);
+  try {
+    const length = ownPullRequestDataValue(source, 'length');
+    if (
+      length === missingPullRequestOwnData ||
+      typeof length !== 'number' ||
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > MAX_PR_RESULT_ARRAY_LENGTH
+    ) {
+      failPullRequestCapture();
+    }
+
+    const keys = reflectOwnKeys(source);
+    const keyCount = hostArrayLength(keys);
+    if (keyCount === undefined || keyCount !== length + 1) {
+      failPullRequestCapture();
+    }
+    for (let keyIndex = 0; keyIndex < keyCount; keyIndex += 1) {
+      const key = hostArrayDataValue<PropertyKey>(keys, keyIndex);
+      if (key === 'length') continue;
+      if (typeof key !== 'string') failPullRequestCapture();
+      const index = Number(key);
+      if (!Number.isSafeInteger(index) || index < 0 || index >= length) {
+        failPullRequestCapture();
+      }
+    }
+
+    const snapshot: unknown[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const key = String(index);
+      accountPullRequestCapture(state, key, depth + 1, false);
+      const entry = ownPullRequestDataValue(source, key);
+      if (entry === missingPullRequestOwnData) failPullRequestCapture();
+      definePullRequestArrayEntry(
+        snapshot,
+        index,
+        capturePullRequestNode(
+          entry,
+          asPullRequestCaptureSchema(
+            pullRequestCaptureSchemaProperty(schema, 'entry')
+          ),
+          state,
+          depth + 1
+        )
+      );
+    }
+    return objectFreeze(snapshot);
+  } finally {
+    state.active.delete(source);
+  }
+}
+
+function capturePullRequestRecord(
+  value: unknown,
+  schema: PullRequestCaptureSchema,
+  state: PullRequestCaptureState,
+  depth: number
+): Readonly<Record<string, unknown>> {
+  const source = guardedPullRequestRecord(value);
+  if (state.active.has(source)) failPullRequestCapture();
+  state.active.add(source);
+  try {
+    const keys = reflectOwnKeys(source);
+    const keyCount = hostArrayLength(keys);
+    if (keyCount === undefined || keyCount > MAX_PR_RESULT_RECORD_FIELDS) {
+      failPullRequestCapture();
+    }
+    const snapshot = objectCreate(null) as Record<string, unknown>;
+    const seen = new Set<string>();
+    const kind = pullRequestCaptureSchemaProperty<'record' | 'dictionary'>(
+      schema,
+      'kind'
+    );
+    const fields =
+      kind === 'record'
+        ? asPullRequestCaptureSchemaRecord(
+            pullRequestCaptureSchemaProperty(schema, 'fields')
+          )
+        : undefined;
+    const dictionaryEntry =
+      kind === 'dictionary'
+        ? asPullRequestCaptureSchema(
+            pullRequestCaptureSchemaProperty(schema, 'entry')
+          )
+        : undefined;
+    if (kind !== 'record' && kind !== 'dictionary') failPullRequestCapture();
+    for (let keyIndex = 0; keyIndex < keyCount; keyIndex += 1) {
+      const key = hostArrayDataValue<PropertyKey>(keys, keyIndex);
+      if (typeof key !== 'string' || seen.has(key)) failPullRequestCapture();
+      seen.add(key);
+      accountPullRequestCapture(state, key, depth + 1, false);
+      let fieldSchema: PullRequestCaptureSchema;
+      let fieldOptional: boolean;
+      if (kind === 'dictionary') {
+        fieldSchema = dictionaryEntry!;
+        fieldOptional = false;
+      } else {
+        const field = asPullRequestCaptureSchemaRecord(
+          ownPullRequestDataValue(fields!, key)
+        );
+        fieldSchema = asPullRequestCaptureSchema(
+          pullRequestCaptureSchemaProperty(field, 'schema')
+        );
+        const optional = pullRequestCaptureSchemaProperty(field, 'optional');
+        if (typeof optional !== 'boolean') failPullRequestCapture();
+        fieldOptional = optional;
+      }
+      const entry = ownPullRequestDataValue(source, key);
+      if (entry === missingPullRequestOwnData) failPullRequestCapture();
+      if (entry === undefined && fieldOptional) continue;
+      objectDefineProperty(snapshot, key, {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: capturePullRequestNode(entry, fieldSchema, state, depth + 1),
+      });
+    }
+    if (kind === 'record') {
+      const fieldKeys = reflectOwnKeys(fields!);
+      const fieldKeyCount = hostArrayLength(fieldKeys);
+      if (fieldKeyCount === undefined) failPullRequestCapture();
+      for (let keyIndex = 0; keyIndex < fieldKeyCount; keyIndex += 1) {
+        const key = hostArrayDataValue<PropertyKey>(fieldKeys, keyIndex);
+        if (typeof key !== 'string') failPullRequestCapture();
+        const field = asPullRequestCaptureSchemaRecord(
+          ownPullRequestDataValue(fields!, key)
+        );
+        const optional = pullRequestCaptureSchemaProperty(field, 'optional');
+        if (typeof optional !== 'boolean') failPullRequestCapture();
+        if (!optional && !seen.has(key)) failPullRequestCapture();
+      }
+    }
+    return objectFreeze(snapshot);
+  } finally {
+    state.active.delete(source);
+  }
+}
+
+function capturePullRequestNode(
+  value: unknown,
+  schema: PullRequestCaptureSchema,
+  state: PullRequestCaptureState,
+  depth: number
+): unknown {
+  const kind = pullRequestCaptureSchemaProperty<
+    PullRequestCaptureSchema['kind']
+  >(schema, 'kind');
+  if (kind === 'discriminated') {
+    const source = guardedPullRequestRecord(value);
+    const field = pullRequestCaptureSchemaProperty(schema, 'field');
+    if (typeof field !== 'string') failPullRequestCapture();
+    const variants = asPullRequestCaptureSchemaRecord(
+      pullRequestCaptureSchemaProperty(schema, 'variants')
+    );
+    const fallback = asPullRequestCaptureSchema(
+      pullRequestCaptureSchemaProperty(schema, 'fallback')
+    );
+    const discriminator = ownPullRequestDataValue(source, field);
+    const selected =
+      discriminator !== missingPullRequestOwnData &&
+      typeof discriminator === 'string'
+        ? ownPullRequestDataValue(variants, discriminator)
+        : missingPullRequestOwnData;
+    return capturePullRequestNode(
+      value,
+      selected === missingPullRequestOwnData
+        ? fallback
+        : asPullRequestCaptureSchema(selected),
+      state,
+      depth
+    );
+  }
+
+  accountPullRequestCapture(state, value, depth);
+  switch (kind) {
+    case 'scalar':
+      if (
+        value === null ||
+        typeof value === 'string' ||
+        typeof value === 'number' ||
+        typeof value === 'boolean'
+      ) {
+        return value;
+      }
+      return failPullRequestCapture();
+    case 'reject':
+      return failPullRequestCapture();
+    case 'boolean':
+      return typeof value === 'boolean' ? value : failPullRequestCapture();
+    case 'array':
+      return capturePullRequestArray(value, schema, state, depth);
+    case 'record':
+    case 'dictionary':
+      return capturePullRequestRecord(value, schema, state, depth);
+  }
+}
+
+/**
+ * Total host-owned structural capture for every public PR success value. It
+ * never uses ordinary property reads, iteration, coercion, or source methods.
+ * Aliases are copied per occurrence; active cycles are rejected.
+ */
+function capturePullRequestPublicStructure(
+  value: unknown,
+  schemaName: PullRequestCaptureSchemaName
+): PullRequestCaptureResult {
+  try {
+    const schema = ownPullRequestDataValue(
+      pullRequestCaptureSchemas,
+      schemaName
+    );
+    if (schema === missingPullRequestOwnData) failPullRequestCapture();
+    return {
+      ok: true,
+      value: capturePullRequestNode(
+        value,
+        asPullRequestCaptureSchema(schema),
+        { active: new WeakSet<object>(), nodes: 0, stringUnits: 0 },
+        0
+      ),
+    };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function guardPullRequestOperationValidation<
+  A,
+  TOperation extends PullRequestProviderOperationName,
+>(
+  validation: Effect.Effect<
+    A,
+    InvalidPullRequestProviderOperationResultError<TOperation>
+  >,
+  invalid: () => InvalidPullRequestProviderOperationResultError<TOperation>
+): Effect.Effect<
+  A,
+  InvalidPullRequestProviderOperationResultError<TOperation>
+> {
+  // Validation runs only on a detached host snapshot. Map its Fail leaves to
+  // the one admitted host error type while retaining every Sequential,
+  // Parallel, Die and Interrupt node exactly.
+  return Effect.mapErrorCause(validation, (cause) =>
+    Cause.map(cause, (failure) =>
+      failure instanceof InvalidPullRequestProviderOperationResultError
+        ? failure
+        : invalid()
+    )
+  );
+}
+
+function retainPullRequestProviderCandidateEntry<
+  TMatch extends AidePullRequestProviderMatch,
+>(
+  candidate: ResolvedPullRequestProviderCandidate<TMatch>,
+  entry: PluginCapability<AidePullRequestProviderCapability>
+): ResolvedPullRequestProviderCandidate<TMatch> {
+  pullRequestProviderCandidateEntries.set(candidate, entry);
+  return candidate;
+}
 
 function candidateSummary<TMatch extends AidePullRequestProviderMatch>(
   resolved: ResolvedPullRequestProvider<TMatch>
@@ -293,27 +1704,37 @@ function candidateSummary<TMatch extends AidePullRequestProviderMatch>(
 }
 
 function repositoryRefValue(repository: AidePullRequestRepositoryRef): string {
+  let value: string;
   switch (repository.kind) {
     case 'github':
-      return `${repository.host}/${repository.owner}/${repository.repo}`;
+      value = `${repository.host}/${repository.owner}/${repository.repo}`;
+      break;
     case 'azure-devops':
-      return `${repository.org}/${repository.project}/${repository.repo}`;
+      value = `${repository.org}/${repository.project}/${repository.repo}`;
+      break;
     case 'external':
-      return repository.displayName;
+      value = repository.displayName;
+      break;
   }
+  return describePullRequestProviderLookup('repository-ref', value);
 }
 
 function repositoryInputValue(input: AidePullRequestRepositoryInput): string {
-  return [
-    input.providerId === undefined ? undefined : `provider=${input.providerId}`,
-    input.host === undefined ? undefined : `host=${input.host}`,
-    input.owner === undefined ? undefined : `owner=${input.owner}`,
-    input.org === undefined ? undefined : `org=${input.org}`,
-    input.project === undefined ? undefined : `project=${input.project}`,
-    input.repo === undefined ? undefined : `repo=${input.repo}`,
-  ]
-    .filter((part): part is string => part !== undefined)
-    .join(' ');
+  return describePullRequestProviderLookup(
+    'repository-ref',
+    [
+      input.providerId === undefined
+        ? undefined
+        : `provider=${input.providerId}`,
+      input.host === undefined ? undefined : `host=${input.host}`,
+      input.owner === undefined ? undefined : `owner=${input.owner}`,
+      input.org === undefined ? undefined : `org=${input.org}`,
+      input.project === undefined ? undefined : `project=${input.project}`,
+      input.repo === undefined ? undefined : `repo=${input.repo}`,
+    ]
+      .filter((part): part is string => part !== undefined)
+      .join(' ')
+  );
 }
 
 function repositoryRefProviderId(
@@ -333,6 +1754,73 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null;
 }
 
+const invalidPullRequestArrayShape = Symbol('invalidPullRequestArrayShape');
+const invalidPullRequestArrayEntry = Symbol('invalidPullRequestArrayEntry');
+
+function snapshotOwnDenseArray<T>(
+  value: unknown,
+  snapshotEntry: (entry: unknown, index: number) => T | null
+):
+  | readonly T[]
+  | typeof invalidPullRequestArrayShape
+  | typeof invalidPullRequestArrayEntry {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    isNodeProxy(value) ||
+    !arrayIsArray(value) ||
+    reflectGetPrototypeOf(value) !== Array.prototype
+  ) {
+    return invalidPullRequestArrayShape;
+  }
+
+  const source = value as object;
+  const length = ownPullRequestDataValue(source, 'length');
+  if (
+    length === missingPullRequestOwnData ||
+    typeof length !== 'number' ||
+    !Number.isSafeInteger(length) ||
+    length < 0
+  ) {
+    return invalidPullRequestArrayShape;
+  }
+  const keys = reflectOwnKeys(source);
+  const keyCount = hostArrayLength(keys);
+  if (keyCount === undefined || keyCount !== length + 1) {
+    return invalidPullRequestArrayShape;
+  }
+
+  const snapshot: T[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const entry = ownPullRequestDataValue(source, String(index));
+    if (entry === missingPullRequestOwnData) {
+      return invalidPullRequestArrayShape;
+    }
+    const captured = snapshotEntry(entry, index);
+    if (captured === null) return invalidPullRequestArrayEntry;
+    definePullRequestArrayEntry(snapshot, index, captured);
+  }
+  return objectFreeze(snapshot);
+}
+
+function snapshotStringArray(value: unknown): readonly string[] | null {
+  const snapshot = snapshotOwnDenseArray(value, (entry) =>
+    typeof entry === 'string' ? entry : null
+  );
+  return snapshot === invalidPullRequestArrayShape ||
+    snapshot === invalidPullRequestArrayEntry
+    ? null
+    : snapshot;
+}
+
+function snapshotRequiredStringArray(
+  value: readonly string[]
+): readonly string[] {
+  const snapshot = snapshotStringArray(value);
+  if (snapshot === null) throw new TypeError('Invalid host string array');
+  return snapshot;
+}
+
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
@@ -349,7 +1837,7 @@ function hasOwn(
   value: Readonly<Record<string, unknown>>,
   property: string
 ): boolean {
-  return Object.prototype.hasOwnProperty.call(value, property);
+  return objectHasOwn(value, property);
 }
 
 function optionalNonEmptyString(value: unknown): string | undefined | null {
@@ -388,7 +1876,14 @@ function snapshotRepositoryInput(
     ...(repo === undefined ? {} : { repo }),
   };
 
-  return Object.keys(snapshot).length === 0 ? null : Object.freeze(snapshot);
+  return providerId === undefined &&
+    host === undefined &&
+    owner === undefined &&
+    org === undefined &&
+    project === undefined &&
+    repo === undefined
+    ? null
+    : objectFreeze(snapshot);
 }
 
 function snapshotRepositoryMetadata(
@@ -397,8 +1892,18 @@ function snapshotRepositoryMetadata(
   if (value === undefined) return undefined;
   if (!isRecord(value)) return null;
 
-  const snapshot: Record<string, string | number | boolean> = {};
-  for (const [key, entry] of Object.entries(value)) {
+  const snapshot = objectCreate(null) as Record<
+    string,
+    string | number | boolean
+  >;
+  const keys = reflectOwnKeys(value);
+  const keyCount = hostArrayLength(keys);
+  if (keyCount === undefined) return null;
+  for (let keyIndex = 0; keyIndex < keyCount; keyIndex += 1) {
+    const key = hostArrayDataValue<PropertyKey>(keys, keyIndex);
+    if (typeof key !== 'string') return null;
+    const entry = ownPullRequestDataValue(value, key);
+    if (entry === missingPullRequestOwnData) return null;
     if (
       typeof entry !== 'string' &&
       typeof entry !== 'boolean' &&
@@ -406,10 +1911,15 @@ function snapshotRepositoryMetadata(
     ) {
       return null;
     }
-    snapshot[key] = entry;
+    objectDefineProperty(snapshot, key, {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: entry,
+    });
   }
 
-  return Object.freeze(snapshot);
+  return objectFreeze(snapshot);
 }
 
 function snapshotRepositoryRef(
@@ -506,13 +2016,36 @@ function repositoryMetadataMatches(
     { kind: 'external' }
   >['metadata']
 ): boolean {
-  const actualEntries = Object.entries(actual ?? {});
-  const expectedEntries = Object.entries(expected ?? {});
-  if (actualEntries.length !== expectedEntries.length) {
+  const actualRecord = actual ?? objectCreate(null);
+  const expectedRecord = expected ?? objectCreate(null);
+  const actualKeys = reflectOwnKeys(actualRecord);
+  const expectedKeys = reflectOwnKeys(expectedRecord);
+  const actualKeyCount = hostArrayLength(actualKeys);
+  const expectedKeyCount = hostArrayLength(expectedKeys);
+  if (
+    actualKeyCount === undefined ||
+    expectedKeyCount === undefined ||
+    actualKeyCount !== expectedKeyCount
+  ) {
     return false;
   }
 
-  return actualEntries.every(([key, value]) => expected?.[key] === value);
+  for (let index = 0; index < actualKeyCount; index += 1) {
+    const key = ownPullRequestDataValue(actualKeys, String(index));
+    if (key === missingPullRequestOwnData || typeof key !== 'string') {
+      return false;
+    }
+    const actualValue = ownPullRequestDataValue(actualRecord, key);
+    const expectedValue = ownPullRequestDataValue(expectedRecord, key);
+    if (
+      actualValue === missingPullRequestOwnData ||
+      expectedValue === missingPullRequestOwnData ||
+      actualValue !== expectedValue
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function snapshotPullRequestRef(value: unknown): AidePullRequestRef | null {
@@ -619,6 +2152,8 @@ function snapshotPullRequestViewItem(
   const sourceBranch = value.sourceBranch;
   const targetBranch = value.targetBranch;
   const labels = value.labels;
+  const labelSnapshots =
+    labels === undefined ? undefined : snapshotStringArray(labels);
 
   if (sourceBranch !== undefined && typeof sourceBranch !== 'string') {
     return null;
@@ -626,11 +2161,7 @@ function snapshotPullRequestViewItem(
   if (targetBranch !== undefined && typeof targetBranch !== 'string') {
     return null;
   }
-  if (
-    labels !== undefined &&
-    (!Array.isArray(labels) ||
-      labels.some((label) => typeof label !== 'string'))
-  ) {
+  if (labelSnapshots === null) {
     return null;
   }
 
@@ -638,7 +2169,7 @@ function snapshotPullRequestViewItem(
     ...base,
     ...(sourceBranch === undefined ? {} : { sourceBranch }),
     ...(targetBranch === undefined ? {} : { targetBranch }),
-    ...(labels === undefined ? {} : { labels: Object.freeze([...labels]) }),
+    ...(labelSnapshots === undefined ? {} : { labels: labelSnapshots }),
   });
 }
 
@@ -851,17 +2382,15 @@ function snapshotPullRequestCommentThread(
   if (root === null) {
     return null;
   }
-  if (!Array.isArray(value.replies)) {
+  const replies = snapshotOwnDenseArray(
+    value.replies,
+    snapshotPullRequestComment
+  );
+  if (
+    replies === invalidPullRequestArrayShape ||
+    replies === invalidPullRequestArrayEntry
+  ) {
     return null;
-  }
-
-  const replies: AidePullRequestComment[] = [];
-  for (const reply of value.replies) {
-    const snapshot = snapshotPullRequestComment(reply);
-    if (snapshot === null) {
-      return null;
-    }
-    replies.push(snapshot);
   }
 
   if (root === undefined && replies.length === 0) {
@@ -874,7 +2403,7 @@ function snapshotPullRequestCommentThread(
     ...(filePath === undefined ? {} : { filePath }),
     ...(lineNumber === undefined ? {} : { lineNumber }),
     ...(root === undefined ? {} : { rootComment: root }),
-    replies: Object.freeze(replies),
+    replies,
   });
 }
 
@@ -890,10 +2419,6 @@ function snapshotPullRequestCommentPosition(
   });
 }
 
-function snapshotStringArray(value: readonly string[]): readonly string[] {
-  return Object.freeze([...value]);
-}
-
 function validatePullRequestListResult(
   provider: ResolvedPullRequestProviderCandidate<
     AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
@@ -901,11 +2426,11 @@ function validatePullRequestListResult(
   result: unknown
 ): Effect.Effect<
   AidePullRequestListResult,
-  InvalidPullRequestProviderOperationResultError
+  InvalidPullRequestProviderOperationResultError<'listPullRequests'>
 > {
   const invalid = (reason: string) =>
     Effect.fail(
-      new InvalidPullRequestProviderOperationResultError({
+      hostInvalidPullRequestProviderOperationResultError({
         pluginId: provider.pluginId,
         providerId: provider.providerId,
         operation: 'listPullRequests',
@@ -924,29 +2449,27 @@ function validatePullRequestListResult(
   if (!repositoryRefsMatch(repository, provider.match.repository)) {
     return invalid('repository ref does not match selected provider match');
   }
-  if (!Array.isArray(result.pullRequests)) {
-    return invalid('pullRequests must be an array');
-  }
-
   const repositoryLabel = result.repositoryLabel;
   if (repositoryLabel !== undefined && typeof repositoryLabel !== 'string') {
     return invalid('repositoryLabel must be a string');
   }
 
-  const pullRequests: AidePullRequestListItem[] = [];
-  for (const item of result.pullRequests) {
-    const snapshot = snapshotPullRequestListItem(item);
-    if (snapshot === null) {
-      return invalid('invalid pull request item');
-    }
-    pullRequests.push(snapshot);
+  const pullRequests = snapshotOwnDenseArray(
+    result.pullRequests,
+    snapshotPullRequestListItem
+  );
+  if (pullRequests === invalidPullRequestArrayShape) {
+    return invalid('invalid pull request item array');
+  }
+  if (pullRequests === invalidPullRequestArrayEntry) {
+    return invalid('invalid pull request item');
   }
 
   return Effect.succeed(
     Object.freeze({
       repository,
       ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
-      pullRequests: Object.freeze(pullRequests),
+      pullRequests,
     })
   );
 }
@@ -957,11 +2480,11 @@ function validatePullRequestViewResult(
   result: unknown
 ): Effect.Effect<
   AidePullRequestViewResult,
-  InvalidPullRequestProviderOperationResultError
+  InvalidPullRequestProviderOperationResultError<'getPullRequest'>
 > {
   const invalid = (reason: string) =>
     Effect.fail(
-      new InvalidPullRequestProviderOperationResultError({
+      hostInvalidPullRequestProviderOperationResultError({
         pluginId: provider.pluginId,
         providerId: provider.providerId,
         operation: 'getPullRequest',
@@ -1010,11 +2533,11 @@ function validatePullRequestCreateResult(
   result: unknown
 ): Effect.Effect<
   AidePullRequestCreateResult,
-  InvalidPullRequestProviderOperationResultError
+  InvalidPullRequestProviderOperationResultError<'createPullRequest'>
 > {
   const invalid = (reason: string) =>
     Effect.fail(
-      new InvalidPullRequestProviderOperationResultError({
+      hostInvalidPullRequestProviderOperationResultError({
         pluginId: provider.pluginId,
         providerId: provider.providerId,
         operation: 'createPullRequest',
@@ -1045,11 +2568,9 @@ function validatePullRequestCreateResult(
   }
 
   const warnings = result.warnings;
-  if (
-    warnings !== undefined &&
-    (!Array.isArray(warnings) ||
-      warnings.some((warning) => typeof warning !== 'string'))
-  ) {
+  const warningSnapshots =
+    warnings === undefined ? undefined : snapshotStringArray(warnings);
+  if (warningSnapshots === null) {
     return invalid('warnings must be an array of strings');
   }
 
@@ -1058,9 +2579,7 @@ function validatePullRequestCreateResult(
       repository,
       ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
       pullRequest,
-      ...(warnings === undefined
-        ? {}
-        : { warnings: Object.freeze([...warnings]) }),
+      ...(warningSnapshots === undefined ? {} : { warnings: warningSnapshots }),
     })
   );
 }
@@ -1071,11 +2590,11 @@ function validatePullRequestUpdateResult(
   result: unknown
 ): Effect.Effect<
   AidePullRequestUpdateResult,
-  InvalidPullRequestProviderOperationResultError
+  InvalidPullRequestProviderOperationResultError<'updatePullRequest'>
 > {
   const invalid = (reason: string) =>
     Effect.fail(
-      new InvalidPullRequestProviderOperationResultError({
+      hostInvalidPullRequestProviderOperationResultError({
         pluginId: provider.pluginId,
         providerId: provider.providerId,
         operation: 'updatePullRequest',
@@ -1090,31 +2609,30 @@ function validatePullRequestUpdateResult(
       }
 
       const warnings = result.warnings;
-      if (
-        warnings !== undefined &&
-        (!Array.isArray(warnings) ||
-          warnings.some((warning) => typeof warning !== 'string'))
-      ) {
+      const warningSnapshots =
+        warnings === undefined ? undefined : snapshotStringArray(warnings);
+      if (warningSnapshots === null) {
         return invalid('warnings must be an array of strings');
       }
 
       return Effect.succeed(
         Object.freeze({
           ...viewResult,
-          ...(warnings === undefined
+          ...(warningSnapshots === undefined
             ? {}
-            : { warnings: Object.freeze([...warnings]) }),
+            : { warnings: warningSnapshots }),
         })
       );
     }),
-    Effect.mapError(
-      (error) =>
-        new InvalidPullRequestProviderOperationResultError({
+    Effect.mapErrorCause((cause) =>
+      Cause.map(cause, (error) =>
+        hostInvalidPullRequestProviderOperationResultError({
           pluginId: error.pluginId,
           providerId: error.providerId,
           operation: 'updatePullRequest',
           reason: error.reason,
         })
+      )
     )
   );
 }
@@ -1125,11 +2643,11 @@ function validatePullRequestDiffResult(
   result: unknown
 ): Effect.Effect<
   AidePullRequestDiffResult,
-  InvalidPullRequestProviderOperationResultError
+  InvalidPullRequestProviderOperationResultError<'getPullRequestDiff'>
 > {
   const invalid = (reason: string) =>
     Effect.fail(
-      new InvalidPullRequestProviderOperationResultError({
+      hostInvalidPullRequestProviderOperationResultError({
         pluginId: provider.pluginId,
         providerId: provider.providerId,
         operation: 'getPullRequestDiff',
@@ -1162,17 +2680,15 @@ function validatePullRequestDiffResult(
     return invalid('pull request id does not match selected pull request');
   }
 
-  if (!Array.isArray(result.files)) {
-    return invalid('files must be an array');
+  const files = snapshotOwnDenseArray(
+    result.files,
+    snapshotPullRequestDiffFile
+  );
+  if (files === invalidPullRequestArrayShape) {
+    return invalid('invalid diff file array');
   }
-
-  const files: AidePullRequestDiffFile[] = [];
-  for (const file of result.files) {
-    const snapshot = snapshotPullRequestDiffFile(file);
-    if (snapshot === null) {
-      return invalid('invalid diff file');
-    }
-    files.push(snapshot);
+  if (files === invalidPullRequestArrayEntry) {
+    return invalid('invalid diff file');
   }
 
   return Effect.succeed(
@@ -1180,7 +2696,7 @@ function validatePullRequestDiffResult(
       repository,
       ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
       pullRequest,
-      files: Object.freeze(files),
+      files,
     })
   );
 }
@@ -1191,11 +2707,11 @@ function validatePullRequestCommentsResult(
   result: unknown
 ): Effect.Effect<
   AidePullRequestCommentsResult,
-  InvalidPullRequestProviderOperationResultError
+  InvalidPullRequestProviderOperationResultError<'listPullRequestComments'>
 > {
   const invalid = (reason: string) =>
     Effect.fail(
-      new InvalidPullRequestProviderOperationResultError({
+      hostInvalidPullRequestProviderOperationResultError({
         pluginId: provider.pluginId,
         providerId: provider.providerId,
         operation: 'listPullRequestComments',
@@ -1228,17 +2744,15 @@ function validatePullRequestCommentsResult(
     return invalid('pull request id does not match selected pull request');
   }
 
-  if (!Array.isArray(result.threads)) {
-    return invalid('threads must be an array');
+  const threads = snapshotOwnDenseArray(
+    result.threads,
+    snapshotPullRequestCommentThread
+  );
+  if (threads === invalidPullRequestArrayShape) {
+    return invalid('invalid comment thread array');
   }
-
-  const threads: AidePullRequestCommentThread[] = [];
-  for (const thread of result.threads) {
-    const snapshot = snapshotPullRequestCommentThread(thread);
-    if (snapshot === null) {
-      return invalid('invalid comment thread');
-    }
-    threads.push(snapshot);
+  if (threads === invalidPullRequestArrayEntry) {
+    return invalid('invalid comment thread');
   }
 
   return Effect.succeed(
@@ -1246,24 +2760,26 @@ function validatePullRequestCommentsResult(
       repository,
       ...(repositoryLabel === undefined ? {} : { repositoryLabel }),
       pullRequest,
-      threads: Object.freeze(threads),
+      threads,
     })
   );
 }
 
-function validatePullRequestCommentMutationResult(
+function validatePullRequestCommentMutationResult<
+  TOperation extends 'addPullRequestComment' | 'replyToPullRequestComment',
+>(
   provider: ResolvedPullRequestProviderCandidate,
-  operation: 'addPullRequestComment' | 'replyToPullRequestComment',
+  operation: TOperation,
   request: Pick<AidePullRequestAddCommentRequest, 'pullRequest'> &
     Partial<Pick<AidePullRequestReplyCommentRequest, 'threadId'>>,
   result: unknown
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
-  InvalidPullRequestProviderOperationResultError
+  InvalidPullRequestProviderOperationResultError<TOperation>
 > {
   const invalid = (reason: string) =>
     Effect.fail(
-      new InvalidPullRequestProviderOperationResultError({
+      hostInvalidPullRequestProviderOperationResultError({
         pluginId: provider.pluginId,
         providerId: provider.providerId,
         operation,
@@ -1335,11 +2851,11 @@ function validatePullRequestBranchLookupResult(
   result: unknown
 ): Effect.Effect<
   AidePullRequestBranchLookupResult,
-  InvalidPullRequestProviderOperationResultError
+  InvalidPullRequestProviderOperationResultError<'findPullRequestForBranch'>
 > {
   const invalid = (reason: string) =>
     Effect.fail(
-      new InvalidPullRequestProviderOperationResultError({
+      hostInvalidPullRequestProviderOperationResultError({
         pluginId: provider.pluginId,
         providerId: provider.providerId,
         operation: 'findPullRequestForBranch',
@@ -1387,23 +2903,18 @@ function validatePullRequestBranchLookupResult(
   );
 }
 
-function validationFailureReason(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
-}
-
 function validationException(
   pluginId: string,
   capability: AidePullRequestProviderCapability,
   source: PullRequestProviderLookupSource,
-  value: string,
-  cause: unknown
+  value: string
 ): InvalidPullRequestProviderMatchError {
-  return new InvalidPullRequestProviderMatchError({
+  return hostInvalidPullRequestProviderMatchError({
     source,
     value,
     pluginId,
     providerId: capability.providerId,
-    reason: `match validation failed: ${validationFailureReason(cause)}`,
+    reason: 'match result failed structural capture',
   });
 }
 
@@ -1416,11 +2927,18 @@ function validateProviderMatchSafely<
   value: string,
   match: unknown
 ): Effect.Effect<TMatch, InvalidPullRequestProviderMatchError> {
+  const captured = capturePullRequestPublicStructure(match, 'match');
+  if (!captured.ok) {
+    return Effect.fail(
+      validationException(pluginId, capability, source, value)
+    );
+  }
+  match = captured.value;
+
   return Effect.try({
     try: () =>
       validateProviderMatch<TMatch>(pluginId, capability, source, value, match),
-    catch: (cause) =>
-      validationException(pluginId, capability, source, value, cause),
+    catch: () => validationException(pluginId, capability, source, value),
   }).pipe(Effect.flatMap((validation) => validation));
 }
 
@@ -1434,9 +2952,37 @@ function validateProviderPrioritySafely(
   return Effect.try({
     try: () =>
       validateProviderPriority(pluginId, capability, source, value, match),
-    catch: (cause) =>
-      validationException(pluginId, capability, source, value, cause),
+    catch: () => validationException(pluginId, capability, source, value),
   }).pipe(Effect.flatMap((validation) => validation));
+}
+
+function captureProviderFeaturesSafely(
+  pluginId: string,
+  capability: AidePullRequestProviderCapability,
+  source: PullRequestProviderLookupSource,
+  value: string
+): Effect.Effect<
+  AidePullRequestProviderFeatures,
+  InvalidPullRequestProviderMatchError
+> {
+  if (isNodeProxy(capability)) {
+    return Effect.fail(
+      validationException(pluginId, capability, source, value)
+    );
+  }
+  const descriptor = Reflect.getOwnPropertyDescriptor(capability, 'features');
+  if (descriptor === undefined || !objectHasOwn(descriptor, 'value')) {
+    return Effect.fail(
+      validationException(pluginId, capability, source, value)
+    );
+  }
+  const captured = capturePullRequestPublicStructure(
+    descriptor.value,
+    'features'
+  );
+  return captured.ok
+    ? Effect.succeed(captured.value as AidePullRequestProviderFeatures)
+    : Effect.fail(validationException(pluginId, capability, source, value));
 }
 
 function validateProviderMatch<TMatch extends AidePullRequestProviderMatch>(
@@ -1448,7 +2994,7 @@ function validateProviderMatch<TMatch extends AidePullRequestProviderMatch>(
 ): Effect.Effect<TMatch, InvalidPullRequestProviderMatchError> {
   const invalid = (reason: string) =>
     Effect.fail(
-      new InvalidPullRequestProviderMatchError({
+      hostInvalidPullRequestProviderMatchError({
         source,
         value,
         pluginId,
@@ -1464,9 +3010,7 @@ function validateProviderMatch<TMatch extends AidePullRequestProviderMatch>(
   const candidate = match;
   const candidateSource = candidate.source;
   if (candidateSource !== source) {
-    return invalid(
-      `expected source '${source}' but got '${String(candidateSource)}'`
-    );
+    return invalid(`expected source '${source}'`);
   }
 
   if (!hasOwn(candidate, 'repository')) {
@@ -1537,7 +3081,7 @@ function validateProviderPriority(
   const candidate = match as unknown as Readonly<Record<string, unknown>>;
   if (!isFiniteNumber(capability.priority)) {
     return Effect.fail(
-      new InvalidPullRequestProviderMatchError({
+      hostInvalidPullRequestProviderMatchError({
         source,
         value,
         pluginId,
@@ -1552,7 +3096,7 @@ function validateProviderPriority(
 
   if (!isFiniteNumber(priority)) {
     return Effect.fail(
-      new InvalidPullRequestProviderMatchError({
+      hostInvalidPullRequestProviderMatchError({
         source,
         value,
         pluginId,
@@ -1566,7 +3110,7 @@ function validateProviderPriority(
 }
 
 function collectMatches<TMatch extends AidePullRequestProviderMatch>(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   source: PullRequestProviderLookupSource,
   value: string,
   match: (capability: AidePullRequestProviderCapability) => TMatch | null,
@@ -1582,22 +3126,31 @@ function collectMatches<TMatch extends AidePullRequestProviderMatch>(
 > {
   return Effect.forEach(
     providers,
-    ({ pluginId, capability }) => {
-      const providerMatch = Effect.try({
-        try: () => match(capability) as unknown,
-        catch: (cause) =>
-          new PullRequestProviderInvocationError({
-            source,
-            value,
-            pluginId,
-            providerId: capability.providerId,
-            cause,
-          }),
-      }).pipe(
+    (entry) => {
+      const { pluginId, capability } = entry;
+      const callbackFailureReason =
+        source === 'git-remote'
+          ? 'matchRemote callback threw'
+          : 'matchPullRequestUrl callback threw';
+      const providerMatch = isolatePublicCapabilityEffect(
+        Effect.try({
+          try: () => match(capability) as unknown,
+          catch: () =>
+            hostPullRequestProviderInvocationError({
+              source,
+              value,
+              pluginId,
+              providerId: capability.providerId,
+              cause: hostPullRequestProviderMatcherFailureCause(
+                callbackFailureReason
+              ),
+            }),
+        })
+      ).pipe(
         Effect.timeoutFail({
           duration: options.matcherTimeout ?? defaultMatcherTimeout,
           onTimeout: () =>
-            new PullRequestProviderTimeoutError({
+            hostPullRequestProviderTimeoutError({
               source,
               value,
               pluginId,
@@ -1627,16 +3180,28 @@ function collectMatches<TMatch extends AidePullRequestProviderMatch>(
                 value,
                 validMatch
               ).pipe(
-                Effect.map((priority) => [
-                  {
+                Effect.flatMap((priority) =>
+                  captureProviderFeaturesSafely(
                     pluginId,
-                    providerId: capability.providerId,
                     capability,
-                    features: capability.features,
-                    match: validMatch,
-                    priority,
-                  },
-                ])
+                    source,
+                    value
+                  ).pipe(
+                    Effect.map((features) => [
+                      retainPullRequestProviderCandidateEntry(
+                        {
+                          pluginId,
+                          providerId: capability.providerId,
+                          capability,
+                          features,
+                          match: validMatch,
+                          priority,
+                        },
+                        entry
+                      ),
+                    ])
+                  )
+                )
               )
             )
           );
@@ -1644,7 +3209,7 @@ function collectMatches<TMatch extends AidePullRequestProviderMatch>(
       );
     },
     { concurrency: 'unbounded' }
-  ).pipe(Effect.map((matches) => matches.flat()));
+  ).pipe(Effect.map(flattenHostArrayGroups));
 }
 
 function selectProvider<TMatch extends AidePullRequestProviderMatch>(
@@ -1656,31 +3221,35 @@ function selectProvider<TMatch extends AidePullRequestProviderMatch>(
   ResolvedPullRequestProviderCandidate<TMatch>,
   PullRequestProviderResolutionError
 > {
-  if (matches.length === 0) {
+  if ((hostArrayLength(matches) ?? 0) === 0) {
     return Effect.fail(
-      new UnsupportedPullRequestProviderError({ source, value })
+      hostUnsupportedPullRequestProviderError({ source, value })
     );
   }
 
   const preferredMatches =
-    options.preferred === undefined ? [] : matches.filter(options.preferred);
-  const selectable = preferredMatches.length > 0 ? preferredMatches : matches;
-  const sorted = [...selectable].sort((a, b) => b.priority - a.priority);
-  const winner = sorted[0];
+    options.preferred === undefined
+      ? []
+      : filterHostArray(matches, options.preferred);
+  const selectable =
+    (hostArrayLength(preferredMatches) ?? 0) > 0 ? preferredMatches : matches;
+  const { winner, tied } = selectHighestPriorityHostArray(
+    selectable,
+    (candidate) => candidate.priority
+  );
   if (winner === undefined) {
     return Effect.fail(
-      new UnsupportedPullRequestProviderError({ source, value })
+      hostUnsupportedPullRequestProviderError({ source, value })
     );
   }
 
-  const tied = sorted.filter((match) => match.priority === winner.priority);
-  if (tied.length > 1) {
+  if ((hostArrayLength(tied) ?? 0) > 1) {
     return Effect.fail(
-      new AmbiguousPullRequestProviderError({
+      hostAmbiguousPullRequestProviderError({
         source,
         value,
         priority: winner.priority,
-        candidates: tied.map(candidateSummary),
+        candidates: mapHostArray(tied, candidateSummary),
       })
     );
   }
@@ -1749,7 +3318,7 @@ function bindProviderOperationContext<
 }
 
 function selectProviderCandidate<TMatch extends AidePullRequestProviderMatch>(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   source: PullRequestProviderLookupSource,
   value: string,
   match: (capability: AidePullRequestProviderCapability) => TMatch | null,
@@ -1758,15 +3327,18 @@ function selectProviderCandidate<TMatch extends AidePullRequestProviderMatch>(
   ResolvedPullRequestProviderCandidate<TMatch>,
   PullRequestProviderResolutionError
 > {
-  return collectMatches(providers, source, value, match, options).pipe(
-    Effect.flatMap((matches) => selectProvider(matches, source, value, options))
+  const descriptor = describePullRequestProviderLookup(source, value);
+  return collectMatches(providers, source, descriptor, match, options).pipe(
+    Effect.flatMap((matches) =>
+      selectProvider(matches, source, descriptor, options)
+    )
   );
 }
 
 function selectProviderCandidateForOperation<
   TMatch extends AidePullRequestProviderMatch,
 >(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   source: PullRequestProviderLookupSource,
   value: string,
   match: (capability: AidePullRequestProviderCapability) => TMatch | null,
@@ -1778,13 +3350,16 @@ function selectProviderCandidateForOperation<
   ResolvedPullRequestProviderCandidate<TMatch>,
   PullRequestProviderResolutionError
 > {
-  return collectMatches(providers, source, value, match, options).pipe(
+  const descriptor = describePullRequestProviderLookup(source, value);
+  return collectMatches(providers, source, descriptor, match, options).pipe(
     Effect.flatMap((matches) => {
-      const operationMatches = matches.filter(hasOperation);
+      const operationMatches = filterHostArray(matches, hasOperation);
       return selectProvider(
-        operationMatches.length > 0 ? operationMatches : matches,
+        (hostArrayLength(operationMatches) ?? 0) > 0
+          ? operationMatches
+          : matches,
         source,
-        value,
+        descriptor,
         options
       );
     })
@@ -1811,63 +3386,70 @@ function invokeRepositoryMatcher(
     return Effect.succeed(null);
   }
 
-  return Effect.suspend(
-    (): Effect.Effect<
-      AidePullRequestRepositoryMatch | null,
-      InvalidPullRequestProviderMatchError | PullRequestProviderInvocationError,
-      never
-    > => {
-      let matcherResult: unknown;
-      try {
-        matcherResult = matchRepository(request);
-      } catch (cause) {
-        return Effect.fail(
-          new PullRequestProviderInvocationError({
-            source: 'repository-ref',
-            value,
-            pluginId,
-            providerId: capability.providerId,
-            cause,
-          })
-        );
-      }
+  const invalidMatch = (reason: string) =>
+    hostInvalidPullRequestProviderMatchError({
+      source: 'repository-ref',
+      value,
+      pluginId,
+      providerId: capability.providerId,
+      reason,
+    });
 
-      if (!Effect.isEffect(matcherResult)) {
-        return Effect.fail(
-          new InvalidPullRequestProviderMatchError({
-            source: 'repository-ref',
-            value,
-            pluginId,
-            providerId: capability.providerId,
-            reason: 'matchRepository must return an Effect',
-          })
-        );
-      }
-
-      return (
-        matcherResult as Effect.Effect<
-          AidePullRequestRepositoryMatch | null,
-          unknown,
-          never
-        >
-      ).pipe(
-        Effect.mapError(
-          (cause) =>
-            new PullRequestProviderInvocationError({
+  return invokePublicCapabilityEffect<
+    AidePullRequestRepositoryMatch | null,
+    unknown,
+    AidePullRequestRepositoryMatch | null,
+    InvalidPullRequestProviderMatchError | PullRequestProviderInvocationError,
+    InvalidPullRequestProviderMatchError | PullRequestProviderInvocationError
+  >(
+    () => matchRepository(request),
+    {
+      onCallbackThrow: () =>
+        hostPullRequestProviderInvocationError({
+          source: 'repository-ref',
+          value,
+          pluginId,
+          providerId: capability.providerId,
+          cause: hostPullRequestProviderMatcherFailureCause(
+            'matchRepository callback threw'
+          ),
+        }),
+      onInvalidReturn: () =>
+        invalidMatch('matchRepository must return an Effect'),
+      onCompositionFailure: () =>
+        invalidMatch('matchRepository Effect composition failed'),
+      onLaunchFailure: () =>
+        invalidMatch('matchRepository Effect execution was invalid'),
+    },
+    (effect) =>
+      Effect.flatMap(
+        Effect.mapErrorCause(effect, (cause) =>
+          Cause.map(cause, (failure) =>
+            hostPullRequestProviderInvocationError({
               source: 'repository-ref',
               value,
               pluginId,
               providerId: capability.providerId,
-              cause,
+              cause: failure,
             })
-        )
-      );
-    }
+          )
+        ),
+        (matchResult) =>
+          matchResult === null
+            ? Effect.succeed(null)
+            : validateProviderMatchSafely<AidePullRequestRepositoryMatch>(
+                pluginId,
+                capability,
+                'repository-ref',
+                value,
+                matchResult
+              )
+      )
   ).pipe(
     Effect.timeoutFail({
       duration: options.matcherTimeout ?? defaultMatcherTimeout,
       onTimeout: () =>
-        new PullRequestProviderTimeoutError({
+        hostPullRequestProviderTimeoutError({
           source: 'repository-ref',
           value,
           pluginId,
@@ -1878,7 +3460,7 @@ function invokeRepositoryMatcher(
 }
 
 function collectRepositoryInputMatches(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   input: AidePullRequestRepositoryInput,
   options: Pick<
     PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch>,
@@ -1897,7 +3479,7 @@ function collectRepositoryInputMatches(
       : repositoryInputValue(request);
   if (request === null) {
     return Effect.fail(
-      new InvalidPullRequestProviderMatchError({
+      hostInvalidPullRequestProviderMatchError({
         source: 'repository-ref',
         value,
         pluginId: 'host',
@@ -1909,7 +3491,8 @@ function collectRepositoryInputMatches(
 
   return Effect.forEach(
     providers,
-    ({ pluginId, capability }) => {
+    (entry) => {
+      const { pluginId, capability } = entry;
       if (
         request.providerId !== undefined &&
         capability.providerId !== request.providerId
@@ -1929,30 +3512,32 @@ function collectRepositoryInputMatches(
             return Effect.succeed([]);
           }
 
-          return validateProviderMatchSafely<AidePullRequestRepositoryMatch>(
+          return validateProviderPrioritySafely(
             pluginId,
             capability,
             'repository-ref',
             value,
             matchResult
           ).pipe(
-            Effect.flatMap((validMatch) =>
-              validateProviderPrioritySafely(
+            Effect.flatMap((priority) =>
+              captureProviderFeaturesSafely(
                 pluginId,
                 capability,
                 'repository-ref',
-                value,
-                validMatch
+                value
               ).pipe(
-                Effect.map((priority) => [
-                  {
-                    pluginId,
-                    providerId: capability.providerId,
-                    capability,
-                    features: capability.features,
-                    match: validMatch,
-                    priority,
-                  },
+                Effect.map((features) => [
+                  retainPullRequestProviderCandidateEntry(
+                    {
+                      pluginId,
+                      providerId: capability.providerId,
+                      capability,
+                      features,
+                      match: matchResult,
+                      priority,
+                    },
+                    entry
+                  ),
                 ])
               )
             )
@@ -1961,11 +3546,11 @@ function collectRepositoryInputMatches(
       );
     },
     { concurrency: 'unbounded' }
-  ).pipe(Effect.map((matches) => matches.flat()));
+  ).pipe(Effect.map(flattenHostArrayGroups));
 }
 
 function selectProviderCandidateForRepositoryInput(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   input: AidePullRequestRepositoryInput,
   options: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch> = {}
 ): Effect.Effect<
@@ -1985,7 +3570,7 @@ function selectProviderCandidateForRepositoryInput(
 }
 
 function collectRepositoryRefMatches(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repositoryRef: AidePullRequestRepositoryRef
 ): Effect.Effect<
   ResolvedPullRequestProviderCandidate<AidePullRequestRepositoryMatch>[],
@@ -1998,7 +3583,7 @@ function collectRepositoryRefMatches(
       : repositoryRefValue(repository);
   if (repository === null) {
     return Effect.fail(
-      new InvalidPullRequestProviderMatchError({
+      hostInvalidPullRequestProviderMatchError({
         source: 'repository-ref',
         value,
         pluginId: 'host',
@@ -2009,7 +3594,8 @@ function collectRepositoryRefMatches(
   }
 
   const expectedProviderId = repositoryRefProviderId(repository);
-  return Effect.forEach(providers, ({ pluginId, capability }) => {
+  return Effect.forEach(providers, (entry) => {
+    const { pluginId, capability } = entry;
     if (capability.providerId !== expectedProviderId) {
       return Effect.succeed([]);
     }
@@ -2025,22 +3611,34 @@ function collectRepositoryRefMatches(
       value,
       match
     ).pipe(
-      Effect.map((priority) => [
-        {
+      Effect.flatMap((priority) =>
+        captureProviderFeaturesSafely(
           pluginId,
-          providerId: capability.providerId,
           capability,
-          features: capability.features,
-          match,
-          priority,
-        },
-      ])
+          'repository-ref',
+          value
+        ).pipe(
+          Effect.map((features) => [
+            retainPullRequestProviderCandidateEntry(
+              {
+                pluginId,
+                providerId: capability.providerId,
+                capability,
+                features,
+                match,
+                priority,
+              },
+              entry
+            ),
+          ])
+        )
+      )
     );
-  }).pipe(Effect.map((matches) => matches.flat()));
+  }).pipe(Effect.map(flattenHostArrayGroups));
 }
 
 function selectProviderCandidateForRepository(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   options: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch> = {}
 ): Effect.Effect<
@@ -2059,7 +3657,7 @@ function selectProviderCandidateForRepository(
 }
 
 function selectProviderCandidateForRepositoryOperation(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   hasOperation: (
     provider: ResolvedPullRequestProviderCandidate<AidePullRequestRepositoryMatch>
@@ -2075,9 +3673,11 @@ function selectProviderCandidateForRepositoryOperation(
       : repositoryRefValue(repository);
   return collectRepositoryRefMatches(providers, repository).pipe(
     Effect.flatMap((matches) => {
-      const operationMatches = matches.filter(hasOperation);
+      const operationMatches = filterHostArray(matches, hasOperation);
       return selectProvider(
-        operationMatches.length > 0 ? operationMatches : matches,
+        (hostArrayLength(operationMatches) ?? 0) > 0
+          ? operationMatches
+          : matches,
         'repository-ref',
         value,
         options
@@ -2087,7 +3687,7 @@ function selectProviderCandidateForRepositoryOperation(
 }
 
 export function resolvePullRequestProviderForRemote(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   options: PullRequestProviderResolutionOptions<AidePullRequestRemoteMatch> = {}
 ): Effect.Effect<
@@ -2104,7 +3704,7 @@ export function resolvePullRequestProviderForRemote(
 }
 
 export function resolvePullRequestProviderForUrl(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
   options: PullRequestProviderResolutionOptions<AidePullRequestUrlMatch> = {}
 ): Effect.Effect<
@@ -2121,7 +3721,7 @@ export function resolvePullRequestProviderForUrl(
 }
 
 export function resolvePullRequestProviderForRepository(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   options: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch> = {}
 ): Effect.Effect<
@@ -2136,7 +3736,7 @@ export function resolvePullRequestProviderForRepository(
 }
 
 export function resolvePullRequestProviderForRepositoryInput(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   input: AidePullRequestRepositoryInput,
   options: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch> = {}
 ): Effect.Effect<
@@ -2150,22 +3750,36 @@ export function resolvePullRequestProviderForRepositoryInput(
   ).pipe(Effect.map(stripProviderCapability));
 }
 
-function invokePullRequestProviderOperation<A, I>(
+function invokePullRequestProviderOperation<
+  A,
+  B,
+  I,
+  TOperation extends PullRequestOperationCaptureSchemaName,
+>(
   provider: ResolvedPullRequestProviderCandidate,
-  operationName: string,
+  operationName: TOperation,
+  deadlineError: (
+    args: OperationArgs<TOperation>
+  ) => PullRequestProviderOperationDeadlineError<TOperation>,
   operation: ((request: I) => Effect.Effect<A, unknown, never>) | undefined,
   request: I,
+  validate: (
+    result: A
+  ) => Effect.Effect<
+    B,
+    InvalidPullRequestProviderOperationResultError<TOperation>
+  >,
   options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
 ): Effect.Effect<
-  A,
-  | UnsupportedPullRequestProviderOperationError
-  | InvalidPullRequestProviderOperationResultError
-  | PullRequestProviderOperationError
-  | PullRequestProviderOperationTimeoutError
+  B,
+  | UnsupportedPullRequestProviderOperationError<TOperation>
+  | InvalidPullRequestProviderOperationResultError<TOperation>
+  | PullRequestProviderOperationError<TOperation>
+  | PullRequestProviderOperationDeadlineError<TOperation>
 > {
   if (operation === undefined) {
     return Effect.fail(
-      new UnsupportedPullRequestProviderOperationError({
+      hostUnsupportedPullRequestProviderOperationError({
         pluginId: provider.pluginId,
         providerId: provider.providerId,
         operation: operationName,
@@ -2173,61 +3787,86 @@ function invokePullRequestProviderOperation<A, I>(
     );
   }
 
-  return Effect.suspend(
-    (): Effect.Effect<
-      A,
-      | InvalidPullRequestProviderOperationResultError
-      | PullRequestProviderOperationError,
-      never
-    > => {
-      let operationResult: unknown;
-      try {
-        operationResult = operation(request);
-      } catch (cause) {
-        return Effect.fail(
-          new PullRequestProviderOperationError({
-            pluginId: provider.pluginId,
-            providerId: provider.providerId,
-            operation: operationName,
-            cause,
-          })
-        );
-      }
+  const invalidOperation = (reason: string) =>
+    hostInvalidPullRequestProviderOperationResultError({
+      pluginId: provider.pluginId,
+      providerId: provider.providerId,
+      operation: operationName,
+      reason,
+    });
 
-      if (!Effect.isEffect(operationResult)) {
-        return Effect.fail(
-          new InvalidPullRequestProviderOperationResultError({
-            pluginId: provider.pluginId,
-            providerId: provider.providerId,
-            operation: operationName,
-            reason: 'operation must return an Effect',
-          })
-        );
-      }
-
-      return (operationResult as Effect.Effect<A, unknown, never>).pipe(
-        Effect.mapError(
-          (cause) =>
-            new PullRequestProviderOperationError({
-              pluginId: provider.pluginId,
-              providerId: provider.providerId,
-              operation: operationName,
-              cause,
-            })
-        )
-      );
-    }
+  const invocation = invokePublicCapabilityEffect<
+    A,
+    unknown,
+    B,
+    | InvalidPullRequestProviderOperationResultError<TOperation>
+    | PullRequestProviderOperationError<TOperation>,
+    | InvalidPullRequestProviderOperationResultError<TOperation>
+    | PullRequestProviderOperationError<TOperation>
+  >(
+    () => operation(request),
+    {
+      onCallbackThrow: () =>
+        hostPullRequestProviderOperationError({
+          pluginId: provider.pluginId,
+          providerId: provider.providerId,
+          operation: operationName,
+          cause: new Error('provider operation callback threw'),
+        }),
+      onInvalidReturn: () =>
+        invalidOperation('operation must return an Effect'),
+      onCompositionFailure: () =>
+        invalidOperation('operation Effect composition failed'),
+      onLaunchFailure: () =>
+        invalidOperation('operation Effect execution was invalid'),
+    },
+    (effect) =>
+      Effect.flatMap(
+        Effect.mapErrorCause(effect, (cause) =>
+          Cause.map(cause, (failure) =>
+            hostPullRequestProviderOperationError(
+              {
+                pluginId: provider.pluginId,
+                providerId: provider.providerId,
+                operation: operationName,
+                cause: failure,
+              },
+              pullRequestProviderCandidateEntries.get(provider)
+            )
+          )
+        ),
+        (result) => {
+          const captured = capturePullRequestPublicStructure(
+            result,
+            operationName
+          );
+          if (!captured.ok) {
+            return Effect.fail(
+              invalidOperation('operation result failed structural capture')
+            );
+          }
+          return guardPullRequestOperationValidation(
+            Effect.try({
+              try: () => validate(captured.value as A),
+              catch: () =>
+                invalidOperation('operation result failed structural capture'),
+            }).pipe(Effect.flatMap((validation) => validation)),
+            () => invalidOperation('operation result failed structural capture')
+          );
+        }
+      )
   ).pipe(
     Effect.timeoutFail({
       duration: options.operationTimeout ?? defaultOperationTimeout,
       onTimeout: () =>
-        new PullRequestProviderOperationTimeoutError({
+        deadlineError({
           pluginId: provider.pluginId,
           providerId: provider.providerId,
           operation: operationName,
         }),
     })
   );
+  return invocation;
 }
 
 export function listPullRequestsWithProvider(
@@ -2238,20 +3877,17 @@ export function listPullRequestsWithProvider(
   options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
 ): Effect.Effect<
   AidePullRequestListResult,
-  | UnsupportedPullRequestProviderOperationError
-  | InvalidPullRequestProviderOperationResultError
-  | PullRequestProviderOperationError
-  | PullRequestProviderOperationTimeoutError
+  PullRequestProviderOperationExecutionError<'listPullRequests'>
 > {
   const operationRequest = Object.freeze({ ...request, match: provider.match });
   return invokePullRequestProviderOperation(
     provider,
     'listPullRequests',
+    hostPullRequestProviderOperationTimeoutError,
     provider.capability.operations?.listPullRequests,
     operationRequest,
+    (result) => validatePullRequestListResult(provider, result),
     options
-  ).pipe(
-    Effect.flatMap((result) => validatePullRequestListResult(provider, result))
   );
 }
 
@@ -2263,10 +3899,7 @@ export function createPullRequestWithProvider(
   options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
 ): Effect.Effect<
   AidePullRequestCreateResult,
-  | UnsupportedPullRequestProviderOperationError
-  | InvalidPullRequestProviderOperationResultError
-  | PullRequestProviderOperationError
-  | PullRequestProviderOperationTimeoutError
+  PullRequestProviderOperationExecutionError<'createPullRequest'>
 > {
   const operationRequest = Object.freeze({
     match: provider.match,
@@ -2279,18 +3912,16 @@ export function createPullRequestWithProvider(
     ...(request.draft === undefined ? {} : { draft: request.draft }),
     ...(request.labels === undefined
       ? {}
-      : { labels: snapshotStringArray(request.labels) }),
+      : { labels: snapshotRequiredStringArray(request.labels) }),
   });
   return invokePullRequestProviderOperation(
     provider,
     'createPullRequest',
+    hostPullRequestProviderMutationIndeterminateError,
     provider.capability.operations?.createPullRequest,
     operationRequest,
+    (result) => validatePullRequestCreateResult(provider, result),
     options
-  ).pipe(
-    Effect.flatMap((result) =>
-      validatePullRequestCreateResult(provider, result)
-    )
   );
 }
 
@@ -2300,10 +3931,7 @@ export function getPullRequestWithProvider(
   options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
 ): Effect.Effect<
   AidePullRequestViewResult,
-  | UnsupportedPullRequestProviderOperationError
-  | InvalidPullRequestProviderOperationResultError
-  | PullRequestProviderOperationError
-  | PullRequestProviderOperationTimeoutError
+  PullRequestProviderOperationExecutionError<'getPullRequest'>
 > {
   const operationRequest = Object.freeze({
     match: provider.match,
@@ -2314,13 +3942,12 @@ export function getPullRequestWithProvider(
   return invokePullRequestProviderOperation(
     provider,
     'getPullRequest',
+    hostPullRequestProviderOperationTimeoutError,
     provider.capability.operations?.getPullRequest,
     operationRequest,
+    (result) =>
+      validatePullRequestViewResult(provider, operationRequest, result),
     options
-  ).pipe(
-    Effect.flatMap((result) =>
-      validatePullRequestViewResult(provider, operationRequest, result)
-    )
   );
 }
 
@@ -2330,10 +3957,7 @@ export function updatePullRequestWithProvider(
   options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
 ): Effect.Effect<
   AidePullRequestUpdateResult,
-  | UnsupportedPullRequestProviderOperationError
-  | InvalidPullRequestProviderOperationResultError
-  | PullRequestProviderOperationError
-  | PullRequestProviderOperationTimeoutError
+  PullRequestProviderOperationExecutionError<'updatePullRequest'>
 > {
   const operationRequest = Object.freeze({
     match: provider.match,
@@ -2351,21 +3975,22 @@ export function updatePullRequestWithProvider(
     ...(request.status === undefined ? {} : { status: request.status }),
     ...(request.labelsToAdd === undefined
       ? {}
-      : { labelsToAdd: snapshotStringArray(request.labelsToAdd) }),
+      : { labelsToAdd: snapshotRequiredStringArray(request.labelsToAdd) }),
     ...(request.labelsToRemove === undefined
       ? {}
-      : { labelsToRemove: snapshotStringArray(request.labelsToRemove) }),
+      : {
+          labelsToRemove: snapshotRequiredStringArray(request.labelsToRemove),
+        }),
   });
   return invokePullRequestProviderOperation(
     provider,
     'updatePullRequest',
+    hostPullRequestProviderMutationIndeterminateError,
     provider.capability.operations?.updatePullRequest,
     operationRequest,
+    (result) =>
+      validatePullRequestUpdateResult(provider, operationRequest, result),
     options
-  ).pipe(
-    Effect.flatMap((result) =>
-      validatePullRequestUpdateResult(provider, operationRequest, result)
-    )
   );
 }
 
@@ -2375,10 +4000,7 @@ export function getPullRequestDiffWithProvider(
   options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
 ): Effect.Effect<
   AidePullRequestDiffResult,
-  | UnsupportedPullRequestProviderOperationError
-  | InvalidPullRequestProviderOperationResultError
-  | PullRequestProviderOperationError
-  | PullRequestProviderOperationTimeoutError
+  PullRequestProviderOperationExecutionError<'getPullRequestDiff'>
 > {
   const operationRequest = Object.freeze({
     match: provider.match,
@@ -2389,13 +4011,12 @@ export function getPullRequestDiffWithProvider(
   return invokePullRequestProviderOperation(
     provider,
     'getPullRequestDiff',
+    hostPullRequestProviderOperationTimeoutError,
     provider.capability.operations?.getPullRequestDiff,
     operationRequest,
+    (result) =>
+      validatePullRequestDiffResult(provider, operationRequest, result),
     options
-  ).pipe(
-    Effect.flatMap((result) =>
-      validatePullRequestDiffResult(provider, operationRequest, result)
-    )
   );
 }
 
@@ -2405,10 +4026,7 @@ export function listPullRequestCommentsWithProvider(
   options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
 ): Effect.Effect<
   AidePullRequestCommentsResult,
-  | UnsupportedPullRequestProviderOperationError
-  | InvalidPullRequestProviderOperationResultError
-  | PullRequestProviderOperationError
-  | PullRequestProviderOperationTimeoutError
+  PullRequestProviderOperationExecutionError<'listPullRequestComments'>
 > {
   const operationRequest = Object.freeze({
     match: provider.match,
@@ -2419,13 +4037,12 @@ export function listPullRequestCommentsWithProvider(
   return invokePullRequestProviderOperation(
     provider,
     'listPullRequestComments',
+    hostPullRequestProviderOperationTimeoutError,
     provider.capability.operations?.listPullRequestComments,
     operationRequest,
+    (result) =>
+      validatePullRequestCommentsResult(provider, operationRequest, result),
     options
-  ).pipe(
-    Effect.flatMap((result) =>
-      validatePullRequestCommentsResult(provider, operationRequest, result)
-    )
   );
 }
 
@@ -2435,10 +4052,7 @@ export function addPullRequestCommentWithProvider(
   options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
-  | UnsupportedPullRequestProviderOperationError
-  | InvalidPullRequestProviderOperationResultError
-  | PullRequestProviderOperationError
-  | PullRequestProviderOperationTimeoutError
+  PullRequestProviderOperationExecutionError<'addPullRequestComment'>
 > {
   const operationRequest = Object.freeze({
     match: provider.match,
@@ -2453,18 +4067,17 @@ export function addPullRequestCommentWithProvider(
   return invokePullRequestProviderOperation(
     provider,
     'addPullRequestComment',
+    hostPullRequestProviderMutationIndeterminateError,
     provider.capability.operations?.addPullRequestComment,
     operationRequest,
-    options
-  ).pipe(
-    Effect.flatMap((result) =>
+    (result) =>
       validatePullRequestCommentMutationResult(
         provider,
         'addPullRequestComment',
         operationRequest,
         result
-      )
-    )
+      ),
+    options
   );
 }
 
@@ -2474,10 +4087,7 @@ export function replyToPullRequestCommentWithProvider(
   options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
-  | UnsupportedPullRequestProviderOperationError
-  | InvalidPullRequestProviderOperationResultError
-  | PullRequestProviderOperationError
-  | PullRequestProviderOperationTimeoutError
+  PullRequestProviderOperationExecutionError<'replyToPullRequestComment'>
 > {
   const operationRequest = Object.freeze({
     match: provider.match,
@@ -2493,18 +4103,17 @@ export function replyToPullRequestCommentWithProvider(
   return invokePullRequestProviderOperation(
     provider,
     'replyToPullRequestComment',
+    hostPullRequestProviderMutationIndeterminateError,
     provider.capability.operations?.replyToPullRequestComment,
     operationRequest,
-    options
-  ).pipe(
-    Effect.flatMap((result) =>
+    (result) =>
       validatePullRequestCommentMutationResult(
         provider,
         'replyToPullRequestComment',
         operationRequest,
         result
-      )
-    )
+      ),
+    options
   );
 }
 
@@ -2516,10 +4125,7 @@ export function findPullRequestForBranchWithProvider(
   options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
 ): Effect.Effect<
   AidePullRequestBranchLookupResult,
-  | UnsupportedPullRequestProviderOperationError
-  | InvalidPullRequestProviderOperationResultError
-  | PullRequestProviderOperationError
-  | PullRequestProviderOperationTimeoutError
+  PullRequestProviderOperationExecutionError<'findPullRequestForBranch'>
 > {
   const operationRequest = Object.freeze({
     branch: request.branch,
@@ -2528,24 +4134,23 @@ export function findPullRequestForBranchWithProvider(
   return invokePullRequestProviderOperation(
     provider,
     'findPullRequestForBranch',
+    hostPullRequestProviderOperationTimeoutError,
     provider.capability.operations?.findPullRequestForBranch,
     operationRequest,
+    (result) =>
+      validatePullRequestBranchLookupResult(provider, operationRequest, result),
     options
-  ).pipe(
-    Effect.flatMap((result) =>
-      validatePullRequestBranchLookupResult(provider, operationRequest, result)
-    )
   );
 }
 
 export function listPullRequestsForRemote(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Omit<AidePullRequestListRequest, 'match'> = {},
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestListResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'listPullRequests'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -2563,13 +4168,13 @@ export function listPullRequestsForRemote(
 }
 
 export function listPullRequestsForRepository(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Omit<AidePullRequestListRequest, 'match'> = {},
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestListResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'listPullRequests'>
 > {
   return selectProviderCandidateForRepositoryOperation(
     providers,
@@ -2585,13 +4190,13 @@ export function listPullRequestsForRepository(
 }
 
 export function createPullRequestForRemote(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Omit<AidePullRequestCreateRequest, 'match'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestCreateResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'createPullRequest'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -2609,13 +4214,13 @@ export function createPullRequestForRemote(
 }
 
 export function createPullRequestForRepository(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Omit<AidePullRequestCreateRequest, 'match'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestCreateResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'createPullRequest'>
 > {
   return selectProviderCandidateForRepositoryOperation(
     providers,
@@ -2631,13 +4236,13 @@ export function createPullRequestForRepository(
 }
 
 export function findPullRequestForBranchForRemote(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestBranchLookupResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'findPullRequestForBranch'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -2655,13 +4260,13 @@ export function findPullRequestForBranchForRemote(
 }
 
 export function findPullRequestForBranchForRepository(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestBranchLookupResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'findPullRequestForBranch'>
 > {
   return selectProviderCandidateForRepositoryOperation(
     providers,
@@ -2677,7 +4282,7 @@ export function findPullRequestForBranchForRepository(
 }
 
 export function findPullRequestForBranchContextForRemote(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
   options: PullRequestProviderOperationOptions = {}
@@ -2686,7 +4291,7 @@ export function findPullRequestForBranchContextForRemote(
     AidePullRequestRemoteMatch,
     AidePullRequestBranchLookupResult
   >,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'findPullRequestForBranch'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -2706,7 +4311,7 @@ export function findPullRequestForBranchContextForRemote(
 }
 
 export function findPullRequestForBranchContextForRepository(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
   options: PullRequestProviderOperationOptions = {}
@@ -2715,7 +4320,7 @@ export function findPullRequestForBranchContextForRepository(
     AidePullRequestRepositoryMatch,
     AidePullRequestBranchLookupResult
   >,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'findPullRequestForBranch'>
 > {
   return selectProviderCandidateForRepositoryOperation(
     providers,
@@ -2733,13 +4338,13 @@ export function findPullRequestForBranchContextForRepository(
 }
 
 export function getPullRequestForRemote(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestViewResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'getPullRequest'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -2756,13 +4361,13 @@ export function getPullRequestForRemote(
 }
 
 export function getPullRequestForRepository(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestViewResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'getPullRequest'>
 > {
   return selectProviderCandidateForRepositoryOperation(
     providers,
@@ -2777,13 +4382,13 @@ export function getPullRequestForRepository(
 }
 
 export function updatePullRequestForRemote(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Omit<AidePullRequestUpdateRequest, 'match'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestUpdateResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'updatePullRequest'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -2801,13 +4406,13 @@ export function updatePullRequestForRemote(
 }
 
 export function updatePullRequestForRepository(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Omit<AidePullRequestUpdateRequest, 'match'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestUpdateResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'updatePullRequest'>
 > {
   return selectProviderCandidateForRepositoryOperation(
     providers,
@@ -2823,13 +4428,13 @@ export function updatePullRequestForRepository(
 }
 
 export function updatePullRequestForUrl(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
   request: Omit<AidePullRequestUpdateRequest, 'match' | 'pullRequest'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestUpdateResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'updatePullRequest'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -2854,7 +4459,7 @@ export function updatePullRequestForUrl(
 }
 
 export function getPullRequestContextForRemote(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
   options: PullRequestProviderOperationOptions = {}
@@ -2863,7 +4468,7 @@ export function getPullRequestContextForRemote(
     AidePullRequestRemoteMatch,
     AidePullRequestViewResult
   >,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'getPullRequest'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -2882,7 +4487,7 @@ export function getPullRequestContextForRemote(
 }
 
 export function getPullRequestContextForRepository(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
   options: PullRequestProviderOperationOptions = {}
@@ -2891,7 +4496,7 @@ export function getPullRequestContextForRepository(
     AidePullRequestRepositoryMatch,
     AidePullRequestViewResult
   >,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'getPullRequest'>
 > {
   return selectProviderCandidateForRepositoryOperation(
     providers,
@@ -2908,13 +4513,13 @@ export function getPullRequestContextForRepository(
 }
 
 export function getPullRequestDiffForRemote(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestDiffResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'getPullRequestDiff'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -2932,13 +4537,13 @@ export function getPullRequestDiffForRemote(
 }
 
 export function getPullRequestDiffForRepository(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestDiffResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'getPullRequestDiff'>
 > {
   return selectProviderCandidateForRepositoryOperation(
     providers,
@@ -2954,13 +4559,13 @@ export function getPullRequestDiffForRepository(
 }
 
 export function listPullRequestCommentsForRemote(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentsResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'listPullRequestComments'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -2978,13 +4583,13 @@ export function listPullRequestCommentsForRemote(
 }
 
 export function listPullRequestCommentsForRepository(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentsResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'listPullRequestComments'>
 > {
   return selectProviderCandidateForRepositoryOperation(
     providers,
@@ -3000,13 +4605,13 @@ export function listPullRequestCommentsForRepository(
 }
 
 export function addPullRequestCommentForRemote(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Omit<AidePullRequestAddCommentRequest, 'match'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'addPullRequestComment'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -3024,13 +4629,13 @@ export function addPullRequestCommentForRemote(
 }
 
 export function addPullRequestCommentForRepository(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Omit<AidePullRequestAddCommentRequest, 'match'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'addPullRequestComment'>
 > {
   return selectProviderCandidateForRepositoryOperation(
     providers,
@@ -3046,13 +4651,13 @@ export function addPullRequestCommentForRepository(
 }
 
 export function replyToPullRequestCommentForRemote(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'replyToPullRequestComment'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -3070,13 +4675,13 @@ export function replyToPullRequestCommentForRemote(
 }
 
 export function replyToPullRequestCommentForRepository(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'replyToPullRequestComment'>
 > {
   return selectProviderCandidateForRepositoryOperation(
     providers,
@@ -3092,12 +4697,12 @@ export function replyToPullRequestCommentForRepository(
 }
 
 export function getPullRequestForUrl(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestViewResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'getPullRequest'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -3118,7 +4723,7 @@ export function getPullRequestForUrl(
 }
 
 export function getPullRequestContextForUrl(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
@@ -3126,7 +4731,7 @@ export function getPullRequestContextForUrl(
     AidePullRequestUrlMatch,
     AidePullRequestViewResult
   >,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'getPullRequest'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -3149,12 +4754,12 @@ export function getPullRequestContextForUrl(
 }
 
 export function getPullRequestDiffForUrl(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestDiffResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'getPullRequestDiff'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -3176,12 +4781,12 @@ export function getPullRequestDiffForUrl(
 }
 
 export function listPullRequestCommentsForUrl(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentsResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'listPullRequestComments'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -3203,13 +4808,13 @@ export function listPullRequestCommentsForUrl(
 }
 
 export function addPullRequestCommentForUrl(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
   request: Omit<AidePullRequestAddCommentRequest, 'match' | 'pullRequest'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'addPullRequestComment'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -3231,13 +4836,13 @@ export function addPullRequestCommentForUrl(
 }
 
 export function replyToPullRequestCommentForUrl(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[],
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
   request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'pullRequest'>,
   options: PullRequestProviderOperationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
-  PullRequestProviderOperationInvocationError
+  PullRequestProviderOperationInvocationError<'replyToPullRequestComment'>
 > {
   return selectProviderCandidateForOperation(
     providers,
@@ -3258,8 +4863,24 @@ export function replyToPullRequestCommentForUrl(
   );
 }
 
-export function resolvePullRequestProviderFromRegistryForRemote(
-  registry: CommandRegistry,
+export function resolvePullRequestProviderFromRegistryForRemote<
+  RAuth,
+  RAuthStatus,
+  RAuthAccounts,
+  RAuthLogin,
+  RAuthLogout,
+  RPrimeStatus,
+  RPullRequestAuthStatus,
+>(
+  registry: CommandRegistry<
+    RAuth,
+    RAuthStatus,
+    RAuthAccounts,
+    RAuthLogin,
+    RAuthLogout,
+    RPrimeStatus,
+    RPullRequestAuthStatus
+  >,
   remoteUrl: string
 ): Effect.Effect<
   ResolvedPullRequestProvider<AidePullRequestRemoteMatch>,
@@ -3271,8 +4892,24 @@ export function resolvePullRequestProviderFromRegistryForRemote(
   );
 }
 
-export function resolvePullRequestProviderFromRegistryForUrl(
-  registry: CommandRegistry,
+export function resolvePullRequestProviderFromRegistryForUrl<
+  RAuth,
+  RAuthStatus,
+  RAuthAccounts,
+  RAuthLogin,
+  RAuthLogout,
+  RPrimeStatus,
+  RPullRequestAuthStatus,
+>(
+  registry: CommandRegistry<
+    RAuth,
+    RAuthStatus,
+    RAuthAccounts,
+    RAuthLogin,
+    RAuthLogout,
+    RPrimeStatus,
+    RPullRequestAuthStatus
+  >,
   url: string
 ): Effect.Effect<
   ResolvedPullRequestProvider<AidePullRequestUrlMatch>,
@@ -3284,8 +4921,24 @@ export function resolvePullRequestProviderFromRegistryForUrl(
   );
 }
 
-export function resolvePullRequestProviderFromRegistryForRepository(
-  registry: CommandRegistry,
+export function resolvePullRequestProviderFromRegistryForRepository<
+  RAuth,
+  RAuthStatus,
+  RAuthAccounts,
+  RAuthLogin,
+  RAuthLogout,
+  RPrimeStatus,
+  RPullRequestAuthStatus,
+>(
+  registry: CommandRegistry<
+    RAuth,
+    RAuthStatus,
+    RAuthAccounts,
+    RAuthLogin,
+    RAuthLogout,
+    RPrimeStatus,
+    RPullRequestAuthStatus
+  >,
   repository: AidePullRequestRepositoryRef
 ): Effect.Effect<
   ResolvedPullRequestProvider<AidePullRequestRepositoryMatch>,
@@ -3297,8 +4950,24 @@ export function resolvePullRequestProviderFromRegistryForRepository(
   );
 }
 
-export function resolvePullRequestProviderFromRegistryForRepositoryInput(
-  registry: CommandRegistry,
+export function resolvePullRequestProviderFromRegistryForRepositoryInput<
+  RAuth,
+  RAuthStatus,
+  RAuthAccounts,
+  RAuthLogin,
+  RAuthLogout,
+  RPrimeStatus,
+  RPullRequestAuthStatus,
+>(
+  registry: CommandRegistry<
+    RAuth,
+    RAuthStatus,
+    RAuthAccounts,
+    RAuthLogin,
+    RAuthLogout,
+    RPrimeStatus,
+    RPullRequestAuthStatus
+  >,
   input: AidePullRequestRepositoryInput
 ): Effect.Effect<
   ResolvedPullRequestProvider<AidePullRequestRepositoryMatch>,

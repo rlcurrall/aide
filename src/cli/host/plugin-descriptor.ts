@@ -4,10 +4,19 @@ import type { Effect } from 'effect';
 import {
   eraseCommandDescriptor,
   type AideCommandDescriptor,
-  type AnyAideCommandDescriptor,
-  type HostAideCommandDescriptor,
+  type AnyInternalHostAideCommandDescriptor,
+  type AnyInternalHostAndKeyringAideCommandDescriptor,
+  type AnyKeyringAideCommandDescriptor,
+  type AnyPublicAideCommandDescriptor,
+  type AnyServiceFreeAideCommandDescriptor,
+  type InternalHostAideCommandDescriptor,
+  type InternalHostAndKeyringAideCommandDescriptor,
+  type KeyringAideCommandDescriptor,
   type ServiceFreeAideCommandDescriptor,
+  type CommandProvisioning,
 } from './command-descriptor.js';
+
+const hasOwn = Object.hasOwn;
 
 export type AnyYargsCommandModule = CommandModule<object, object>;
 
@@ -49,8 +58,51 @@ export type AidePluginCommand =
       readonly parentId?: string;
       readonly acceptsChildren?: boolean;
       readonly extension?: AideCommandExtensionPolicy;
-      readonly descriptor: AnyAideCommandDescriptor;
-    };
+      readonly execution: 'trusted';
+      readonly provisioning: 'none';
+      readonly descriptor: AnyServiceFreeAideCommandDescriptor;
+    }
+  | {
+      readonly kind: 'descriptor';
+      readonly id: string;
+      readonly parentId?: string;
+      readonly acceptsChildren?: boolean;
+      readonly extension?: AideCommandExtensionPolicy;
+      readonly execution: 'trusted';
+      readonly provisioning: 'internal-host';
+      readonly descriptor: AnyInternalHostAideCommandDescriptor;
+    }
+  | {
+      readonly kind: 'descriptor';
+      readonly id: string;
+      readonly parentId?: string;
+      readonly acceptsChildren?: boolean;
+      readonly extension?: AideCommandExtensionPolicy;
+      readonly execution: 'trusted';
+      readonly provisioning: 'keyring';
+      readonly descriptor: AnyKeyringAideCommandDescriptor;
+    }
+  | {
+      readonly kind: 'descriptor';
+      readonly id: string;
+      readonly parentId?: string;
+      readonly acceptsChildren?: boolean;
+      readonly extension?: AideCommandExtensionPolicy;
+      readonly execution: 'trusted';
+      readonly provisioning: 'internal-host+keyring';
+      readonly descriptor: AnyInternalHostAndKeyringAideCommandDescriptor;
+    }
+  | AidePublicPluginCommandRegistration;
+
+export interface AidePublicPluginCommandRegistration {
+  readonly kind: 'descriptor';
+  readonly id: string;
+  readonly parentId?: string;
+  readonly acceptsChildren?: boolean;
+  readonly extension?: AideCommandExtensionPolicy;
+  readonly execution: 'public';
+  readonly descriptor: AnyPublicAideCommandDescriptor;
+}
 
 export type AidePluginAuthState =
   | 'configured'
@@ -67,8 +119,8 @@ export type AideAuthMetadataValue = string | number | boolean;
 export type AideAuthMetadata = Readonly<Record<string, AideAuthMetadataValue>>;
 export type AideAuthSourceKind = 'env' | 'keyring' | 'external' | 'unknown';
 
-export interface AidePluginAuthCapability {
-  readonly status: () => Effect.Effect<AidePluginAuthStatus, unknown, never>;
+export interface AidePluginAuthCapability<R = never> {
+  readonly status: () => Effect.Effect<AidePluginAuthStatus, unknown, R>;
 }
 
 export interface AideAuthScope {
@@ -182,27 +234,32 @@ export interface AideAuthLogoutRequest {
   readonly scope?: AideAuthScope;
 }
 
-export interface AideAuthProviderOperations {
+export interface AideAuthProviderOperations<RLogin = never, RLogout = never> {
   readonly login?: (
     request: AideAuthLoginRequest
-  ) => Effect.Effect<AideAuthLoginResult, unknown, never>;
+  ) => Effect.Effect<AideAuthLoginResult, unknown, RLogin>;
   readonly logout?: (
     request?: AideAuthLogoutRequest
-  ) => Effect.Effect<AideAuthLogoutResult, unknown, never>;
+  ) => Effect.Effect<AideAuthLogoutResult, unknown, RLogout>;
 }
 
-export interface AideAuthProviderCapability {
+export interface AideAuthProviderCapability<
+  RStatus = never,
+  RAccounts = never,
+  RLogin = never,
+  RLogout = never,
+> {
   readonly providerId: string;
   readonly label: string;
   readonly login?: AideAuthLoginMetadata;
   readonly logout?: AideAuthLogoutMetadata;
   readonly status: (
     request?: AideAuthStatusRequest
-  ) => Effect.Effect<AidePluginAuthStatus, unknown, never>;
+  ) => Effect.Effect<AidePluginAuthStatus, unknown, RStatus>;
   readonly accounts?: (
     request?: AideAuthAccountDiscoveryRequest
-  ) => Effect.Effect<readonly AideAuthAccount[], unknown, never>;
-  readonly operations?: AideAuthProviderOperations;
+  ) => Effect.Effect<readonly AideAuthAccount[], unknown, RAccounts>;
+  readonly operations?: AideAuthProviderOperations<RLogin, RLogout>;
 }
 
 export interface AidePrimeStatusMessages {
@@ -211,12 +268,12 @@ export interface AidePrimeStatusMessages {
   readonly misconfigured?: string;
 }
 
-export interface AidePrimeStatusContribution {
+export interface AidePrimeStatusContribution<R = never> {
   readonly groupId: string;
   readonly groupLabel: string;
   readonly label: string;
   readonly messages?: AidePrimeStatusMessages;
-  readonly status: () => Effect.Effect<AidePluginAuthStatus, unknown, never>;
+  readonly status: () => Effect.Effect<AidePluginAuthStatus, unknown, R>;
 }
 
 export interface AidePrimeSection {
@@ -225,8 +282,8 @@ export interface AidePrimeSection {
   readonly body: string;
 }
 
-export interface AidePrimeContributionCapability {
-  readonly status?: readonly AidePrimeStatusContribution[];
+export interface AidePrimeContributionCapability<R = never> {
+  readonly status?: readonly AidePrimeStatusContribution<R>[];
   readonly sections?: () => Effect.Effect<
     readonly AidePrimeSection[],
     unknown,
@@ -543,7 +600,7 @@ export interface AidePullRequestProviderOperations {
   ) => Effect.Effect<AidePullRequestBranchLookupResult, unknown, never>;
 }
 
-export interface AidePullRequestProviderCapability {
+export interface AidePullRequestProviderCapability<R = never> {
   readonly providerId: string;
   readonly priority: number;
   readonly features: AidePullRequestProviderFeatures;
@@ -555,12 +612,11 @@ export interface AidePullRequestProviderCapability {
   ) => Effect.Effect<AidePullRequestRepositoryMatch | null, unknown, never>;
   readonly matchPullRequestUrl: (url: string) => AidePullRequestUrlMatch | null;
   readonly operations?: AidePullRequestProviderOperations;
-  readonly authStatus: () => Effect.Effect<
-    AidePluginAuthStatus,
-    unknown,
-    never
-  >;
+  readonly authStatus: () => Effect.Effect<AidePluginAuthStatus, unknown, R>;
 }
+
+export type AideInternalPullRequestProviderCapability<R = never> =
+  AidePullRequestProviderCapability<R>;
 
 export const corePullRequestProviderOwners = Object.freeze({
   github: 'github',
@@ -575,9 +631,7 @@ export const coreAuthProviderOwners = Object.freeze({
 } as const);
 
 export function coreAuthProviderOwner(providerId: string): string | undefined {
-  if (
-    !Object.prototype.hasOwnProperty.call(coreAuthProviderOwners, providerId)
-  ) {
+  if (!hasOwn(coreAuthProviderOwners, providerId)) {
     return undefined;
   }
 
@@ -589,12 +643,7 @@ export function coreAuthProviderOwner(providerId: string): string | undefined {
 export function corePullRequestProviderOwner(
   providerId: string
 ): string | undefined {
-  if (
-    !Object.prototype.hasOwnProperty.call(
-      corePullRequestProviderOwners,
-      providerId
-    )
-  ) {
+  if (!hasOwn(corePullRequestProviderOwners, providerId)) {
     return undefined;
   }
 
@@ -610,16 +659,83 @@ export interface AidePluginCapabilities {
   readonly pullRequestProvider?: AidePullRequestProviderCapability;
 }
 
-export interface AidePluginDescriptor {
+export type AideInternalAuthProviderCapability<
+  RStatus = never,
+  RAccounts = never,
+  RLogin = never,
+  RLogout = never,
+> = AideAuthProviderCapability<RStatus, RAccounts, RLogin, RLogout>;
+
+export interface AideInternalPluginCapabilities<
+  RAuth = never,
+  RAuthStatus = never,
+  RAuthAccounts = never,
+  RAuthLogin = never,
+  RAuthLogout = never,
+  RPrimeStatus = never,
+  RPullRequestAuthStatus = never,
+> {
+  readonly auth?: AidePluginAuthCapability<RAuth>;
+  readonly authProvider?: AideInternalAuthProviderCapability<
+    RAuthStatus,
+    RAuthAccounts,
+    RAuthLogin,
+    RAuthLogout
+  >;
+  readonly primeContribution?: AidePrimeContributionCapability<RPrimeStatus>;
+  readonly pullRequestProvider?: AideInternalPullRequestProviderCapability<RPullRequestAuthStatus>;
+}
+
+export interface AidePluginDescriptor<
+  RAuth = never,
+  RAuthStatus = never,
+  RAuthAccounts = never,
+  RAuthLogin = never,
+  RAuthLogout = never,
+  RPrimeStatus = never,
+  RPullRequestAuthStatus = never,
+> {
   readonly id: string;
   readonly summary: string;
   readonly commands: readonly AidePluginCommand[];
-  readonly capabilities?: AidePluginCapabilities;
+  readonly capabilities?: AideInternalPluginCapabilities<
+    RAuth,
+    RAuthStatus,
+    RAuthAccounts,
+    RAuthLogin,
+    RAuthLogout,
+    RPrimeStatus,
+    RPullRequestAuthStatus
+  >;
 }
 
-export function defineAidePlugin(
-  plugin: AidePluginDescriptor
-): AidePluginDescriptor {
+export function defineAidePlugin<
+  RAuth = never,
+  RAuthStatus = never,
+  RAuthAccounts = never,
+  RAuthLogin = never,
+  RAuthLogout = never,
+  RPrimeStatus = never,
+  RPullRequestAuthStatus = never,
+>(
+  plugin: AidePluginDescriptor<
+    RAuth,
+    RAuthStatus,
+    RAuthAccounts,
+    RAuthLogin,
+    RAuthLogout,
+    RPrimeStatus,
+    RPullRequestAuthStatus
+  >
+): AidePluginDescriptor<
+  RAuth,
+  RAuthStatus,
+  RAuthAccounts,
+  RAuthLogin,
+  RAuthLogout,
+  RPrimeStatus,
+  RPullRequestAuthStatus
+> {
   return plugin;
 }
 
@@ -638,26 +754,66 @@ export function pluginCommandModule<TBase extends object, TArgs extends object>(
   };
 }
 
-export function pluginCommandDescriptor<TArgs extends object, E = unknown>(
-  descriptor: ServiceFreeAideCommandDescriptor<TArgs, E>,
-  placement?: AidePluginCommandPlacement
-): AidePluginCommand;
-export function pluginCommandDescriptor<TArgs extends object, E = unknown>(
-  descriptor: HostAideCommandDescriptor<TArgs, E>,
-  placement?: AidePluginCommandPlacement
-): AidePluginCommand;
-export function pluginCommandDescriptor<TArgs extends object>(
-  descriptor: AideCommandDescriptor<TArgs, unknown, unknown>,
-  placement: AidePluginCommandPlacement = {}
-): AidePluginCommand {
+function trustedCommandRegistration<TArgs extends object, E, R>(
+  descriptor: AideCommandDescriptor<TArgs, E, R>,
+  placement: AidePluginCommandPlacement,
+  provisioning: CommandProvisioning
+) {
   return {
-    kind: 'descriptor',
+    kind: 'descriptor' as const,
     id: descriptor.id,
     parentId: placement.parentId,
     acceptsChildren: placement.acceptsChildren,
     extension: placement.extension,
-    descriptor: eraseCommandDescriptor(
-      descriptor as HostAideCommandDescriptor<TArgs>
-    ),
+    execution: 'trusted' as const,
+    descriptor: eraseCommandDescriptor(descriptor, provisioning),
   };
 }
+
+const pluginCommandDescriptorVariants = Object.freeze({
+  none<TArgs extends object, E = unknown>(
+    descriptor: ServiceFreeAideCommandDescriptor<TArgs, E>,
+    placement: AidePluginCommandPlacement = {}
+  ): Extract<AidePluginCommand, { readonly provisioning: 'none' }> {
+    return Object.freeze({
+      ...trustedCommandRegistration(descriptor, placement, 'none'),
+      provisioning: 'none' as const,
+    });
+  },
+  internalHost<TArgs extends object, E = unknown>(
+    descriptor: InternalHostAideCommandDescriptor<TArgs, E>,
+    placement: AidePluginCommandPlacement = {}
+  ): Extract<AidePluginCommand, { readonly provisioning: 'internal-host' }> {
+    return Object.freeze({
+      ...trustedCommandRegistration(descriptor, placement, 'internal-host'),
+      provisioning: 'internal-host' as const,
+    });
+  },
+  keyring<TArgs extends object, E = unknown>(
+    descriptor: KeyringAideCommandDescriptor<TArgs, E>,
+    placement: AidePluginCommandPlacement = {}
+  ): Extract<AidePluginCommand, { readonly provisioning: 'keyring' }> {
+    return Object.freeze({
+      ...trustedCommandRegistration(descriptor, placement, 'keyring'),
+      provisioning: 'keyring' as const,
+    });
+  },
+  internalHostAndKeyring<TArgs extends object, E = unknown>(
+    descriptor: InternalHostAndKeyringAideCommandDescriptor<TArgs, E>,
+    placement: AidePluginCommandPlacement = {}
+  ): Extract<
+    AidePluginCommand,
+    { readonly provisioning: 'internal-host+keyring' }
+  > {
+    return Object.freeze({
+      ...trustedCommandRegistration(
+        descriptor,
+        placement,
+        'internal-host+keyring'
+      ),
+      provisioning: 'internal-host+keyring' as const,
+    });
+  },
+});
+
+export const pluginCommandDescriptor = pluginCommandDescriptorVariants;

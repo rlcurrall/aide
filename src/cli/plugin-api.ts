@@ -3,6 +3,9 @@ import type { Effect } from 'effect';
 import type {
   AideCommandExtensionPolicy,
   AidePluginCapabilities,
+  AidePrimeContributionCapability as InternalAidePrimeContributionCapability,
+  AidePrimeStatusContribution as InternalAidePrimeStatusContribution,
+  AidePullRequestProviderCapability as InternalAidePullRequestProviderCapability,
 } from './host/plugin-descriptor.js';
 import type { AideHostServicesTag } from './host/runtime-context.js';
 
@@ -15,7 +18,14 @@ export {
 export {
   AideHostServicesTag,
   type AideHostServices,
+  type AidePublicAuthProviderSnapshot,
+  type AidePublicPrimeContributionSnapshot,
+  type AidePublicPrimeStatusSnapshot,
 } from './host/runtime-context.js';
+export {
+  PrimeContributionError,
+  type PrimeContributionFailureReason,
+} from './host/prime-contribution.js';
 export type {
   AideAuthAccount,
   AideAuthAccountDiscoveryRequest,
@@ -44,10 +54,8 @@ export type {
   AidePluginAuthState,
   AidePluginAuthStatus,
   AidePluginCapabilities,
-  AidePrimeContributionCapability,
   AidePrimeSection,
   AidePrimeStatusMessages,
-  AidePrimeStatusContribution,
   AidePullRequestAddCommentRequest,
   AidePullRequestAuthor,
   AidePullRequestBranchLookupRequest,
@@ -71,7 +79,6 @@ export type {
   AidePullRequestListItemStatus,
   AidePullRequestListRequest,
   AidePullRequestListResult,
-  AidePullRequestProviderCapability,
   AidePullRequestProviderFeatures,
   AidePullRequestProviderMatch,
   AidePullRequestProviderMatchSource,
@@ -89,6 +96,13 @@ export type {
   AidePullRequestViewRequest,
   AidePullRequestViewResult,
 } from './host/plugin-descriptor.js';
+
+export type AidePrimeStatusContribution =
+  InternalAidePrimeStatusContribution<never>;
+export type AidePrimeContributionCapability =
+  InternalAidePrimeContributionCapability<never>;
+export type AidePullRequestProviderCapability =
+  InternalAidePullRequestProviderCapability<never>;
 
 export const AIDE_PLUGIN_API_VERSION = 1 as const;
 export type AidePluginApiVersion = typeof AIDE_PLUGIN_API_VERSION;
@@ -170,25 +184,28 @@ export interface AideCommandInvocationArgs {
 export interface AidePluginCommandDescriptor<
   TArgs extends object = object,
   E = unknown,
-  R = AideHostServicesTag,
 > {
   readonly id: string;
   readonly route: CommandRoute;
   readonly summary: string;
   readonly run: (
     args: Readonly<TArgs> & AideCommandInvocationArgs
-  ) => Effect.Effect<CommandResult, E, R>;
+  ) => Effect.Effect<CommandResult, E, AideHostServicesTag>;
 }
 
 export type HostAidePluginCommandDescriptor<
   TArgs extends object = object,
   E = unknown,
-> = AidePluginCommandDescriptor<TArgs, E, AideHostServicesTag>;
+> = AidePluginCommandDescriptor<TArgs, E>;
 
 export type ServiceFreeAidePluginCommandDescriptor<
   TArgs extends object = object,
   E = unknown,
-> = AidePluginCommandDescriptor<TArgs, E, never>;
+> = Omit<AidePluginCommandDescriptor<TArgs, E>, 'run'> & {
+  readonly run: (
+    args: Readonly<TArgs> & AideCommandInvocationArgs
+  ) => Effect.Effect<CommandResult, E, never>;
+};
 
 export interface AidePublicPluginCommand {
   readonly kind: 'descriptor';
@@ -196,7 +213,7 @@ export interface AidePublicPluginCommand {
   readonly parentId?: string;
   readonly acceptsChildren?: boolean;
   readonly extension?: AideCommandExtensionPolicy;
-  readonly descriptor: AidePluginCommandDescriptor<object, unknown, unknown>;
+  readonly descriptor: AidePluginCommandDescriptor<object, unknown>;
 }
 
 export interface AidePublicPluginDescriptor {
@@ -219,8 +236,12 @@ export function defineAideCommand<TArgs extends object, E = unknown>(
   descriptor: HostAidePluginCommandDescriptor<TArgs, E>
 ): HostAidePluginCommandDescriptor<TArgs, E>;
 export function defineAideCommand<TArgs extends object>(
-  descriptor: AidePluginCommandDescriptor<TArgs, unknown, unknown>
-): AidePluginCommandDescriptor<TArgs, unknown, unknown> {
+  descriptor:
+    | ServiceFreeAidePluginCommandDescriptor<TArgs, unknown>
+    | HostAidePluginCommandDescriptor<TArgs, unknown>
+):
+  | ServiceFreeAidePluginCommandDescriptor<TArgs, unknown>
+  | HostAidePluginCommandDescriptor<TArgs, unknown> {
   return descriptor;
 }
 
@@ -233,7 +254,7 @@ export function pluginCommandDescriptor<TArgs extends object, E = unknown>(
   placement?: AidePublicPluginCommandPlacement
 ): AidePublicPluginCommand;
 export function pluginCommandDescriptor<TArgs extends object>(
-  descriptor: AidePluginCommandDescriptor<TArgs, unknown, unknown>,
+  descriptor: AidePluginCommandDescriptor<TArgs, unknown>,
   placement: AidePublicPluginCommandPlacement = {}
 ): AidePublicPluginCommand {
   return {
@@ -242,28 +263,37 @@ export function pluginCommandDescriptor<TArgs extends object>(
     parentId: placement.parentId,
     acceptsChildren: placement.acceptsChildren,
     extension: placement.extension,
-    descriptor: descriptor as AidePluginCommandDescriptor<
-      object,
-      unknown,
-      unknown
-    >,
+    descriptor: descriptor as AidePluginCommandDescriptor<object, unknown>,
   };
 }
 
 export function isReservedAidePluginId(id: string): boolean {
-  return aideReservedPluginIds.includes(
-    id as (typeof aideReservedPluginIds)[number]
-  );
+  switch (id) {
+    case 'aide-core':
+    case 'azure-devops':
+    case 'claude-code':
+    case 'github':
+    case 'jira':
+    case 'legacy-auth':
+    case 'pull-requests':
+      return true;
+    default:
+      return false;
+  }
 }
 
 export function isReservedAidePullRequestProviderId(id: string): boolean {
-  return aideReservedPullRequestProviderIds.includes(
-    id as (typeof aideReservedPullRequestProviderIds)[number]
-  );
+  return id === 'azure-devops' || id === 'github';
 }
 
 export function isReservedAideAuthProviderId(id: string): boolean {
-  return aideReservedAuthProviderIds.includes(
-    id as (typeof aideReservedAuthProviderIds)[number]
-  );
+  switch (id) {
+    case 'ado':
+    case 'azure-devops':
+    case 'github':
+    case 'jira':
+      return true;
+    default:
+      return false;
+  }
 }

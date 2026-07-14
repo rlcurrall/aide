@@ -10,7 +10,7 @@ export const aideCorePlugin = defineAidePlugin({
   id: 'aide-core',
   summary: 'Core aide commands',
   commands: [
-    pluginCommandDescriptor(primeCommandDescriptor),
+    pluginCommandDescriptor.internalHost(primeCommandDescriptor),
     pluginCommandModule('upgrade', upgradeCommand),
   ],
 });

@@ -1,13 +1,18 @@
-import { Context, type Effect } from 'effect';
+import { Context, Effect, type Layer } from 'effect';
 
 import type {
   CommandRegistry,
-  OwnedPluginCapability,
+  KeyringCommandRegistry,
+  PluginCapability,
 } from './command-registry.js';
 import type {
   AideAuthProviderCapability,
+  AideAuthLoginMetadata,
+  AideAuthLogoutMetadata,
   AideDiscoveredCapability,
   AidePrimeContributionCapability,
+  AidePrimeSection,
+  AidePrimeStatusMessages,
   AidePullRequestAddCommentRequest,
   AidePullRequestBranchLookupRequest,
   AidePullRequestBranchLookupResult,
@@ -31,6 +36,17 @@ import type {
   AidePullRequestViewRequest,
   AidePullRequestViewResult,
 } from './plugin-descriptor.js';
+import type { KeyringService } from '@lib/auth-keyring.js';
+import { isolatePublicCapabilityEffect } from './public-capability-invocation.js';
+import {
+  invokePrimeSectionsCallback,
+  type PrimeContributionError,
+} from './prime-contribution.js';
+import {
+  defineHostArrayIndex,
+  ownArrayDataValue,
+  ownArrayLength,
+} from './host-owned-array.js';
 import {
   addPullRequestCommentForRemote,
   addPullRequestCommentForRepository,
@@ -76,8 +92,8 @@ import {
 const aideHostContexts = new WeakMap<object, AideHostContext>();
 
 export interface AideHostServices {
-  readonly authProviders: () => readonly AideDiscoveredCapability<AideAuthProviderCapability>[];
-  readonly primeContributions: () => readonly AideDiscoveredCapability<AidePrimeContributionCapability>[];
+  readonly authProviders: () => readonly AideDiscoveredCapability<AidePublicAuthProviderSnapshot>[];
+  readonly primeContributions: () => readonly AideDiscoveredCapability<AidePublicPrimeContributionSnapshot>[];
   readonly resolvePullRequestProviderForRemote: (
     remoteUrl: string,
     options?: PullRequestProviderResolutionOptions<AidePullRequestRemoteMatch>
@@ -112,7 +128,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestListResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'listPullRequests'>
   >;
   readonly listPullRequestsForRepository: (
     repository: AidePullRequestRepositoryRef,
@@ -120,7 +136,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestListResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'listPullRequests'>
   >;
   readonly getPullRequestForRemote: (
     remoteUrl: string,
@@ -128,7 +144,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestViewResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'getPullRequest'>
   >;
   readonly getPullRequestForRepository: (
     repository: AidePullRequestRepositoryRef,
@@ -136,7 +152,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestViewResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'getPullRequest'>
   >;
   readonly createPullRequestForRemote: (
     remoteUrl: string,
@@ -144,7 +160,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCreateResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'createPullRequest'>
   >;
   readonly createPullRequestForRepository: (
     repository: AidePullRequestRepositoryRef,
@@ -152,7 +168,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCreateResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'createPullRequest'>
   >;
   readonly updatePullRequestForRemote: (
     remoteUrl: string,
@@ -160,7 +176,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestUpdateResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'updatePullRequest'>
   >;
   readonly updatePullRequestForRepository: (
     repository: AidePullRequestRepositoryRef,
@@ -168,7 +184,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestUpdateResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'updatePullRequest'>
   >;
   readonly updatePullRequestForUrl: (
     url: string,
@@ -176,7 +192,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestUpdateResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'updatePullRequest'>
   >;
   readonly getPullRequestContextForRemote: (
     remoteUrl: string,
@@ -187,7 +203,7 @@ export interface AideHostServices {
       AidePullRequestRemoteMatch,
       AidePullRequestViewResult
     >,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'getPullRequest'>
   >;
   readonly getPullRequestContextForRepository: (
     repository: AidePullRequestRepositoryRef,
@@ -198,7 +214,7 @@ export interface AideHostServices {
       AidePullRequestRepositoryMatch,
       AidePullRequestViewResult
     >,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'getPullRequest'>
   >;
   readonly getPullRequestContextForUrl: (
     url: string,
@@ -208,7 +224,7 @@ export interface AideHostServices {
       AidePullRequestUrlMatch,
       AidePullRequestViewResult
     >,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'getPullRequest'>
   >;
   readonly getPullRequestDiffForRemote: (
     remoteUrl: string,
@@ -216,7 +232,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestDiffResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'getPullRequestDiff'>
   >;
   readonly getPullRequestDiffForRepository: (
     repository: AidePullRequestRepositoryRef,
@@ -224,14 +240,14 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestDiffResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'getPullRequestDiff'>
   >;
   readonly getPullRequestDiffForUrl: (
     url: string,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestDiffResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'getPullRequestDiff'>
   >;
   readonly listPullRequestCommentsForRemote: (
     remoteUrl: string,
@@ -239,7 +255,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentsResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'listPullRequestComments'>
   >;
   readonly listPullRequestCommentsForRepository: (
     repository: AidePullRequestRepositoryRef,
@@ -247,14 +263,14 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentsResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'listPullRequestComments'>
   >;
   readonly listPullRequestCommentsForUrl: (
     url: string,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentsResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'listPullRequestComments'>
   >;
   readonly addPullRequestCommentForRemote: (
     remoteUrl: string,
@@ -262,7 +278,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'addPullRequestComment'>
   >;
   readonly addPullRequestCommentForRepository: (
     repository: AidePullRequestRepositoryRef,
@@ -270,7 +286,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'addPullRequestComment'>
   >;
   readonly addPullRequestCommentForUrl: (
     url: string,
@@ -278,7 +294,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'addPullRequestComment'>
   >;
   readonly replyToPullRequestCommentForRemote: (
     remoteUrl: string,
@@ -286,7 +302,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'replyToPullRequestComment'>
   >;
   readonly replyToPullRequestCommentForRepository: (
     repository: AidePullRequestRepositoryRef,
@@ -294,7 +310,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'replyToPullRequestComment'>
   >;
   readonly replyToPullRequestCommentForUrl: (
     url: string,
@@ -302,7 +318,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'replyToPullRequestComment'>
   >;
   readonly findPullRequestForBranchForRemote: (
     remoteUrl: string,
@@ -310,7 +326,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestBranchLookupResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'findPullRequestForBranch'>
   >;
   readonly findPullRequestForBranchForRepository: (
     repository: AidePullRequestRepositoryRef,
@@ -318,7 +334,7 @@ export interface AideHostServices {
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestBranchLookupResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'findPullRequestForBranch'>
   >;
   readonly findPullRequestForBranchContextForRemote: (
     remoteUrl: string,
@@ -329,7 +345,7 @@ export interface AideHostServices {
       AidePullRequestRemoteMatch,
       AidePullRequestBranchLookupResult
     >,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'findPullRequestForBranch'>
   >;
   readonly findPullRequestForBranchContextForRepository: (
     repository: AidePullRequestRepositoryRef,
@@ -340,15 +356,99 @@ export interface AideHostServices {
       AidePullRequestRepositoryMatch,
       AidePullRequestBranchLookupResult
     >,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'findPullRequestForBranch'>
   >;
   readonly getPullRequestForUrl: (
     url: string,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestViewResult,
-    PullRequestProviderOperationInvocationError
+    PullRequestProviderOperationInvocationError<'getPullRequest'>
   >;
+}
+
+export interface AidePublicAuthProviderSnapshot {
+  readonly providerId: string;
+  readonly label: string;
+  readonly login?: AideAuthLoginMetadata;
+  readonly logout?: AideAuthLogoutMetadata;
+}
+
+export interface AidePublicPrimeStatusSnapshot {
+  readonly groupId: string;
+  readonly groupLabel: string;
+  readonly label: string;
+  readonly messages?: AidePrimeStatusMessages;
+}
+
+export interface AidePublicPrimeContributionSnapshot {
+  readonly status?: readonly AidePublicPrimeStatusSnapshot[];
+  readonly sections?: () => Effect.Effect<
+    readonly AidePrimeSection[],
+    PrimeContributionError,
+    never
+  >;
+}
+
+export type AideTrustedAuthProviderRegistration = Readonly<{
+  provenance: 'trusted';
+  pluginId: string;
+  capability: AideAuthProviderCapability<
+    KeyringService,
+    KeyringService,
+    KeyringService,
+    KeyringService
+  >;
+}>;
+
+export type AideExternalAuthProviderRegistration = Readonly<{
+  provenance: 'external';
+  pluginId: string;
+  capability: AideAuthProviderCapability<never, never, never, never>;
+}>;
+
+export type AideAuthProviderRegistration =
+  | AideTrustedAuthProviderRegistration
+  | AideExternalAuthProviderRegistration;
+
+export type AideTrustedPrimeContributionRegistration = Readonly<{
+  provenance: 'trusted';
+  pluginId: string;
+  capability: AidePrimeContributionCapability<KeyringService>;
+}>;
+
+export type AideExternalPrimeContributionRegistration = Readonly<{
+  provenance: 'external';
+  pluginId: string;
+  capability: AidePrimeContributionCapability<never>;
+}>;
+
+export type AidePrimeContributionRegistration =
+  | AideTrustedPrimeContributionRegistration
+  | AideExternalPrimeContributionRegistration;
+
+/** Trusted in-process services. Never export this contract from plugin-api. */
+export interface AideInternalHostServices extends AideHostServices {
+  readonly publicServices: AideHostServices;
+  readonly authProviderRegistrations: () => readonly AideAuthProviderRegistration[];
+  readonly primeContributionRegistrations: () => readonly AidePrimeContributionRegistration[];
+  readonly trustedAuthProviders: () => readonly AideDiscoveredCapability<
+    AideAuthProviderCapability<
+      KeyringService,
+      KeyringService,
+      KeyringService,
+      KeyringService
+    >
+  >[];
+  readonly trustedPrimeContributions: () => readonly AideDiscoveredCapability<
+    AidePrimeContributionCapability<KeyringService>
+  >[];
+  readonly provideTrustedKeyring: <A, E>(
+    effect: Effect.Effect<A, E, KeyringService>
+  ) => Effect.Effect<A, E, never>;
+  readonly isolatePublicEffect: <A, E>(
+    effect: Effect.Effect<A, E, never>
+  ) => Effect.Effect<A, E, never>;
 }
 
 export class AideHostServicesTag extends Context.Tag('AideHostServices')<
@@ -356,21 +456,45 @@ export class AideHostServicesTag extends Context.Tag('AideHostServices')<
   AideHostServices
 >() {}
 
+export class AideInternalHostServicesTag extends Context.Tag(
+  'AideInternalHostServices'
+)<AideInternalHostServicesTag, AideInternalHostServices>() {}
+
 export interface AideHostContext {
-  readonly services: AideHostServices;
+  readonly services: AideInternalHostServices;
+  readonly keyringLayer: Layer.Layer<KeyringService>;
 }
 
 function discoveredCapabilities<TCapability>(
-  capabilities: readonly OwnedPluginCapability<TCapability>[]
+  capabilities: readonly PluginCapability<TCapability>[]
 ): readonly AideDiscoveredCapability<TCapability>[] {
-  return Object.freeze(
-    capabilities.map((entry) =>
+  const discovered: AideDiscoveredCapability<TCapability>[] = [];
+  const count = ownArrayLength(capabilities) ?? 0;
+  for (let index = 0; index < count; index += 1) {
+    const entry = ownArrayDataValue<PluginCapability<TCapability>>(
+      capabilities,
+      index
+    );
+    if (!entry.found) continue;
+    defineHostArrayIndex(
+      discovered,
+      index,
       Object.freeze({
-        pluginId: entry.pluginId,
-        capability: entry.capability,
+        pluginId: entry.value.pluginId,
+        capability: entry.value.capability,
       })
-    )
-  );
+    );
+  }
+  return Object.freeze(discovered);
+}
+
+export { isolatePublicCapabilityEffect } from './public-capability-invocation.js';
+
+function invokePublicPrimeSections(
+  pluginId: string,
+  callback: () => Effect.Effect<readonly AidePrimeSection[], unknown, never>
+): Effect.Effect<readonly AidePrimeSection[], PrimeContributionError, never> {
+  return invokePrimeSectionsCallback(pluginId, callback);
 }
 
 /** @internal Legacy yargs bridge. Descriptor commands should use Effect context. */
@@ -383,6 +507,7 @@ export function attachAideHostContext<TArgv extends object>(
       argv,
       Object.freeze({
         services: context.services,
+        keyringLayer: context.keyringLayer,
       })
     );
   }
@@ -396,17 +521,117 @@ export function getAideHostContext(argv: unknown): AideHostContext | null {
   return aideHostContexts.get(argv) ?? null;
 }
 
-export function createAideHostServices(
-  registry: CommandRegistry
+export function createAideHostServices<
+  RAuth,
+  RAuthStatus,
+  RAuthAccounts,
+  RAuthLogin,
+  RAuthLogout,
+  RPrimeStatus,
+  RPullRequestAuthStatus,
+>(
+  registry: CommandRegistry<
+    RAuth,
+    RAuthStatus,
+    RAuthAccounts,
+    RAuthLogin,
+    RAuthLogout,
+    RPrimeStatus,
+    RPullRequestAuthStatus
+  >
 ): AideHostServices {
-  const authProviders = discoveredCapabilities(
+  const discoveredAuthProviders = discoveredCapabilities(
     registry.capabilities.authProviders()
   );
-  const primeContributions = discoveredCapabilities(
+  const discoveredPrimeContributions = discoveredCapabilities(
     registry.capabilities.primeContributions()
   );
+  const authProviders: AideDiscoveredCapability<AidePublicAuthProviderSnapshot>[] =
+    [];
+  const authProviderCount = ownArrayLength(discoveredAuthProviders) ?? 0;
+  for (let index = 0; index < authProviderCount; index += 1) {
+    const entry = ownArrayDataValue<
+      AideDiscoveredCapability<
+        AideAuthProviderCapability<
+          RAuthStatus,
+          RAuthAccounts,
+          RAuthLogin,
+          RAuthLogout
+        >
+      >
+    >(discoveredAuthProviders, index);
+    if (!entry.found) continue;
+    defineHostArrayIndex(
+      authProviders,
+      index,
+      Object.freeze({
+        pluginId: entry.value.pluginId,
+        capability: Object.freeze({
+          providerId: entry.value.capability.providerId,
+          label: entry.value.capability.label,
+          login: entry.value.capability.login,
+          logout: entry.value.capability.logout,
+        }),
+      })
+    );
+  }
+  Object.freeze(authProviders);
+
+  const primeContributions: AideDiscoveredCapability<AidePublicPrimeContributionSnapshot>[] =
+    [];
+  const primeContributionCount =
+    ownArrayLength(discoveredPrimeContributions) ?? 0;
+  for (let index = 0; index < primeContributionCount; index += 1) {
+    const entry = ownArrayDataValue<
+      AideDiscoveredCapability<AidePrimeContributionCapability<RPrimeStatus>>
+    >(discoveredPrimeContributions, index);
+    if (!entry.found) continue;
+    let statusSnapshots: AidePublicPrimeStatusSnapshot[] | undefined;
+    const statuses = entry.value.capability.status;
+    if (statuses !== undefined) {
+      statusSnapshots = [];
+      const statusCount = ownArrayLength(statuses) ?? 0;
+      for (let statusIndex = 0; statusIndex < statusCount; statusIndex += 1) {
+        const status = ownArrayDataValue<(typeof statuses)[number]>(
+          statuses,
+          statusIndex
+        );
+        if (!status.found) continue;
+        defineHostArrayIndex(
+          statusSnapshots,
+          statusIndex,
+          Object.freeze({
+            groupId: status.value.groupId,
+            groupLabel: status.value.groupLabel,
+            label: status.value.label,
+            messages: status.value.messages,
+          })
+        );
+      }
+      Object.freeze(statusSnapshots);
+    }
+    defineHostArrayIndex(
+      primeContributions,
+      index,
+      Object.freeze({
+        pluginId: entry.value.pluginId,
+        capability: Object.freeze({
+          status: statusSnapshots,
+          sections:
+            entry.value.capability.sections === undefined
+              ? undefined
+              : () =>
+                  invokePublicPrimeSections(
+                    entry.value.pluginId,
+                    entry.value.capability.sections!
+                  ),
+        }),
+      })
+    );
+  }
+  Object.freeze(primeContributions);
   const pullRequestProviders = registry.capabilities.pullRequestProviders();
-  return Object.freeze({
+  const publicServices: AideHostServices = Object.freeze({
     authProviders: () => authProviders,
     primeContributions: () => primeContributions,
     resolvePullRequestProviderForRemote: (
@@ -723,5 +948,87 @@ export function createAideHostServices(
       url: string,
       options: PullRequestProviderOperationOptions = {}
     ) => getPullRequestForUrl(pullRequestProviders, url, options),
+  });
+  return publicServices;
+}
+
+export function createAideInternalHostServices(
+  registry: KeyringCommandRegistry,
+  keyringLayer: Layer.Layer<KeyringService>
+): AideInternalHostServices {
+  const publicServices = createAideHostServices(registry);
+  const trustedAuthProviders = discoveredCapabilities(
+    registry.capabilities.trustedAuthProviders()
+  );
+  const trustedPrimeContributions = discoveredCapabilities(
+    registry.capabilities.trustedPrimeContributions()
+  );
+  const authProviderEntries = registry.capabilities.authProviders();
+  const authProviderRegistrations: AideAuthProviderRegistration[] = [];
+  const authProviderCount = ownArrayLength(authProviderEntries) ?? 0;
+  for (let index = 0; index < authProviderCount; index += 1) {
+    const entry = ownArrayDataValue<(typeof authProviderEntries)[number]>(
+      authProviderEntries,
+      index
+    );
+    if (!entry.found) continue;
+    defineHostArrayIndex(
+      authProviderRegistrations,
+      index,
+      entry.value.provenance === 'trusted'
+        ? Object.freeze({
+            provenance: 'trusted' as const,
+            pluginId: entry.value.pluginId,
+            capability: entry.value.capability,
+          })
+        : Object.freeze({
+            provenance: 'external' as const,
+            pluginId: entry.value.pluginId,
+            capability: entry.value.capability,
+          })
+    );
+  }
+  Object.freeze(authProviderRegistrations);
+
+  const primeContributionEntries = registry.capabilities.primeContributions();
+  const primeContributionRegistrations: AidePrimeContributionRegistration[] =
+    [];
+  const primeContributionCount = ownArrayLength(primeContributionEntries) ?? 0;
+  for (let index = 0; index < primeContributionCount; index += 1) {
+    const entry = ownArrayDataValue<(typeof primeContributionEntries)[number]>(
+      primeContributionEntries,
+      index
+    );
+    if (!entry.found) continue;
+    defineHostArrayIndex(
+      primeContributionRegistrations,
+      index,
+      entry.value.provenance === 'trusted'
+        ? Object.freeze({
+            provenance: 'trusted' as const,
+            pluginId: entry.value.pluginId,
+            capability: entry.value.capability,
+          })
+        : Object.freeze({
+            provenance: 'external' as const,
+            pluginId: entry.value.pluginId,
+            capability: entry.value.capability,
+          })
+    );
+  }
+  Object.freeze(primeContributionRegistrations);
+
+  return Object.freeze({
+    ...publicServices,
+    publicServices,
+    authProviderRegistrations: () => authProviderRegistrations,
+    primeContributionRegistrations: () => primeContributionRegistrations,
+    trustedAuthProviders: () => trustedAuthProviders,
+    trustedPrimeContributions: () => trustedPrimeContributions,
+    provideTrustedKeyring: <A, E>(
+      effect: Effect.Effect<A, E, KeyringService>
+    ) =>
+      isolatePublicCapabilityEffect(effect.pipe(Effect.provide(keyringLayer))),
+    isolatePublicEffect: isolatePublicCapabilityEffect,
   });
 }

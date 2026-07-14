@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { Effect } from 'effect';
+import { Cause, Context, Effect, Exit } from 'effect';
+import { inspect } from 'node:util';
 
 import {
   createCommandRegistry,
-  type OwnedPluginCapability,
+  createKeyringCommandRegistry,
+  type PluginCapability,
 } from '@cli/host/command-registry.js';
 import {
   createAideHostServices,
@@ -11,7 +13,7 @@ import {
 } from '@cli/host/runtime-context.js';
 import {
   defineAidePlugin,
-  type AidePullRequestProviderCapability,
+  type AidePullRequestProviderCapability as AidePullRequestProviderCapabilityShape,
   type AidePullRequestRemoteMatch,
   type AidePullRequestUrlMatch,
 } from '@cli/host/plugin-descriptor.js';
@@ -20,6 +22,7 @@ import { createBuiltinCommandRegistry } from '@cli/plugins/builtin.js';
 import { createGitHubPlugin } from '@cli/plugins/github/plugin.js';
 import type { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import type { GitHubClient } from '@lib/github-client.js';
+import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
 import { loadAzureDevOpsConfig } from '@lib/config.js';
 import {
   installMockSecrets,
@@ -38,6 +41,17 @@ import type {
   CreateThreadResponse,
 } from '@lib/types.js';
 
+type AidePullRequestProviderCapability = Omit<
+  AidePullRequestProviderCapabilityShape<unknown>,
+  'authStatus'
+>;
+type ServiceFreePullRequestProviderCapability =
+  AidePullRequestProviderCapabilityShape<never>;
+
+class NonKeyringPullRequestAuth extends Context.Tag(
+  'aide.test.NonKeyringPullRequestAuth'
+)<NonKeyringPullRequestAuth, { readonly configured: boolean }>() {}
+
 import {
   platformContextFromPullRequestProvider,
   resolvePullRequestPlatformContextForRemote,
@@ -46,9 +60,11 @@ import {
   AmbiguousPullRequestProviderError,
   InvalidPullRequestProviderMatchError,
   InvalidPullRequestProviderOperationResultError,
+  PullRequestProviderMutationIndeterminateError,
   PullRequestProviderOperationError,
   PullRequestProviderOperationTimeoutError,
   PullRequestProviderInvocationError,
+  PullRequestProviderTimeoutError,
   UnsupportedPullRequestProviderOperationError,
   UnsupportedPullRequestProviderError,
   addPullRequestCommentForRemote,
@@ -80,6 +96,7 @@ import {
   resolvePullRequestProviderFromRegistryForRemote,
   resolvePullRequestProviderFromRegistryForRepositoryInput,
   resolvePullRequestProviderFromRegistryForUrl,
+  pullRequestProviderErrorMessage,
   updatePullRequestForRemote,
   updatePullRequestForRepository,
 } from './provider-resolver.js';
@@ -256,7 +273,7 @@ function fakeProvider(
   priority: number,
   remoteMatch?: AidePullRequestRemoteMatch,
   pullRequestUrlMatch?: AidePullRequestUrlMatch
-): OwnedPluginCapability<AidePullRequestProviderCapability> {
+): PluginCapability<ServiceFreePullRequestProviderCapability> {
   return {
     pluginId,
     capability: fakeProviderCapability(
@@ -273,7 +290,7 @@ function fakeProviderCapability(
   priority: number,
   remoteMatch?: AidePullRequestRemoteMatch,
   pullRequestUrlMatch?: AidePullRequestUrlMatch
-): AidePullRequestProviderCapability {
+): ServiceFreePullRequestProviderCapability {
   return {
     providerId,
     priority,
@@ -303,7 +320,7 @@ function malformedProvider(
     readonly remote?: () => unknown;
     readonly pullRequestUrl?: () => unknown;
   }
-): OwnedPluginCapability<AidePullRequestProviderCapability> {
+): PluginCapability<ServiceFreePullRequestProviderCapability> {
   return {
     pluginId,
     capability: {
@@ -335,7 +352,7 @@ function pluginWithPullRequestProvider(pluginId: string, providerId: string) {
 }
 
 function hostServicesForProviders(
-  providers: readonly OwnedPluginCapability<AidePullRequestProviderCapability>[]
+  providers: readonly PluginCapability<AidePullRequestProviderCapability>[]
 ): Pick<
   AideHostServices,
   'resolvePullRequestProviderForRemote' | 'resolvePullRequestProviderForUrl'
@@ -348,7 +365,1148 @@ function hostServicesForProviders(
   };
 }
 
+function expectLookupSecretsAbsent(
+  error: unknown,
+  secrets: readonly string[]
+): void {
+  const failure = error as Error & {
+    readonly cause?: unknown;
+    readonly value?: unknown;
+  };
+  const cause = Cause.fail(error);
+  const surfaces = [
+    typeof failure.value === 'string' ? failure.value : '',
+    failure.message,
+    String(error),
+    JSON.stringify(error),
+    inspect(error, { depth: 12 }),
+    failure.cause === undefined ? '' : inspect(failure.cause, { depth: 12 }),
+    Cause.pretty(cause),
+    JSON.stringify(cause),
+    inspect(cause, { depth: 12 }),
+    pullRequestProviderErrorMessage(error) ?? '',
+  ];
+
+  for (const secret of secrets) {
+    for (const surface of surfaces) {
+      expect(surface).not.toContain(secret);
+    }
+  }
+}
+
+const ambiguousScpLookupCases = [
+  {
+    name: 'nested userinfo in the retained path',
+    value:
+      'TODO160-SCP-OUTER-USER@example.invalid:org/TODO160-SCP-INNER-USER:TODO160-SCP-INNER-PASSWORD@inner.invalid/repo.git',
+    secrets: [
+      'TODO160-SCP-OUTER-USER',
+      'TODO160-SCP-INNER-USER',
+      'TODO160-SCP-INNER-PASSWORD',
+    ],
+  },
+  {
+    name: 'colon-delimited password-like path text',
+    value:
+      'TODO160-SCP-COLON-OUTER@example.invalid:org:TODO160-SCP-COLON-PASSWORD/repo.git',
+    secrets: ['TODO160-SCP-COLON-OUTER', 'TODO160-SCP-COLON-PASSWORD'],
+  },
+  {
+    name: 'nested scheme-like path text',
+    value:
+      'TODO160-SCP-SCHEME-OUTER@example.invalid:org/ssh:TODO160-SCP-SCHEME-USER:TODO160-SCP-SCHEME-PASSWORD@inner.invalid/repo.git',
+    secrets: [
+      'TODO160-SCP-SCHEME-OUTER',
+      'TODO160-SCP-SCHEME-USER',
+      'TODO160-SCP-SCHEME-PASSWORD',
+    ],
+  },
+  {
+    name: 'nested URL-like path text',
+    value:
+      'TODO160-SCP-URL-OUTER@example.invalid:org/https://TODO160-SCP-URL-USER:TODO160-SCP-URL-PASSWORD@inner.invalid/repo.git',
+    secrets: [
+      'TODO160-SCP-URL-OUTER',
+      'TODO160-SCP-URL-USER',
+      'TODO160-SCP-URL-PASSWORD',
+    ],
+  },
+  {
+    name: 'nested IPv6 and userinfo delimiters',
+    value:
+      'TODO160-SCP-IPV6-OUTER@[2001:db8::1]:org/TODO160-SCP-IPV6-USER:TODO160-SCP-IPV6-PASSWORD@[2001:db8::2]/repo.git',
+    secrets: [
+      'TODO160-SCP-IPV6-OUTER',
+      'TODO160-SCP-IPV6-USER',
+      'TODO160-SCP-IPV6-PASSWORD',
+    ],
+  },
+  {
+    name: 'mixed at-sign and colon path delimiters',
+    value:
+      'TODO160-SCP-MIXED-OUTER@example.invalid:org/@TODO160-SCP-MIXED-USER:TODO160-SCP-MIXED-PASSWORD:TODO160-SCP-MIXED-TOKEN/repo.git',
+    secrets: [
+      'TODO160-SCP-MIXED-OUTER',
+      'TODO160-SCP-MIXED-USER',
+      'TODO160-SCP-MIXED-PASSWORD',
+      'TODO160-SCP-MIXED-TOKEN',
+    ],
+  },
+] as const;
+
+const normalizationAmbiguousNetworkLookupCases = [
+  {
+    name: 'truncated HTTPS authority from comment 241',
+    value:
+      'https:outer.invalid/org/RECERT_INNER_USER:RECERT_INNER_PASSWORD@inner.invalid/repo.git',
+    secrets: ['RECERT_INNER_USER', 'RECERT_INNER_PASSWORD'],
+  },
+  {
+    name: 'HTTPS authority backslash from comment 241',
+    value:
+      'https://outer.invalid\\@RECERT_INNER_USER:RECERT_INNER_PASSWORD@inner.invalid/repo.git',
+    secrets: ['RECERT_INNER_USER', 'RECERT_INNER_PASSWORD'],
+  },
+  {
+    name: 'missing URL authority slash',
+    value:
+      'ssh:/outer.invalid/org/TODO160-SLASH-USER:TODO160-SLASH-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-SLASH-USER', 'TODO160-SLASH-PASSWORD'],
+  },
+  {
+    name: 'extra URL authority slash',
+    value:
+      'git:///outer.invalid/org/TODO160-EXTRA-SLASH-USER:TODO160-EXTRA-SLASH-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-EXTRA-SLASH-USER', 'TODO160-EXTRA-SLASH-PASSWORD'],
+  },
+  {
+    name: 'nested raw URL userinfo',
+    value:
+      'https://TODO160-NESTED-OUTER:TODO160-NESTED-PASSWORD@inner.invalid@outer.invalid/repo.git',
+    secrets: ['TODO160-NESTED-OUTER', 'TODO160-NESTED-PASSWORD'],
+  },
+  {
+    name: 'invalid percent escape before credential-shaped path text',
+    value:
+      'http://outer.invalid/%ZZ/TODO160-PERCENT-USER:TODO160-PERCENT-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-PERCENT-USER', 'TODO160-PERCENT-PASSWORD'],
+  },
+  {
+    name: 'URL whitespace normalization before credential-shaped path text',
+    value:
+      'https://outer.invalid/org /TODO160-SPACE-USER:TODO160-SPACE-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-SPACE-USER', 'TODO160-SPACE-PASSWORD'],
+  },
+  {
+    name: 'mixed slash and backslash authority delimiters',
+    value:
+      'HtTpS:/\\outer.invalid/org/TODO160-MIXED-USER:TODO160-MIXED-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-MIXED-USER', 'TODO160-MIXED-PASSWORD'],
+  },
+  {
+    name: 'malformed bracketed SCP IPv6 host',
+    value: 'git@[::::]:owner/repo.git',
+    secrets: [],
+  },
+  {
+    name: 'malformed bracketed credential-bearing URL host',
+    value:
+      'ssh://TODO160-BRACKET-USER:TODO160-BRACKET-PASSWORD@[::::]/owner/repo.git',
+    secrets: ['TODO160-BRACKET-USER', 'TODO160-BRACKET-PASSWORD'],
+  },
+] as const;
+
+const nonCanonicalHostLookupCases = [
+  {
+    name: 'malformed DNS from comment 243',
+    value:
+      'https://example..invalid/org/CERT_DNS_USER:CERT_DNS_PASSWORD@inner.invalid/repo.git',
+    secrets: ['CERT_DNS_USER', 'CERT_DNS_PASSWORD'],
+  },
+  {
+    name: 'octal IPv4 from comment 243',
+    value:
+      'https://0177.0.0.1/org/CERT_OCTAL_USER:CERT_OCTAL_PASSWORD@inner.invalid/repo.git',
+    secrets: ['CERT_OCTAL_USER', 'CERT_OCTAL_PASSWORD'],
+  },
+  {
+    name: 'integer IPv4',
+    value:
+      'https://2130706433/org/TODO160-INTEGER-USER:TODO160-INTEGER-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-INTEGER-USER', 'TODO160-INTEGER-PASSWORD'],
+  },
+  {
+    name: 'short IPv4',
+    value:
+      'https://127.1/org/TODO160-SHORT-USER:TODO160-SHORT-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-SHORT-USER', 'TODO160-SHORT-PASSWORD'],
+  },
+  {
+    name: 'hex IPv4',
+    value:
+      'https://0x7f.0.0.1/org/TODO160-HEX-USER:TODO160-HEX-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-HEX-USER', 'TODO160-HEX-PASSWORD'],
+  },
+  {
+    name: 'octal-like IPv4 integer',
+    value:
+      'https://017700000001/org/TODO160-OCTAL-INT-USER:TODO160-OCTAL-INT-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-OCTAL-INT-USER', 'TODO160-OCTAL-INT-PASSWORD'],
+  },
+  {
+    name: 'leading-zero IPv4',
+    value:
+      'https://127.000.000.001/org/TODO160-ZERO-USER:TODO160-ZERO-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-ZERO-USER', 'TODO160-ZERO-PASSWORD'],
+  },
+  {
+    name: 'overflow IPv4',
+    value:
+      'https://256.0.0.1/org/TODO160-OVERFLOW-USER:TODO160-OVERFLOW-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-OVERFLOW-USER', 'TODO160-OVERFLOW-PASSWORD'],
+  },
+  {
+    name: 'leading empty DNS label',
+    value:
+      'https://.example.invalid/org/TODO160-EMPTY-USER:TODO160-EMPTY-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-EMPTY-USER', 'TODO160-EMPTY-PASSWORD'],
+  },
+  {
+    name: 'more than one trailing DNS root dot',
+    value:
+      'https://example.invalid../org/TODO160-ROOT-USER:TODO160-ROOT-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-ROOT-USER', 'TODO160-ROOT-PASSWORD'],
+  },
+  {
+    name: 'leading DNS label hyphen',
+    value:
+      'https://-example.invalid/org/TODO160-LEADING-HYPHEN-USER:TODO160-LEADING-HYPHEN-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-LEADING-HYPHEN-USER', 'TODO160-LEADING-HYPHEN-PASSWORD'],
+  },
+  {
+    name: 'trailing DNS label hyphen',
+    value:
+      'https://example-.invalid/org/TODO160-TRAILING-HYPHEN-USER:TODO160-TRAILING-HYPHEN-PASSWORD@inner.invalid/repo.git',
+    secrets: [
+      'TODO160-TRAILING-HYPHEN-USER',
+      'TODO160-TRAILING-HYPHEN-PASSWORD',
+    ],
+  },
+  {
+    name: 'overlong DNS label',
+    value: `https://${'a'.repeat(64)}.invalid/org/TODO160-LABEL-USER:TODO160-LABEL-PASSWORD@inner.invalid/repo.git`,
+    secrets: ['TODO160-LABEL-USER', 'TODO160-LABEL-PASSWORD'],
+  },
+  {
+    name: 'overlong DNS host',
+    value: `https://${`${'a'.repeat(63)}.`.repeat(3)}${'b'.repeat(62)}/org/TODO160-HOST-USER:TODO160-HOST-PASSWORD@inner.invalid/repo.git`,
+    secrets: ['TODO160-HOST-USER', 'TODO160-HOST-PASSWORD'],
+  },
+  {
+    name: 'invalid IDNA result',
+    value:
+      'https://a\u200d.invalid/org/TODO160-IDNA-USER:TODO160-IDNA-PASSWORD@inner.invalid/repo.git',
+    secrets: ['TODO160-IDNA-USER', 'TODO160-IDNA-PASSWORD'],
+  },
+] as const;
+
+function directResolutionFailures(
+  source: 'git-remote' | 'repository-ref',
+  value: string,
+  failureSecret: string
+) {
+  return [
+    new UnsupportedPullRequestProviderError({
+      source,
+      value,
+    }),
+    new AmbiguousPullRequestProviderError({
+      source,
+      value,
+      priority: 100,
+      candidates: [],
+    }),
+    new InvalidPullRequestProviderMatchError({
+      source,
+      value,
+      pluginId: 'direct-plugin',
+      providerId: 'direct-provider',
+      reason: 'invalid matcher result',
+    }),
+    new PullRequestProviderInvocationError({
+      source,
+      value,
+      pluginId: 'direct-plugin',
+      providerId: 'direct-provider',
+      cause: new Error(failureSecret),
+    }),
+    new PullRequestProviderTimeoutError({
+      source,
+      value,
+      pluginId: 'direct-plugin',
+      providerId: 'direct-provider',
+    }),
+  ] as const;
+}
+
 describe('pull request provider resolution', () => {
+  test('fails closed for ambiguous SCP delimiters in direct and nested repository descriptors', () => {
+    const failureSecret = 'TODO160-SCP-DIRECT-FAILURE';
+
+    for (const testCase of ambiguousScpLookupCases) {
+      for (const [source, value] of [
+        ['git-remote', testCase.value],
+        ['repository-ref', `provider=github repo=${testCase.value}`],
+      ] as const) {
+        for (const failure of directResolutionFailures(
+          source,
+          value,
+          failureSecret
+        )) {
+          expect(failure.value).toBe('<redacted>');
+          expectLookupSecretsAbsent(failure, [
+            ...testCase.secrets,
+            failureSecret,
+          ]);
+        }
+      }
+    }
+  });
+
+  test('fails closed for ambiguous SCP delimiters through all five resolution families', async () => {
+    const unsupportedCase = ambiguousScpLookupCases[0];
+    const ambiguousCase = ambiguousScpLookupCases[1];
+    const invalidCase = ambiguousScpLookupCases[2];
+    const invocationCase = ambiguousScpLookupCases[4];
+    const timeoutCase = ambiguousScpLookupCases[5];
+    const invocationSecret = 'TODO160-SCP-INVOCATION-FAILURE';
+
+    const unsupported = await Effect.runPromise(
+      resolvePullRequestProviderForRemote([], unsupportedCase.value).pipe(
+        Effect.flip
+      )
+    );
+    const ambiguous = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(
+        [
+          fakeProvider('ambiguous-a-plugin', 'ambiguous-a', 100),
+          fakeProvider('ambiguous-b-plugin', 'ambiguous-b', 100),
+        ],
+        ambiguousCase.value
+      ).pipe(Effect.flip)
+    );
+    const invalid = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(
+        [
+          malformedProvider('invalid-plugin', 'invalid-provider', 100, {
+            remote: () => ({ attacker: true }),
+          }),
+        ],
+        invalidCase.value
+      ).pipe(Effect.flip)
+    );
+    const invocation = await Effect.runPromise(
+      resolvePullRequestProviderForRepositoryInput(
+        [
+          {
+            pluginId: 'invocation-plugin',
+            capability: {
+              ...fakeProviderCapability('invocation-provider', 100),
+              matchRepository: () => Effect.fail(new Error(invocationSecret)),
+            },
+          },
+        ],
+        {
+          providerId: 'invocation-provider',
+          repo: invocationCase.value,
+        }
+      ).pipe(Effect.flip)
+    );
+    const timeout = await Effect.runPromise(
+      resolvePullRequestProviderForRepositoryInput(
+        [
+          {
+            pluginId: 'timeout-plugin',
+            capability: {
+              ...fakeProviderCapability('timeout-provider', 100),
+              matchRepository: () => Effect.never,
+            },
+          },
+        ],
+        { providerId: 'timeout-provider', repo: timeoutCase.value },
+        { matcherTimeout: '10 millis' }
+      ).pipe(Effect.flip)
+    );
+
+    const failures = [
+      {
+        error: unsupported,
+        expected: UnsupportedPullRequestProviderError,
+        secrets: unsupportedCase.secrets,
+      },
+      {
+        error: ambiguous,
+        expected: AmbiguousPullRequestProviderError,
+        secrets: ambiguousCase.secrets,
+      },
+      {
+        error: invalid,
+        expected: InvalidPullRequestProviderMatchError,
+        secrets: invalidCase.secrets,
+      },
+      {
+        error: invocation,
+        expected: PullRequestProviderInvocationError,
+        secrets: [...invocationCase.secrets, invocationSecret],
+      },
+      {
+        error: timeout,
+        expected: PullRequestProviderTimeoutError,
+        secrets: timeoutCase.secrets,
+      },
+    ] as const;
+
+    for (const failure of failures) {
+      expect(failure.error).toBeInstanceOf(failure.expected);
+      expect(failure.error.value).toBe('<redacted>');
+      expectLookupSecretsAbsent(failure.error, failure.secrets);
+    }
+  });
+
+  test('fails closed for normalization-ambiguous URLs in every direct and nested resolution error constructor', () => {
+    const failureSecret = 'TODO160-NETWORK-DIRECT-FAILURE';
+
+    for (const testCase of normalizationAmbiguousNetworkLookupCases) {
+      for (const [source, value] of [
+        ['git-remote', testCase.value],
+        ['repository-ref', `provider=github repo=${testCase.value}`],
+      ] as const) {
+        for (const failure of directResolutionFailures(
+          source,
+          value,
+          failureSecret
+        )) {
+          expect(failure.value, testCase.name).toBe('<redacted>');
+          expectLookupSecretsAbsent(failure, [
+            ...testCase.secrets,
+            failureSecret,
+          ]);
+        }
+      }
+    }
+  });
+
+  test('fails closed for normalization-ambiguous URLs through all five real resolution families', async () => {
+    const unsupportedCase = normalizationAmbiguousNetworkLookupCases[0];
+    const ambiguousCase = normalizationAmbiguousNetworkLookupCases[1];
+    const invalidCase = normalizationAmbiguousNetworkLookupCases[3];
+    const invocationCase = normalizationAmbiguousNetworkLookupCases[5];
+    const timeoutCase = normalizationAmbiguousNetworkLookupCases[7];
+    const invocationSecret = 'TODO160-NETWORK-INVOCATION-FAILURE';
+
+    const unsupported = await Effect.runPromise(
+      resolvePullRequestProviderForRemote([], unsupportedCase.value).pipe(
+        Effect.flip
+      )
+    );
+    const ambiguous = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(
+        [
+          fakeProvider(
+            'network-ambiguous-a-plugin',
+            'network-ambiguous-a',
+            100
+          ),
+          fakeProvider(
+            'network-ambiguous-b-plugin',
+            'network-ambiguous-b',
+            100
+          ),
+        ],
+        ambiguousCase.value
+      ).pipe(Effect.flip)
+    );
+    const invalid = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(
+        [
+          malformedProvider(
+            'network-invalid-plugin',
+            'network-invalid-provider',
+            100,
+            { remote: () => ({ attacker: true }) }
+          ),
+        ],
+        invalidCase.value
+      ).pipe(Effect.flip)
+    );
+    const invocation = await Effect.runPromise(
+      resolvePullRequestProviderForRepositoryInput(
+        [
+          {
+            pluginId: 'network-invocation-plugin',
+            capability: {
+              ...fakeProviderCapability('network-invocation-provider', 100),
+              matchRepository: () => Effect.fail(new Error(invocationSecret)),
+            },
+          },
+        ],
+        {
+          providerId: 'network-invocation-provider',
+          repo: invocationCase.value,
+        }
+      ).pipe(Effect.flip)
+    );
+    const timeout = await Effect.runPromise(
+      resolvePullRequestProviderForRepositoryInput(
+        [
+          {
+            pluginId: 'network-timeout-plugin',
+            capability: {
+              ...fakeProviderCapability('network-timeout-provider', 100),
+              matchRepository: () => Effect.never,
+            },
+          },
+        ],
+        {
+          providerId: 'network-timeout-provider',
+          repo: timeoutCase.value,
+        },
+        { matcherTimeout: '10 millis' }
+      ).pipe(Effect.flip)
+    );
+
+    for (const failure of [
+      {
+        error: unsupported,
+        expected: UnsupportedPullRequestProviderError,
+        secrets: unsupportedCase.secrets,
+      },
+      {
+        error: ambiguous,
+        expected: AmbiguousPullRequestProviderError,
+        secrets: ambiguousCase.secrets,
+      },
+      {
+        error: invalid,
+        expected: InvalidPullRequestProviderMatchError,
+        secrets: invalidCase.secrets,
+      },
+      {
+        error: invocation,
+        expected: PullRequestProviderInvocationError,
+        secrets: [...invocationCase.secrets, invocationSecret],
+      },
+      {
+        error: timeout,
+        expected: PullRequestProviderTimeoutError,
+        secrets: timeoutCase.secrets,
+      },
+    ] as const) {
+      expect(failure.error).toBeInstanceOf(failure.expected);
+      expect(failure.error.value).toBe('<redacted>');
+      expectLookupSecretsAbsent(failure.error, failure.secrets);
+    }
+  });
+
+  test('fails closed for malformed and non-canonical hosts in every direct and nested resolution error constructor', () => {
+    const failureSecret = 'TODO160-HOST-DIRECT-FAILURE';
+
+    for (const testCase of nonCanonicalHostLookupCases) {
+      for (const [source, value] of [
+        ['git-remote', testCase.value],
+        ['repository-ref', `provider=github repo=${testCase.value}`],
+      ] as const) {
+        for (const failure of directResolutionFailures(
+          source,
+          value,
+          failureSecret
+        )) {
+          expect(failure.value, testCase.name).toBe('<redacted>');
+          expectLookupSecretsAbsent(failure, [
+            ...testCase.secrets,
+            failureSecret,
+          ]);
+        }
+      }
+    }
+  });
+
+  test('fails closed for malformed and non-canonical hosts through all five real resolution families', async () => {
+    const unsupportedCase = nonCanonicalHostLookupCases[0];
+    const ambiguousCase = nonCanonicalHostLookupCases[1];
+    const invalidCase = nonCanonicalHostLookupCases[3];
+    const invocationCase = nonCanonicalHostLookupCases[4];
+    const timeoutCase = nonCanonicalHostLookupCases[6];
+    const invocationSecret = 'TODO160-HOST-INVOCATION-FAILURE';
+
+    const unsupported = await Effect.runPromise(
+      resolvePullRequestProviderForRemote([], unsupportedCase.value).pipe(
+        Effect.flip
+      )
+    );
+    const ambiguous = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(
+        [
+          fakeProvider('host-ambiguous-a-plugin', 'host-ambiguous-a', 100),
+          fakeProvider('host-ambiguous-b-plugin', 'host-ambiguous-b', 100),
+        ],
+        ambiguousCase.value
+      ).pipe(Effect.flip)
+    );
+    const invalid = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(
+        [
+          malformedProvider('host-invalid-plugin', 'host-invalid', 100, {
+            remote: () => ({ attacker: true }),
+          }),
+        ],
+        invalidCase.value
+      ).pipe(Effect.flip)
+    );
+    const invocation = await Effect.runPromise(
+      resolvePullRequestProviderForRepositoryInput(
+        [
+          {
+            pluginId: 'host-invocation-plugin',
+            capability: {
+              ...fakeProviderCapability('host-invocation', 100),
+              matchRepository: () => Effect.fail(new Error(invocationSecret)),
+            },
+          },
+        ],
+        { providerId: 'host-invocation', repo: invocationCase.value }
+      ).pipe(Effect.flip)
+    );
+    const timeout = await Effect.runPromise(
+      resolvePullRequestProviderForRepositoryInput(
+        [
+          {
+            pluginId: 'host-timeout-plugin',
+            capability: {
+              ...fakeProviderCapability('host-timeout', 100),
+              matchRepository: () => Effect.never,
+            },
+          },
+        ],
+        { providerId: 'host-timeout', repo: timeoutCase.value },
+        { matcherTimeout: '10 millis' }
+      ).pipe(Effect.flip)
+    );
+
+    for (const failure of [
+      {
+        error: unsupported,
+        expected: UnsupportedPullRequestProviderError,
+        secrets: unsupportedCase.secrets,
+      },
+      {
+        error: ambiguous,
+        expected: AmbiguousPullRequestProviderError,
+        secrets: ambiguousCase.secrets,
+      },
+      {
+        error: invalid,
+        expected: InvalidPullRequestProviderMatchError,
+        secrets: invalidCase.secrets,
+      },
+      {
+        error: invocation,
+        expected: PullRequestProviderInvocationError,
+        secrets: [...invocationCase.secrets, invocationSecret],
+      },
+      {
+        error: timeout,
+        expected: PullRequestProviderTimeoutError,
+        secrets: timeoutCase.secrets,
+      },
+    ] as const) {
+      expect(failure.error).toBeInstanceOf(failure.expected);
+      expect(failure.error.value).toBe('<redacted>');
+      expectLookupSecretsAbsent(failure.error, failure.secrets);
+    }
+  });
+
+  test('enforces raw network grammar while retaining standard redacted URL context and exact length bounds', () => {
+    const supported = [
+      [
+        'GIT://Example.INVALID:9418/owner/repo.git',
+        'git://Example.INVALID:9418/owner/repo.git',
+        [],
+      ],
+      [
+        'SSH://Example.INVALID:2222/owner/repo.git',
+        'ssh://Example.INVALID:2222/owner/repo.git',
+        [],
+      ],
+      [
+        'git://TODO160-GIT-USER:TODO160-GIT-PASSWORD@example.invalid:9418/owner/repo.git?token=TODO160-GIT-QUERY#TODO160-GIT-FRAGMENT',
+        'git://example.invalid:9418/owner/repo.git',
+        [
+          'TODO160-GIT-USER',
+          'TODO160-GIT-PASSWORD',
+          'TODO160-GIT-QUERY',
+          'TODO160-GIT-FRAGMENT',
+        ],
+      ],
+      [
+        'http://TODO160-HTTP-USER:TODO160-HTTP-PASSWORD@example.invalid/owner/repo.git?token=TODO160-HTTP-QUERY#TODO160-HTTP-FRAGMENT',
+        'http://example.invalid/owner/repo.git',
+        [
+          'TODO160-HTTP-USER',
+          'TODO160-HTTP-PASSWORD',
+          'TODO160-HTTP-QUERY',
+          'TODO160-HTTP-FRAGMENT',
+        ],
+      ],
+      [
+        'HtTpS://TODO160-CASE-USER:TODO160-CASE-p%40ss@EXAMPLE.INVALID/owner/repo.git?token=TODO160-CASE-QUERY#TODO160-CASE-FRAGMENT',
+        'https://example.invalid/owner/repo.git',
+        [
+          'TODO160-CASE-USER',
+          'TODO160-CASE-p%40ss',
+          'TODO160-CASE-QUERY',
+          'TODO160-CASE-FRAGMENT',
+        ],
+      ],
+      [
+        'SSH://TODO160-SSH-USER:TODO160-SSH-PASSWORD@[2001:db8::1]:2222/owner/repo.git?token=TODO160-SSH-QUERY#TODO160-SSH-FRAGMENT',
+        'ssh://[2001:db8::1]:2222/owner/repo.git',
+        [
+          'TODO160-SSH-USER',
+          'TODO160-SSH-PASSWORD',
+          'TODO160-SSH-QUERY',
+          'TODO160-SSH-FRAGMENT',
+        ],
+      ],
+    ] as const;
+
+    for (const [value, descriptor, secrets] of supported) {
+      const failure = new UnsupportedPullRequestProviderError({
+        source: 'git-remote',
+        value,
+      });
+      expect(failure.value).toBe(descriptor);
+      expectLookupSecretsAbsent(failure, secrets);
+    }
+
+    for (const value of [
+      'https://example.invalid/owner\\repo.git',
+      'https://example.invalid/owner/%QZ/repo.git',
+      'https://example.invalid/owner/ repo.git',
+      'https:\n//example.invalid/owner/repo.git',
+      'https://example.invalid]/owner/repo.git',
+      'https://first.invalid@second.invalid@third.invalid/repo.git',
+    ]) {
+      expect(
+        new UnsupportedPullRequestProviderError({
+          source: 'git-remote',
+          value,
+        }).value
+      ).toBe('<redacted>');
+    }
+
+    const exactLength = `https://example.invalid/${'a'.repeat(
+      4_096 - 'https://example.invalid/'.length
+    )}`;
+    expect(exactLength).toHaveLength(4_096);
+    expect(
+      new UnsupportedPullRequestProviderError({
+        source: 'git-remote',
+        value: exactLength,
+      }).value
+    ).toBe(exactLength);
+    expect(
+      new UnsupportedPullRequestProviderError({
+        source: 'git-remote',
+        value: `${exactLength}a`,
+      }).value
+    ).toBe('<redacted>');
+  });
+
+  test('retains ordinary safe SCP, URL, port, IPv6, Unicode, and repository context', () => {
+    const maximumLabel = 'a'.repeat(63);
+    const maximumHost = `${maximumLabel}.${maximumLabel}.${maximumLabel}.${'b'.repeat(61)}`;
+    for (const [value, descriptor] of [
+      ['git@example.invalid:owner/repo.git', 'example.invalid:owner/repo.git'],
+      ['example.invalid:owner/repo.git', 'example.invalid:owner/repo.git'],
+      ['https://localhost/owner/repo.git', 'https://localhost/owner/repo.git'],
+      ['https://intranet/owner/repo.git', 'https://intranet/owner/repo.git'],
+      [
+        'https://127.0.0.1:8443/owner/repo.git',
+        'https://127.0.0.1:8443/owner/repo.git',
+      ],
+      [
+        'https://example.invalid./owner/repo.git',
+        'https://example.invalid./owner/repo.git',
+      ],
+      [
+        'https://bücher.example/owner/repo.git',
+        'https://xn--bcher-kva.example/owner/repo.git',
+      ],
+      [
+        'git://bücher.example/owner/repo.git',
+        'git://xn--bcher-kva.example/owner/repo.git',
+      ],
+      [
+        'ssh://bücher.example:2222/owner/repo.git',
+        'ssh://xn--bcher-kva.example:2222/owner/repo.git',
+      ],
+      [
+        `https://${maximumLabel}.invalid/owner/repo.git`,
+        `https://${maximumLabel}.invalid/owner/repo.git`,
+      ],
+      [
+        `https://${maximumHost}/owner/repo.git`,
+        `https://${maximumHost}/owner/repo.git`,
+      ],
+      [
+        'https://example.invalid:8443/owner/repo.git',
+        'https://example.invalid:8443/owner/repo.git',
+      ],
+      [
+        'ssh://[2001:db8::1]:2222/owner/repo.git',
+        'ssh://[2001:db8::1]:2222/owner/repo.git',
+      ],
+      ['git@[2001:db8::1]:owner/repo.git', '[2001:db8::1]:owner/repo.git'],
+      ['git@example.invalid:工程/倉庫.git', 'example.invalid:工程/倉庫.git'],
+    ] as const) {
+      expect(
+        new UnsupportedPullRequestProviderError({
+          source: 'git-remote',
+          value,
+        }).value
+      ).toBe(descriptor);
+    }
+
+    expect(
+      new UnsupportedPullRequestProviderError({
+        source: 'repository-ref',
+        value: 'provider=github repo=git@example.invalid:owner/repo.git',
+      }).value
+    ).toBe('provider=github repo=example.invalid:owner/repo.git');
+
+    expect(
+      new UnsupportedPullRequestProviderError({
+        source: 'repository-ref',
+        value: 'provider=github repo=example.invalid:owner/repo.git',
+      }).value
+    ).toBe('provider=github repo=example.invalid:owner/repo.git');
+
+    expect(
+      new UnsupportedPullRequestProviderError({
+        source: 'repository-ref',
+        value: 'provider=github repo=https://bücher.example/owner/repo.git',
+      }).value
+    ).toBe('provider=github repo=https://xn--bcher-kva.example/owner/repo.git');
+
+    expect(
+      new UnsupportedPullRequestProviderError({
+        source: 'repository-ref',
+        value: 'provider=github repo=git://bücher.example/owner/repo.git',
+      }).value
+    ).toBe('provider=github repo=git://xn--bcher-kva.example/owner/repo.git');
+  });
+
+  test('redacts HTTPS credentials from unsupported resolution while only the matcher sees the raw lookup', async () => {
+    const secrets = [
+      'TODO160-UNSUPPORTED-USER',
+      'TODO160-UNSUPPORTED-PASSWORD',
+      'TODO160-UNSUPPORTED-QUERY',
+      'TODO160-UNSUPPORTED-FRAGMENT',
+    ] as const;
+    const remote = `https://${secrets[0]}:${secrets[1]}@example.invalid/org/repo.git?token=${secrets[2]}#${secrets[3]}`;
+    const seen: string[] = [];
+    const providers = [
+      {
+        pluginId: 'unsupported-redaction-plugin',
+        capability: {
+          ...fakeProviderCapability('unsupported-redaction', 100),
+          matchRemote: (value: string) => {
+            seen.push(value);
+            return null;
+          },
+        },
+      },
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, remote).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(UnsupportedPullRequestProviderError);
+    expect(error.value).toBe('https://example.invalid/org/repo.git');
+    expect(seen).toEqual([remote]);
+    expectLookupSecretsAbsent(error, secrets);
+  });
+
+  test('redacts HTTPS credentials from ambiguous URL resolution without losing provider candidates', async () => {
+    const secrets = [
+      'TODO160-AMBIGUOUS-USER',
+      'TODO160-AMBIGUOUS-PASSWORD',
+      'TODO160-AMBIGUOUS-QUERY',
+      'TODO160-AMBIGUOUS-FRAGMENT',
+    ] as const;
+    const url = `https://${secrets[0]}:${secrets[1]}@example.invalid/org/repo/pull/7?access_token=${secrets[2]}#${secrets[3]}`;
+    const seen: string[] = [];
+    const providers = ['ambiguous-redaction-a', 'ambiguous-redaction-b'].map(
+      (providerId) => ({
+        pluginId: `${providerId}-plugin`,
+        capability: {
+          ...fakeProviderCapability(providerId, 100),
+          matchPullRequestUrl: (value: string) => {
+            seen.push(value);
+            return {
+              source: 'pull-request-url' as const,
+              repository: externalRepository(providerId),
+              pullRequest: { number: 7 },
+            };
+          },
+        },
+      })
+    );
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForUrl(providers, url).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(AmbiguousPullRequestProviderError);
+    if (!(error instanceof AmbiguousPullRequestProviderError)) {
+      throw new Error('Expected ambiguous provider resolution error');
+    }
+    expect(error.value).toBe('https://example.invalid/org/repo/pull/7');
+    expect(error.candidates.map(({ providerId }) => providerId)).toEqual([
+      'ambiguous-redaction-a',
+      'ambiguous-redaction-b',
+    ]);
+    expect(seen).toEqual([url, url]);
+    expectLookupSecretsAbsent(error, secrets);
+  });
+
+  test('redacts SCP-like lookup credentials from invalid matcher results', async () => {
+    const secrets = [
+      'TODO160-SCP-USER',
+      'TODO160-SCP-QUERY',
+      'TODO160-SCP-FRAGMENT',
+    ] as const;
+    const remote = `${secrets[0]}@example.invalid:org/repo.git?token=${secrets[1]}#${secrets[2]}`;
+    const seen: string[] = [];
+    const providers = [
+      malformedProvider('invalid-redaction-plugin', 'invalid-redaction', 100, {
+        remote: () => {
+          seen.push(remote);
+          return { invalid: true };
+        },
+      }),
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRemote(providers, remote).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(InvalidPullRequestProviderMatchError);
+    if (!(error instanceof InvalidPullRequestProviderMatchError)) {
+      throw new Error('Expected invalid provider match error');
+    }
+    expect(error.value).toBe('example.invalid:org/repo.git');
+    expect(error.reason).toBe('match result failed structural capture');
+    expect(seen).toEqual([remote]);
+    expectLookupSecretsAbsent(error, secrets);
+  });
+
+  test('fails closed for malformed repository lookup values and discards attacker Effect failure text', async () => {
+    const lookupSecret = 'TODO160-MALFORMED-PASSWORD';
+    const failureSecret = 'TODO160-MATCHER-FAILURE';
+    const repo = `https://todo160-user:${lookupSecret}@`;
+    const attacker = new Error(failureSecret);
+    let seenRepo: string | undefined;
+    const providers = [
+      {
+        pluginId: 'invocation-redaction-plugin',
+        capability: {
+          ...fakeProviderCapability('invocation-redaction', 100),
+          matchRepository: (request: { readonly repo?: string }) => {
+            seenRepo = request.repo;
+            return Effect.fail(attacker);
+          },
+        },
+      },
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRepositoryInput(providers, {
+        providerId: 'invocation-redaction',
+        repo,
+      }).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(PullRequestProviderInvocationError);
+    expect(error.value).toBe('<redacted>');
+    expect(error.cause).not.toBe(attacker);
+    expect(seenRepo).toBe(repo);
+    expectLookupSecretsAbsent(error, [lookupSecret, failureSecret]);
+  });
+
+  test('applies the same descriptor policy to direct repository refs', async () => {
+    const secrets = [
+      'TODO160-REPOSITORY-USER',
+      'TODO160-REPOSITORY-PASSWORD',
+      'TODO160-REPOSITORY-QUERY',
+      'TODO160-REPOSITORY-FRAGMENT',
+    ] as const;
+    const displayName = `https://${secrets[0]}:${secrets[1]}@example.invalid/org/repo.git?token=${secrets[2]}#${secrets[3]}`;
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRepository([], {
+        kind: 'external',
+        providerId: 'repository-redaction',
+        displayName,
+      }).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(UnsupportedPullRequestProviderError);
+    expect(error.value).toBe('https://example.invalid/org/repo.git');
+    expectLookupSecretsAbsent(error, secrets);
+  });
+
+  test('redacts nested URL credentials from repository matcher timeout failures', async () => {
+    const secrets = [
+      'TODO160-TIMEOUT-USER',
+      'TODO160-TIMEOUT-PASSWORD',
+      'TODO160-TIMEOUT-QUERY',
+      'TODO160-TIMEOUT-FRAGMENT',
+    ] as const;
+    const repo = `https://${secrets[0]}:${secrets[1]}@example.invalid/org/repo.git?token=${secrets[2]}#${secrets[3]}`;
+    let seenRepo: string | undefined;
+    const providers = [
+      {
+        pluginId: 'timeout-redaction-plugin',
+        capability: {
+          ...fakeProviderCapability('timeout-redaction', 100),
+          matchRepository: (request: { readonly repo?: string }) => {
+            seenRepo = request.repo;
+            return Effect.never;
+          },
+        },
+      },
+    ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForRepositoryInput(
+        providers,
+        { providerId: 'timeout-redaction', repo },
+        { matcherTimeout: '10 millis' }
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(PullRequestProviderTimeoutError);
+    expect(error.value).toBe(
+      'provider=timeout-redaction repo=https://example.invalid/org/repo.git'
+    );
+    expect(seenRepo).toBe(repo);
+    expectLookupSecretsAbsent(error, secrets);
+  });
+
+  test('all exported resolution constructors sanitize lookup values and invocation causes defensively', () => {
+    const lookupSecret = 'TODO160-DIRECT-LOOKUP-SECRET';
+    const failureSecret = 'TODO160-DIRECT-FAILURE-SECRET';
+    const value = `https://user:${lookupSecret}@example.invalid/repo?token=${lookupSecret}#${lookupSecret}`;
+    const failures = [
+      new UnsupportedPullRequestProviderError({
+        source: 'git-remote',
+        value,
+      }),
+      new AmbiguousPullRequestProviderError({
+        source: 'pull-request-url',
+        value,
+        priority: 100,
+        candidates: [],
+      }),
+      new InvalidPullRequestProviderMatchError({
+        source: 'git-remote',
+        value,
+        pluginId: 'direct-plugin',
+        providerId: 'direct-provider',
+        reason: 'invalid matcher result',
+      }),
+      new PullRequestProviderInvocationError({
+        source: 'git-remote',
+        value,
+        pluginId: 'direct-plugin',
+        providerId: 'direct-provider',
+        cause: new Error(failureSecret),
+      }),
+      new PullRequestProviderTimeoutError({
+        source: 'git-remote',
+        value,
+        pluginId: 'direct-plugin',
+        providerId: 'direct-provider',
+      }),
+    ];
+
+    for (const failure of failures) {
+      expect(failure.value).toBe('https://example.invalid/repo');
+      expectLookupSecretsAbsent(failure, [lookupSecret, failureSecret]);
+    }
+  });
+
+  test('resolves through a registry whose PR auth status uses a non-keyring service', async () => {
+    const plugin = defineAidePlugin<
+      never,
+      never,
+      never,
+      never,
+      never,
+      never,
+      NonKeyringPullRequestAuth
+    >({
+      id: 'non-keyring-provider-plugin',
+      summary: 'Non-keyring provider',
+      commands: [],
+      capabilities: {
+        pullRequestProvider: {
+          providerId: 'non-keyring-provider',
+          priority: 100,
+          features: {},
+          authStatus: () =>
+            Effect.map(NonKeyringPullRequestAuth, ({ configured }) => ({
+              state: configured
+                ? ('configured' as const)
+                : ('unavailable' as const),
+            })),
+          matchRemote: (remoteUrl) =>
+            remoteUrl === 'non-keyring-remote'
+              ? {
+                  source: 'git-remote',
+                  repository: externalRepository('non-keyring-provider'),
+                }
+              : null,
+          matchPullRequestUrl: () => null,
+        },
+      },
+    });
+    const registry = createCommandRegistry<
+      never,
+      never,
+      never,
+      never,
+      never,
+      never,
+      NonKeyringPullRequestAuth
+    >().registerPlugin(plugin);
+
+    const resolved = await Effect.runPromise(
+      resolvePullRequestProviderFromRegistryForRemote(
+        registry,
+        'non-keyring-remote'
+      )
+    );
+
+    expect(resolved.providerId).toBe('non-keyring-provider');
+    expect(resolved.match.repository).toEqual(
+      externalRepository('non-keyring-provider')
+    );
+  });
+
   test('resolves github.com remotes through the GitHub provider plugin', async () => {
     const registry = createBuiltinCommandRegistry();
 
@@ -576,7 +1734,7 @@ describe('pull request provider resolution', () => {
   });
 
   test('resolves Azure DevOps repository input through the Azure DevOps provider', async () => {
-    const registry = createCommandRegistry().registerPlugin(
+    const registry = createKeyringCommandRegistry().registerPlugin(
       createAzureDevOpsPlugin({
         createClient: async () => ({
           client: {} as unknown as AzureDevOpsClient,
@@ -612,7 +1770,7 @@ describe('pull request provider resolution', () => {
   });
 
   test('uses explicit GitHub host input to avoid Azure DevOps ambiguity', async () => {
-    const registry = createCommandRegistry()
+    const registry = createKeyringCommandRegistry()
       .registerPlugin(createGitHubPlugin())
       .registerPlugin(
         createAzureDevOpsPlugin({
@@ -646,7 +1804,7 @@ describe('pull request provider resolution', () => {
   });
 
   test('uses explicit Azure DevOps host input to avoid GitHub ambiguity', async () => {
-    const registry = createCommandRegistry()
+    const registry = createKeyringCommandRegistry()
       .registerPlugin(createGitHubPlugin())
       .registerPlugin(
         createAzureDevOpsPlugin({
@@ -681,7 +1839,7 @@ describe('pull request provider resolution', () => {
   });
 
   test('treats owner as a GitHub repository signal and org/project as Azure DevOps signals', async () => {
-    const registry = createCommandRegistry()
+    const registry = createKeyringCommandRegistry()
       .registerPlugin(createGitHubPlugin())
       .registerPlugin(
         createAzureDevOpsPlugin({
@@ -803,7 +1961,7 @@ describe('pull request provider resolution', () => {
     expect(error._tag).toBe('InvalidPullRequestProviderMatchError');
     expect(error.pluginId).toBe('broken-plugin');
     expect(error.providerId).toBe('broken-provider');
-    expect(error.reason).toBe('missing repository ref');
+    expect(error.reason).toBe('match result failed structural capture');
   });
 
   test('rejects non-object provider matches as typed invalid matches', async () => {
@@ -823,11 +1981,11 @@ describe('pull request provider resolution', () => {
     if (!(error instanceof InvalidPullRequestProviderMatchError)) {
       throw new Error('Expected invalid provider match error');
     }
-    expect(error.reason).toBe('match must be an object or null');
+    expect(error.reason).toBe('match result failed structural capture');
   });
 
   test('wraps throwing provider matchers as typed invocation errors', async () => {
-    const providers: OwnedPluginCapability<AidePullRequestProviderCapability>[] =
+    const providers: PluginCapability<ServiceFreePullRequestProviderCapability>[] =
       [
         {
           pluginId: 'broken-plugin',
@@ -857,10 +2015,60 @@ describe('pull request provider resolution', () => {
     expect(error.pluginId).toBe('broken-plugin');
     expect(error.providerId).toBe('broken-provider');
     expect(error.cause).toBeInstanceOf(Error);
-    expect(error.message).toContain('boom');
+    const errorCause = error.cause;
+    if (!(errorCause instanceof Error)) {
+      throw new Error('Expected provider invocation error cause');
+    }
+    expect(error.message).not.toContain('boom');
+    expect(errorCause.message).toBe('matchRemote callback threw');
+  });
+
+  test('wraps throwing matchPullRequestUrl as typed invocation errors', async () => {
+    const providers: PluginCapability<ServiceFreePullRequestProviderCapability>[] =
+      [
+        {
+          pluginId: 'broken-plugin',
+          capability: {
+            providerId: 'broken-provider',
+            priority: 100,
+            features: {},
+            authStatus: () => Effect.succeed({ state: 'configured' }),
+            matchRemote: () => ({
+              source: 'git-remote',
+              priority: 100,
+              repository: externalRepository('broken-provider'),
+            }),
+            matchPullRequestUrl: () => {
+              throw new Error('boom');
+            },
+          },
+        },
+      ];
+
+    const error = await Effect.runPromise(
+      resolvePullRequestProviderForUrl(
+        providers,
+        'https://example.test/pull/1'
+      ).pipe(Effect.flip)
+    );
+
+    expect(error).toBeInstanceOf(PullRequestProviderInvocationError);
+    if (!(error instanceof PullRequestProviderInvocationError)) {
+      throw new Error('Expected provider invocation error');
+    }
+    expect(error.pluginId).toBe('broken-plugin');
+    expect(error.providerId).toBe('broken-provider');
+    expect(error.cause).toBeInstanceOf(Error);
+    const errorCause = error.cause;
+    if (!(errorCause instanceof Error)) {
+      throw new Error('Expected provider invocation error cause');
+    }
+    expect(error.message).not.toContain('boom');
+    expect(errorCause.message).toBe('matchPullRequestUrl callback threw');
   });
 
   test('wraps throwing provider match object getters as typed invalid matches', async () => {
+    let getterReads = 0;
     const providers = [
       malformedProvider('broken-plugin', 'broken-provider', 100, {
         remote: () =>
@@ -868,6 +2076,7 @@ describe('pull request provider resolution', () => {
             {},
             {
               get: () => {
+                getterReads += 1;
                 throw new Error('getter boom');
               },
             }
@@ -887,28 +2096,25 @@ describe('pull request provider resolution', () => {
     }
     expect(error.pluginId).toBe('broken-plugin');
     expect(error.providerId).toBe('broken-provider');
-    expect(error.reason).toBe('match validation failed: getter boom');
+    expect(error.reason).toBe('match result failed structural capture');
+    expect(error.message).not.toContain('getter boom');
+    expect(getterReads).toBe(0);
   });
 
   test('snapshots validated provider matches before returning them', async () => {
-    let repositoryReads = 0;
+    const sourceRepository = externalRepository('shape-provider') as {
+      kind: 'external';
+      providerId: string;
+      displayName: string;
+    };
+    const sourceMatch = {
+      source: 'git-remote' as const,
+      priority: 100,
+      repository: sourceRepository,
+    };
     const providers = [
       malformedProvider('shape-plugin', 'shape-provider', 100, {
-        remote: () => ({
-          source: 'git-remote',
-          priority: 100,
-          get repository() {
-            repositoryReads += 1;
-            return repositoryReads === 1
-              ? externalRepository('shape-provider')
-              : {
-                  kind: 'github',
-                  host: 'evil.example',
-                  owner: 'acme',
-                  repo: 'widgets',
-                };
-          },
-        }),
+        remote: () => sourceMatch,
       }),
     ];
 
@@ -916,12 +2122,16 @@ describe('pull request provider resolution', () => {
       resolvePullRequestProviderForRemote(providers, 'matched-remote')
     );
 
-    expect(repositoryReads).toBe(1);
+    sourceRepository.displayName = 'mutated';
+    sourceMatch.priority = -1;
     expect(Object.isFrozen(resolved.match)).toBe(true);
     expect(Object.isFrozen(resolved.match.repository)).toBe(true);
     const repository = resolved.match.repository;
     expect(repository).toEqual(externalRepository('shape-provider'));
     expect(resolved.match.repository).toBe(repository);
+    expect(resolved.match).not.toBe(sourceMatch);
+    expect(resolved.match.repository).not.toBe(sourceRepository);
+    expect(resolved.priority).toBe(100);
   });
 
   test('rejects provider matches with the wrong source for the lookup', async () => {
@@ -946,9 +2156,7 @@ describe('pull request provider resolution', () => {
     if (!(error instanceof InvalidPullRequestProviderMatchError)) {
       throw new Error('Expected invalid provider match error');
     }
-    expect(error.reason).toBe(
-      "expected source 'git-remote' but got 'pull-request-url'"
-    );
+    expect(error.reason).toBe("expected source 'git-remote'");
   });
 
   test('rejects pull request URL matches that omit pull request refs', async () => {
@@ -972,7 +2180,7 @@ describe('pull request provider resolution', () => {
       throw new Error('Expected invalid provider match error');
     }
     expect(error.source).toBe('pull-request-url');
-    expect(error.reason).toBe('missing pull request ref');
+    expect(error.reason).toBe('match result failed structural capture');
   });
 
   test('rejects remote matches that include pull request refs', async () => {
@@ -995,9 +2203,7 @@ describe('pull request provider resolution', () => {
     if (!(error instanceof InvalidPullRequestProviderMatchError)) {
       throw new Error('Expected invalid provider match error');
     }
-    expect(error.reason).toBe(
-      'git-remote match must not include pull request ref'
-    );
+    expect(error.reason).toBe('match result failed structural capture');
   });
 
   test('rejects invalid pull request refs from URL matches', async () => {
@@ -1147,7 +2353,7 @@ describe('pull request provider resolution', () => {
     if (!(error instanceof InvalidPullRequestProviderMatchError)) {
       throw new Error('Expected invalid provider match error');
     }
-    expect(error.reason).toBe('invalid repository ref');
+    expect(error.reason).toBe('match result failed structural capture');
   });
 });
 
@@ -1210,7 +2416,7 @@ describe('pull request provider registry security', () => {
               authStatus: () => Effect.succeed({ state: 'configured' }),
               matchRemote: null,
               matchPullRequestUrl: () => null,
-            } as unknown as AidePullRequestProviderCapability,
+            } as unknown as ServiceFreePullRequestProviderCapability,
           },
         })
       )
@@ -1242,7 +2448,9 @@ describe('pull request provider auth capabilities', () => {
     });
 
     const status = await Effect.runPromise(
-      plugin.capabilities!.pullRequestProvider!.authStatus()
+      plugin
+        .capabilities!.pullRequestProvider!.authStatus()
+        .pipe(Effect.provide(makeTestKeyring().layer))
     );
 
     expect(status).toEqual({
@@ -1260,7 +2468,9 @@ describe('pull request provider auth capabilities', () => {
     });
 
     const status = await Effect.runPromise(
-      plugin.capabilities!.pullRequestProvider!.authStatus()
+      plugin
+        .capabilities!.pullRequestProvider!.authStatus()
+        .pipe(Effect.provide(makeTestKeyring().layer))
     );
 
     expect(status).toEqual({
@@ -1612,7 +2822,9 @@ describe('pull request provider list operations', () => {
     );
 
     expect(error).toBeInstanceOf(PullRequestProviderOperationError);
-    expect(error.message).toContain('sync boom');
+    expect(error.message).toBe(
+      "Pull request provider 'gitlab' from plugin 'gitlab-plugin' failed during listPullRequests"
+    );
   });
 
   test('rejects provider operations that do not return Effects', async () => {
@@ -1673,7 +2885,7 @@ describe('pull request provider list operations', () => {
       throw new Error('Expected invalid provider operation result error');
     }
     expect(error._tag).toBe('InvalidPullRequestProviderOperationResultError');
-    expect(error.reason).toBe('invalid pull request item');
+    expect(error.reason).toBe('operation result failed structural capture');
   });
 
   test('rejects listPullRequests results with invalid createdAt dates', async () => {
@@ -1845,8 +3057,8 @@ describe('pull request provider list operations', () => {
     );
 
     expect(error).toBeInstanceOf(PullRequestProviderOperationError);
-    expect(error.message).toContain(
-      "Azure DevOps remote org 'acme' does not match configured org 'other'"
+    expect(error.message).toBe(
+      "Pull request provider 'azure-devops' from plugin 'azure-devops' failed during listPullRequests"
     );
   });
 
@@ -2576,7 +3788,7 @@ describe('pull request provider create operations', () => {
       url: 'https://dev.azure.com/acme/Platform/_git/widgets/pullrequest/77',
     });
     expect(result.warnings).toEqual([
-      "Failed to add tag 'blocked': label add denied",
+      'Failed to add tag: provider request failed',
     ]);
   });
 
@@ -2650,7 +3862,7 @@ describe('pull request provider create operations', () => {
       url: 'https://dev.azure.com/acme/Platform/_git/widgets/pullrequest/78',
     });
     expect(result.warnings).toEqual([
-      'Failed to refresh labels: labels unavailable',
+      'Failed to refresh labels: provider request failed',
     ]);
   });
 
@@ -3159,8 +4371,8 @@ describe('pull request provider update operations', () => {
       url: 'https://dev.azure.com/acme/Platform/_git/widgets/pullrequest/42',
     });
     expect(result.warnings).toEqual([
-      "Tag 'missing' not found on PR #42",
-      "Failed to add tag 'blocked': label add denied",
+      'Failed to remove tag: requested tag was not found on the pull request',
+      'Failed to add tag: provider request failed',
     ]);
   });
 
@@ -5630,5 +6842,1088 @@ describe('pull request provider platform context bridge', () => {
       "Pull request provider 'github' returned unsupported GitHub host 'evil.example'"
     );
     expect(calls).toEqual([]);
+  });
+});
+
+type ControlledTransportState = {
+  started: number;
+  aborted: number;
+  completed: number;
+  settled: number;
+  signals: AbortSignal[];
+};
+
+function controlledTransportState(): ControlledTransportState {
+  return { started: 0, aborted: 0, completed: 0, settled: 0, signals: [] };
+}
+
+function finalAbortSignal(args: readonly unknown[]): AbortSignal | undefined {
+  const candidate = args[args.length - 1];
+  return candidate instanceof AbortSignal ? candidate : undefined;
+}
+
+function lateMutationResult<T>(
+  state: ControlledTransportState,
+  args: readonly unknown[],
+  value: T
+): Promise<T> {
+  state.started += 1;
+  const signal = finalAbortSignal(args);
+  if (signal !== undefined) {
+    state.signals.push(signal);
+    signal.addEventListener(
+      'abort',
+      () => {
+        state.aborted += 1;
+      },
+      { once: true }
+    );
+  }
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      state.completed += 1;
+      state.settled += 1;
+      resolve(value);
+    }, 40);
+  });
+}
+
+function cancellableReadResult<T>(
+  state: ControlledTransportState,
+  args: readonly unknown[],
+  value: T
+): Promise<T> {
+  state.started += 1;
+  const signal = finalAbortSignal(args);
+  if (signal !== undefined) state.signals.push(signal);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      state.completed += 1;
+      state.settled += 1;
+      resolve(value);
+    }, 40);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        state.aborted += 1;
+        state.settled += 1;
+        reject(signal.reason);
+      },
+      { once: true }
+    );
+  });
+}
+
+function expectIndeterminateMutation(
+  error: unknown,
+  providerId: string,
+  operation: string
+): void {
+  expect(error).toBeInstanceOf(PullRequestProviderMutationIndeterminateError);
+  expect(error).toMatchObject({
+    _tag: 'PullRequestProviderMutationIndeterminateError',
+    pluginId: providerId,
+    providerId,
+    operation,
+  });
+  expect((error as Error).message).toBe(
+    `Pull request mutation outcome is indeterminate for provider '${providerId}' from plugin '${providerId}' during ${operation}: the operation may have succeeded; do not retry blindly. Verify the remote state before taking further action.`
+  );
+  expect((error as Error).message).not.toContain('SECRET');
+  expect(Object.hasOwn(error as object, 'cause')).toBe(false);
+}
+
+describe('truthful built-in pull request cancellation and mutation timeouts', () => {
+  const githubRemote = 'git@github.com:acme/widgets.git';
+  const azureRemote = 'git@ssh.dev.azure.com:v3/acme/Platform/widgets';
+
+  test('GitHub create/update label warnings use fixed text for unsupported and SDK rejection paths', async () => {
+    const unsupportedPlugin = createGitHubPlugin({
+      createClient: async () => ({
+        listPullRequests: async () => [],
+        getPullRequest: async (_owner, _repo, number) =>
+          fakeGitHubPullRequest({ number, title: 'Updated' }),
+        getPullRequestFiles: async () => [],
+        getIssueComments: async () => [],
+        getReviewComments: async () => [],
+        createPullRequest: async () =>
+          fakeGitHubPullRequest({ number: 31, title: 'Created' }),
+      }),
+    });
+    const unsupportedProviders = [
+      {
+        pluginId: unsupportedPlugin.id,
+        capability: unsupportedPlugin.capabilities!.pullRequestProvider!,
+      },
+    ];
+    const unsupportedCreate = await Effect.runPromise(
+      createPullRequestForRemote(unsupportedProviders, githubRemote, {
+        title: 'Created',
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        labels: ['SECRET-GITHUB-CREATE-LABEL'],
+      })
+    );
+    const unsupportedUpdate = await Effect.runPromise(
+      updatePullRequestForRemote(unsupportedProviders, githubRemote, {
+        pullRequest: { number: 90210 },
+        labelsToAdd: ['SECRET-GITHUB-ADD-LABEL'],
+        labelsToRemove: ['SECRET-GITHUB-REMOVE-LABEL'],
+      })
+    );
+
+    expect(unsupportedCreate.warnings).toEqual([
+      'Failed to add labels: GitHub client does not support labels',
+    ]);
+    expect(unsupportedUpdate.warnings).toEqual([
+      'Failed to add labels: GitHub client does not support labels',
+      'Failed to remove label: GitHub client does not support labels',
+    ]);
+
+    const plugin = createGitHubPlugin({
+      createClient: async () => ({
+        listPullRequests: async () => [],
+        getPullRequest: async (_owner, _repo, number) =>
+          fakeGitHubPullRequest({ number, title: 'Updated' }),
+        getPullRequestFiles: async () => [],
+        getIssueComments: async () => [],
+        getReviewComments: async () => [],
+        createPullRequest: async () =>
+          fakeGitHubPullRequest({ number: 31, title: 'Created' }),
+        addLabels: async () => {
+          throw new Error('SECRET-RAW-GITHUB-SDK-FAILURE');
+        },
+        removeLabel: async () => {
+          throw new Error('SECRET-GITHUB-NOT-FOUND-SDK-FAILURE');
+        },
+      }),
+    });
+    const providers = [
+      {
+        pluginId: plugin.id,
+        capability: plugin.capabilities!.pullRequestProvider!,
+      },
+    ];
+
+    const createResult = await Effect.runPromise(
+      createPullRequestForRemote(providers, githubRemote, {
+        title: 'Created',
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        labels: ['SECRET-GITHUB-SDK-CREATE-LABEL'],
+      })
+    );
+    const updateResult = await Effect.runPromise(
+      updatePullRequestForRemote(providers, githubRemote, {
+        pullRequest: { number: 90211 },
+        labelsToAdd: ['SECRET-GITHUB-SDK-ADD-LABEL'],
+        labelsToRemove: ['SECRET-GITHUB-SDK-REMOVE-LABEL'],
+      })
+    );
+
+    expect(createResult.warnings).toEqual([
+      'Failed to add labels: provider request failed',
+    ]);
+    expect(updateResult.warnings).toEqual([
+      'Failed to add labels: provider request failed',
+      'Failed to remove label: provider request failed',
+    ]);
+    expect(
+      JSON.stringify([unsupportedCreate.warnings, unsupportedUpdate.warnings])
+    ).not.toContain('SECRET');
+    expect(
+      JSON.stringify([unsupportedCreate.warnings, unsupportedUpdate.warnings])
+    ).not.toContain('90210');
+    expect(
+      JSON.stringify([createResult.warnings, updateResult.warnings])
+    ).not.toContain('SECRET');
+    expect(
+      JSON.stringify([createResult.warnings, updateResult.warnings])
+    ).not.toContain('90211');
+  });
+
+  test('Azure DevOps create/update tag warnings use fixed text for unsupported and not-found paths', async () => {
+    const plugin = createAzureDevOpsPlugin({
+      createClient: async () => ({
+        config: {
+          orgUrl: 'https://dev.azure.com/acme',
+          pat: 'token',
+          authMethod: 'pat',
+        },
+        client: {
+          listPullRequests: async () => ({ value: [] }),
+          getPullRequest: async (_project, _repo, number) =>
+            fakeAzureDevOpsPullRequest({
+              pullRequestId: number,
+              title: 'Updated',
+            }),
+          getPullRequestLabels: async () => ({
+            value: [
+              {
+                id: 'present-label-id',
+                name: 'SECRET-AZURE-PRESENT-LABEL',
+                active: true,
+                url: 'https://dev.azure.com/acme/labels/present-label-id',
+              },
+            ],
+          }),
+          getAllPullRequestChanges: async () => [],
+          getAllComments: async () => [],
+          createPullRequest: async () =>
+            fakeAzureDevOpsPullRequest({
+              pullRequestId: 41,
+              title: 'Created',
+            }),
+        },
+      }),
+    });
+    const providers = [
+      {
+        pluginId: plugin.id,
+        capability: plugin.capabilities!.pullRequestProvider!,
+      },
+    ];
+
+    const createResult = await Effect.runPromise(
+      createPullRequestForRemote(providers, azureRemote, {
+        title: 'Created',
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        labels: ['SECRET-AZURE-CREATE-LABEL'],
+      })
+    );
+    const updateResult = await Effect.runPromise(
+      updatePullRequestForRemote(providers, azureRemote, {
+        pullRequest: { number: 90212 },
+        labelsToAdd: ['SECRET-AZURE-ADD-LABEL'],
+        labelsToRemove: [
+          'SECRET-AZURE-MISSING-LABEL',
+          'SECRET-AZURE-PRESENT-LABEL',
+        ],
+      })
+    );
+
+    expect(createResult.warnings).toEqual([
+      'Failed to add tag: Azure DevOps client does not support labels',
+    ]);
+    expect(updateResult.warnings).toEqual([
+      'Failed to remove tag: requested tag was not found on the pull request',
+      'Failed to remove tag: Azure DevOps client does not support labels',
+      'Failed to add tag: Azure DevOps client does not support labels',
+    ]);
+    expect(
+      JSON.stringify([createResult.warnings, updateResult.warnings])
+    ).not.toContain('SECRET');
+    expect(
+      JSON.stringify([createResult.warnings, updateResult.warnings])
+    ).not.toContain('90212');
+  });
+
+  test('Azure DevOps create/update tag warnings redact SDK rejection details', async () => {
+    const plugin = createAzureDevOpsPlugin({
+      createClient: async () => ({
+        config: {
+          orgUrl: 'https://dev.azure.com/acme',
+          pat: 'token',
+          authMethod: 'pat',
+        },
+        client: {
+          listPullRequests: async () => ({ value: [] }),
+          getPullRequest: async (_project, _repo, number) =>
+            fakeAzureDevOpsPullRequest({
+              pullRequestId: number,
+              title: 'Updated',
+            }),
+          getPullRequestLabels: async () => ({
+            value: [
+              {
+                id: 'remove-label-id',
+                name: 'SECRET-AZURE-SDK-REMOVE-LABEL',
+                active: true,
+                url: 'https://dev.azure.com/acme/labels/remove-label-id',
+              },
+            ],
+          }),
+          getAllPullRequestChanges: async () => [],
+          getAllComments: async () => [],
+          createPullRequest: async () =>
+            fakeAzureDevOpsPullRequest({
+              pullRequestId: 42,
+              title: 'Created',
+            }),
+          addPullRequestLabel: async () => {
+            throw new Error('SECRET-AZURE-ADD-SDK-MESSAGE');
+          },
+          removePullRequestLabel: async () => {
+            throw new Error('SECRET-AZURE-REMOVE-SDK-MESSAGE');
+          },
+        },
+      }),
+    });
+    const providers = [
+      {
+        pluginId: plugin.id,
+        capability: plugin.capabilities!.pullRequestProvider!,
+      },
+    ];
+
+    const createResult = await Effect.runPromise(
+      createPullRequestForRemote(providers, azureRemote, {
+        title: 'Created',
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        labels: ['SECRET-AZURE-SDK-CREATE-LABEL'],
+      })
+    );
+    const updateResult = await Effect.runPromise(
+      updatePullRequestForRemote(providers, azureRemote, {
+        pullRequest: { number: 90213 },
+        labelsToAdd: ['SECRET-AZURE-SDK-ADD-LABEL'],
+        labelsToRemove: ['SECRET-AZURE-SDK-REMOVE-LABEL'],
+      })
+    );
+
+    expect(createResult.warnings).toEqual([
+      'Failed to add tag: provider request failed',
+    ]);
+    expect(updateResult.warnings).toEqual([
+      'Failed to remove tag: provider request failed',
+      'Failed to add tag: provider request failed',
+    ]);
+    expect(
+      JSON.stringify([createResult.warnings, updateResult.warnings])
+    ).not.toContain('SECRET');
+    expect(
+      JSON.stringify([createResult.warnings, updateResult.warnings])
+    ).not.toContain('90213');
+  });
+
+  for (const family of ['create', 'update', 'comment', 'reply'] as const) {
+    test(`GitHub ${family} reports an indeterminate timeout while late transport settlement remains observed`, async () => {
+      const state = controlledTransportState();
+      const plugin = createGitHubPlugin({
+        createClient: async () => ({
+          listPullRequests: async () => [],
+          getPullRequest: async (_owner, _repo, number) =>
+            fakeGitHubPullRequest({ number, title: 'GitHub result' }),
+          getPullRequestFiles: async () => [],
+          getIssueComments: async () => [],
+          getReviewComments: async () => [],
+          createPullRequest: (
+            ...args: Parameters<GitHubClient['createPullRequest']>
+          ) =>
+            family === 'create'
+              ? lateMutationResult(
+                  state,
+                  args,
+                  fakeGitHubPullRequest({
+                    number: 31,
+                    title: 'Created GitHub PR',
+                  })
+                )
+              : Promise.resolve(
+                  fakeGitHubPullRequest({ number: 31, title: 'Unused' })
+                ),
+          updatePullRequest: (
+            ...args: Parameters<GitHubClient['updatePullRequest']>
+          ) =>
+            family === 'update'
+              ? lateMutationResult(
+                  state,
+                  args,
+                  fakeGitHubPullRequest({ number: 7, title: 'Updated' })
+                )
+              : Promise.resolve(
+                  fakeGitHubPullRequest({ number: 7, title: 'Unused' })
+                ),
+          createIssueComment: (
+            ...args: Parameters<GitHubClient['createIssueComment']>
+          ) =>
+            family === 'comment'
+              ? lateMutationResult(
+                  state,
+                  args,
+                  fakeGitHubIssueComment({ body: 'Commented' })
+                )
+              : Promise.resolve(fakeGitHubIssueComment()),
+          createReviewComment: async () => fakeGitHubReviewComment(),
+          replyToReviewComment: (
+            ...args: Parameters<GitHubClient['replyToReviewComment']>
+          ) =>
+            family === 'reply'
+              ? lateMutationResult(
+                  state,
+                  args,
+                  fakeGitHubReviewComment({ body: 'Replied' })
+                )
+              : Promise.resolve(fakeGitHubReviewComment()),
+        }),
+      });
+      const providers = [
+        {
+          pluginId: plugin.id,
+          capability: plugin.capabilities!.pullRequestProvider!,
+        },
+      ];
+      const effect: Effect.Effect<unknown, unknown, never> =
+        family === 'create'
+          ? createPullRequestForRemote(
+              providers,
+              githubRemote,
+              {
+                title: 'Created GitHub PR',
+                sourceBranch: 'feature',
+                targetBranch: 'main',
+              },
+              { operationTimeout: '5 millis' }
+            )
+          : family === 'update'
+            ? updatePullRequestForRemote(
+                providers,
+                githubRemote,
+                { pullRequest: { number: 7 }, title: 'Updated' },
+                { operationTimeout: '5 millis' }
+              )
+            : family === 'comment'
+              ? addPullRequestCommentForRemote(
+                  providers,
+                  githubRemote,
+                  { pullRequest: { number: 7 }, body: 'Commented' },
+                  { operationTimeout: '5 millis' }
+                )
+              : replyToPullRequestCommentForRemote(
+                  providers,
+                  githubRemote,
+                  {
+                    pullRequest: { number: 7 },
+                    threadId: 22,
+                    body: 'Replied',
+                  },
+                  { operationTimeout: '5 millis' }
+                );
+
+      const error = await Effect.runPromise(effect.pipe(Effect.flip));
+      expectIndeterminateMutation(
+        error,
+        'github',
+        family === 'create'
+          ? 'createPullRequest'
+          : family === 'update'
+            ? 'updatePullRequest'
+            : family === 'comment'
+              ? 'addPullRequestComment'
+              : 'replyToPullRequestComment'
+      );
+      expect(state).toMatchObject({
+        started: 1,
+        aborted: 1,
+        completed: 0,
+        settled: 0,
+      });
+      expect(state.signals).toHaveLength(1);
+      expect(state.signals[0]?.aborted).toBe(true);
+      await Bun.sleep(60);
+      expect(state).toMatchObject({ completed: 1, settled: 1 });
+    });
+
+    test(`Azure DevOps ${family} reports an indeterminate timeout while late transport settlement remains observed`, async () => {
+      const state = controlledTransportState();
+      const plugin = createAzureDevOpsPlugin({
+        createClient: async () => ({
+          config: {
+            orgUrl: 'https://dev.azure.com/acme',
+            pat: 'token',
+            authMethod: 'pat',
+          },
+          client: {
+            listPullRequests: async () => ({ value: [] }),
+            getPullRequest: async (_project, _repo, number) =>
+              fakeAzureDevOpsPullRequest({
+                pullRequestId: number,
+                title: 'Azure DevOps result',
+              }),
+            getPullRequestLabels: async () => ({ value: [] }),
+            getAllPullRequestChanges: async () => [],
+            getAllComments: async () => [],
+            createPullRequest: (
+              ...args: Parameters<AzureDevOpsClient['createPullRequest']>
+            ) =>
+              family === 'create'
+                ? lateMutationResult(
+                    state,
+                    args,
+                    fakeAzureDevOpsPullRequest({
+                      pullRequestId: 41,
+                      title: 'Created Azure DevOps PR',
+                    })
+                  )
+                : Promise.resolve(
+                    fakeAzureDevOpsPullRequest({
+                      pullRequestId: 41,
+                      title: 'Unused',
+                    })
+                  ),
+            updatePullRequest: (
+              ...args: Parameters<AzureDevOpsClient['updatePullRequest']>
+            ) =>
+              family === 'update'
+                ? lateMutationResult(
+                    state,
+                    args,
+                    fakeAzureDevOpsPullRequest({
+                      pullRequestId: 7,
+                      title: 'Updated',
+                    })
+                  )
+                : Promise.resolve(
+                    fakeAzureDevOpsPullRequest({
+                      pullRequestId: 7,
+                      title: 'Unused',
+                    })
+                  ),
+            createPullRequestThread: (
+              ...args: Parameters<AzureDevOpsClient['createPullRequestThread']>
+            ) =>
+              family === 'comment'
+                ? lateMutationResult(state, args, fakeAzureDevOpsThread())
+                : Promise.resolve(fakeAzureDevOpsThread()),
+            createThreadComment: (
+              ...args: Parameters<AzureDevOpsClient['createThreadComment']>
+            ) =>
+              family === 'reply'
+                ? lateMutationResult(
+                    state,
+                    args,
+                    fakeAzureDevOpsCreatedComment({ content: 'Replied' })
+                  )
+                : Promise.resolve(fakeAzureDevOpsCreatedComment()),
+          },
+        }),
+      });
+      const providers = [
+        {
+          pluginId: plugin.id,
+          capability: plugin.capabilities!.pullRequestProvider!,
+        },
+      ];
+      const effect: Effect.Effect<unknown, unknown, never> =
+        family === 'create'
+          ? createPullRequestForRemote(
+              providers,
+              azureRemote,
+              {
+                title: 'Created Azure DevOps PR',
+                sourceBranch: 'feature',
+                targetBranch: 'main',
+              },
+              { operationTimeout: '5 millis' }
+            )
+          : family === 'update'
+            ? updatePullRequestForRemote(
+                providers,
+                azureRemote,
+                { pullRequest: { number: 7 }, title: 'Updated' },
+                { operationTimeout: '5 millis' }
+              )
+            : family === 'comment'
+              ? addPullRequestCommentForRemote(
+                  providers,
+                  azureRemote,
+                  { pullRequest: { number: 7 }, body: 'Commented' },
+                  { operationTimeout: '5 millis' }
+                )
+              : replyToPullRequestCommentForRemote(
+                  providers,
+                  azureRemote,
+                  {
+                    pullRequest: { number: 7 },
+                    threadId: 22,
+                    body: 'Replied',
+                  },
+                  { operationTimeout: '5 millis' }
+                );
+
+      const error = await Effect.runPromise(effect.pipe(Effect.flip));
+      expectIndeterminateMutation(
+        error,
+        'azure-devops',
+        family === 'create'
+          ? 'createPullRequest'
+          : family === 'update'
+            ? 'updatePullRequest'
+            : family === 'comment'
+              ? 'addPullRequestComment'
+              : 'replyToPullRequestComment'
+      );
+      expect(state).toMatchObject({
+        started: 1,
+        aborted: 1,
+        completed: 0,
+        settled: 0,
+      });
+      expect(state.signals).toHaveLength(1);
+      expect(state.signals[0]?.aborted).toBe(true);
+      await Bun.sleep(60);
+      expect(state).toMatchObject({ completed: 1, settled: 1 });
+    });
+  }
+
+  for (const providerId of ['github', 'azure-devops'] as const) {
+    for (const family of [
+      'list',
+      'get',
+      'diff',
+      'comments',
+      'branch',
+    ] as const) {
+      test(`${providerId} ${family} read timeout aborts every started transport and performs no post-exit work`, async () => {
+        const state = controlledTransportState();
+        const plugin =
+          providerId === 'github'
+            ? createGitHubPlugin({
+                createClient: async () => ({
+                  listPullRequests: (
+                    ...args: Parameters<GitHubClient['listPullRequests']>
+                  ) =>
+                    cancellableReadResult(state, args, [
+                      fakeGitHubPullRequest({ number: 1, title: 'Branch PR' }),
+                    ]),
+                  getPullRequest: (
+                    ...args: Parameters<GitHubClient['getPullRequest']>
+                  ) =>
+                    cancellableReadResult(
+                      state,
+                      args,
+                      fakeGitHubPullRequest({ number: 1, title: 'Read PR' })
+                    ),
+                  getPullRequestFiles: (
+                    ...args: Parameters<GitHubClient['getPullRequestFiles']>
+                  ) => cancellableReadResult(state, args, []),
+                  getIssueComments: (
+                    ...args: Parameters<GitHubClient['getIssueComments']>
+                  ) => cancellableReadResult(state, args, []),
+                  getReviewComments: (
+                    ...args: Parameters<GitHubClient['getReviewComments']>
+                  ) => cancellableReadResult(state, args, []),
+                }),
+              })
+            : createAzureDevOpsPlugin({
+                createClient: async () => ({
+                  config: {
+                    orgUrl: 'https://dev.azure.com/acme',
+                    pat: 'token',
+                    authMethod: 'pat',
+                  },
+                  client: {
+                    listPullRequests: (
+                      ...args: Parameters<AzureDevOpsClient['listPullRequests']>
+                    ) =>
+                      cancellableReadResult(state, args, {
+                        value: [
+                          fakeAzureDevOpsPullRequest({
+                            pullRequestId: 1,
+                            title: 'Branch PR',
+                          }),
+                        ],
+                      }),
+                    getPullRequest: (
+                      ...args: Parameters<AzureDevOpsClient['getPullRequest']>
+                    ) =>
+                      cancellableReadResult(
+                        state,
+                        args,
+                        fakeAzureDevOpsPullRequest({
+                          pullRequestId: 1,
+                          title: 'Read PR',
+                        })
+                      ),
+                    getPullRequestLabels: (
+                      ...args: Parameters<
+                        AzureDevOpsClient['getPullRequestLabels']
+                      >
+                    ) => cancellableReadResult(state, args, { value: [] }),
+                    getAllPullRequestChanges: (
+                      ...args: Parameters<
+                        AzureDevOpsClient['getAllPullRequestChanges']
+                      >
+                    ) => cancellableReadResult(state, args, []),
+                    getAllComments: (
+                      ...args: Parameters<AzureDevOpsClient['getAllComments']>
+                    ) => cancellableReadResult(state, args, []),
+                  },
+                }),
+              });
+        const remote = providerId === 'github' ? githubRemote : azureRemote;
+        const providers = [
+          {
+            pluginId: plugin.id,
+            capability: plugin.capabilities!.pullRequestProvider!,
+          },
+        ];
+        const effect: Effect.Effect<unknown, unknown, never> =
+          family === 'list'
+            ? listPullRequestsForRemote(
+                providers,
+                remote,
+                {},
+                {
+                  operationTimeout: '5 millis',
+                }
+              )
+            : family === 'get'
+              ? getPullRequestForRemote(
+                  providers,
+                  remote,
+                  {
+                    pullRequest: { number: 1 },
+                  },
+                  {
+                    operationTimeout: '5 millis',
+                  }
+                )
+              : family === 'diff'
+                ? getPullRequestDiffForRemote(
+                    providers,
+                    remote,
+                    {
+                      pullRequest: { number: 1 },
+                    },
+                    {
+                      operationTimeout: '5 millis',
+                    }
+                  )
+                : family === 'comments'
+                  ? listPullRequestCommentsForRemote(
+                      providers,
+                      remote,
+                      {
+                        pullRequest: { number: 1 },
+                      },
+                      {
+                        operationTimeout: '5 millis',
+                      }
+                    )
+                  : findPullRequestForBranchForRemote(
+                      providers,
+                      remote,
+                      {
+                        branch: 'feature',
+                      },
+                      {
+                        operationTimeout: '5 millis',
+                      }
+                    );
+        const error = await Effect.runPromise(effect.pipe(Effect.flip));
+
+        expect(error).toMatchObject({
+          _tag: 'PullRequestProviderOperationTimeoutError',
+          providerId,
+          operation:
+            family === 'list'
+              ? 'listPullRequests'
+              : family === 'get'
+                ? 'getPullRequest'
+                : family === 'diff'
+                  ? 'getPullRequestDiff'
+                  : family === 'comments'
+                    ? 'listPullRequestComments'
+                    : 'findPullRequestForBranch',
+        });
+        const expectedStarted =
+          providerId === 'github'
+            ? family === 'diff' || family === 'comments'
+              ? 2
+              : 1
+            : family === 'get'
+              ? 2
+              : family === 'diff'
+                ? 3
+                : 1;
+        expect(state).toMatchObject({
+          started: expectedStarted,
+          aborted: expectedStarted,
+          completed: 0,
+          settled: expectedStarted,
+        });
+        expect(state.signals).toHaveLength(expectedStarted);
+        expect(state.signals.every((signal) => signal.aborted)).toBe(true);
+        await Bun.sleep(60);
+        expect(state).toMatchObject({ completed: 0, settled: expectedStarted });
+      });
+    }
+  }
+
+  test.each(['github', 'azure-devops'] as const)(
+    '%s branch lookup forwards one signal through both composite phases',
+    async (providerId) => {
+      const signals: AbortSignal[] = [];
+      const recordSignal = (args: readonly unknown[]) => {
+        const signal = finalAbortSignal(args);
+        expect(signal).toBeInstanceOf(AbortSignal);
+        signals.push(signal!);
+      };
+      const plugin =
+        providerId === 'github'
+          ? createGitHubPlugin({
+              createClient: async () => ({
+                listPullRequests: async (
+                  ...args: Parameters<GitHubClient['listPullRequests']>
+                ) => {
+                  recordSignal(args);
+                  return [
+                    fakeGitHubPullRequest({ number: 7, title: 'Branch PR' }),
+                  ];
+                },
+                getPullRequest: async (
+                  ...args: Parameters<GitHubClient['getPullRequest']>
+                ) => {
+                  recordSignal(args);
+                  return fakeGitHubPullRequest({
+                    number: 7,
+                    title: 'Branch PR',
+                  });
+                },
+                getPullRequestFiles: async () => [],
+                getIssueComments: async () => [],
+                getReviewComments: async () => [],
+              }),
+            })
+          : createAzureDevOpsPlugin({
+              createClient: async () => ({
+                config: {
+                  orgUrl: 'https://dev.azure.com/acme',
+                  pat: 'token',
+                  authMethod: 'pat',
+                },
+                client: {
+                  listPullRequests: async (
+                    ...args: Parameters<AzureDevOpsClient['listPullRequests']>
+                  ) => {
+                    recordSignal(args);
+                    return {
+                      value: [
+                        fakeAzureDevOpsPullRequest({
+                          pullRequestId: 7,
+                          title: 'Branch PR',
+                          sourceRefName: 'refs/heads/feature',
+                          targetRefName: 'refs/heads/main',
+                        }),
+                      ],
+                    };
+                  },
+                  getPullRequest: async (
+                    ...args: Parameters<AzureDevOpsClient['getPullRequest']>
+                  ) => {
+                    recordSignal(args);
+                    return fakeAzureDevOpsPullRequest({
+                      pullRequestId: 7,
+                      title: 'Branch PR',
+                      sourceRefName: 'refs/heads/feature',
+                      targetRefName: 'refs/heads/main',
+                    });
+                  },
+                  getPullRequestLabels: async (
+                    ...args: Parameters<
+                      AzureDevOpsClient['getPullRequestLabels']
+                    >
+                  ) => {
+                    recordSignal(args);
+                    return { value: [] };
+                  },
+                  getAllPullRequestChanges: async () => [],
+                  getAllComments: async () => [],
+                },
+              }),
+            });
+      const result = await Effect.runPromise(
+        findPullRequestForBranchForRemote(
+          [
+            {
+              pluginId: plugin.id,
+              capability: plugin.capabilities!.pullRequestProvider!,
+            },
+          ],
+          providerId === 'github' ? githubRemote : azureRemote,
+          { branch: 'feature' }
+        )
+      );
+
+      expect(result.pullRequest.id).toBe(7);
+      expect(signals).toHaveLength(providerId === 'github' ? 2 : 3);
+      expect(signals.every((signal) => signal === signals[0])).toBe(true);
+      expect(signals[0]?.aborted).toBe(false);
+    }
+  );
+});
+
+describe('host mutation timeout policy and genuine interruption', () => {
+  const provider = fakeProvider('external-timeout', 'external-timeout', 100);
+  const providers = [
+    {
+      ...provider,
+      capability: {
+        ...provider.capability,
+        operations: {
+          createPullRequest: () => Effect.never,
+        },
+      },
+    },
+  ];
+  const request = {
+    title: 'Timeout probe',
+    sourceBranch: 'feature',
+    targetBranch: 'main',
+  } as const;
+
+  test('mutation deadlines create fresh fixed indeterminate failures after finalizers', async () => {
+    let finalizers = 0;
+    const finalizedProviders = [
+      {
+        ...providers[0]!,
+        capability: {
+          ...providers[0]!.capability,
+          operations: {
+            createPullRequest: () =>
+              Effect.never.pipe(
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    finalizers += 1;
+                  })
+                )
+              ),
+          },
+        },
+      },
+    ];
+    const run = () =>
+      Effect.runPromise(
+        createPullRequestForRemote(
+          finalizedProviders,
+          'external-timeout-remote',
+          request,
+          { operationTimeout: '5 millis' }
+        ).pipe(Effect.flip)
+      );
+
+    const first = await run();
+    const second = await run();
+    expect(first).not.toBe(second);
+    expectIndeterminateMutation(first, 'external-timeout', 'createPullRequest');
+    expectIndeterminateMutation(
+      second,
+      'external-timeout',
+      'createPullRequest'
+    );
+    expect(finalizers).toBe(2);
+  });
+
+  test('signal-blind external mutation settlement remains compatible with indeterminate timeout classification', async () => {
+    let started = 0;
+    let completed = 0;
+    const signalBlindProviders = [
+      {
+        ...providers[0]!,
+        capability: {
+          ...providers[0]!.capability,
+          operations: {
+            createPullRequest: () =>
+              Effect.tryPromise({
+                try: () =>
+                  new Promise<{
+                    readonly repository: ReturnType<typeof externalRepository>;
+                    readonly repositoryLabel: string;
+                    readonly pullRequest: {
+                      readonly id: number;
+                      readonly title: string;
+                      readonly status: 'active';
+                      readonly author: { readonly displayName: string };
+                      readonly createdAt: string;
+                      readonly sourceBranch: string;
+                      readonly targetBranch: string;
+                    };
+                  }>((resolve) => {
+                    started += 1;
+                    setTimeout(() => {
+                      completed += 1;
+                      resolve({
+                        repository: externalRepository('external-timeout'),
+                        repositoryLabel: 'external-timeout/repository',
+                        pullRequest: {
+                          id: 77,
+                          title: 'Eventually created',
+                          status: 'active',
+                          author: { displayName: 'External provider' },
+                          createdAt: '2026-01-01T00:00:00Z',
+                          sourceBranch: 'feature',
+                          targetBranch: 'main',
+                        },
+                      });
+                    }, 40);
+                  }),
+                catch: (error) => error,
+              }),
+          },
+        },
+      },
+    ];
+
+    const error = await Effect.runPromise(
+      createPullRequestForRemote(
+        signalBlindProviders,
+        'external-timeout-remote',
+        request,
+        { operationTimeout: '5 millis' }
+      ).pipe(Effect.flip)
+    );
+
+    expectIndeterminateMutation(error, 'external-timeout', 'createPullRequest');
+    expect({ started, completed }).toEqual({ started: 1, completed: 0 });
+    await Bun.sleep(60);
+    expect({ started, completed }).toEqual({ started: 1, completed: 1 });
+  });
+
+  test('caller cancellation remains an Interrupt Cause and joins finalizers', async () => {
+    let started = 0;
+    let finalized = 0;
+    const interruptibleProviders = [
+      {
+        ...providers[0]!,
+        capability: {
+          ...providers[0]!.capability,
+          operations: {
+            createPullRequest: () =>
+              Effect.sync(() => {
+                started += 1;
+              }).pipe(
+                Effect.zipRight(Effect.never),
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    finalized += 1;
+                  })
+                )
+              ),
+          },
+        },
+      },
+    ];
+    const controller = new AbortController();
+    const pending = Effect.runPromiseExit(
+      createPullRequestForRemote(
+        interruptibleProviders,
+        'external-timeout-remote',
+        request,
+        { operationTimeout: '1 second' }
+      ),
+      { signal: controller.signal }
+    );
+    while (started === 0) await Bun.sleep(1);
+    controller.abort();
+    const exit = await pending;
+
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isSuccess(exit)) throw new Error('Expected interruption');
+    expect(Cause.isInterruptedOnly(exit.cause)).toBe(true);
+    expect(finalized).toBe(1);
   });
 });
