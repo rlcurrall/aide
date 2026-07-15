@@ -355,11 +355,18 @@ function saveCredential(
 This is an explicitly internal contract. `AidePluginDescriptor`, used only by
 trusted in-process registration, has separate environments for auth status,
 account discovery, login, logout, Prime status, and pull-request auth status.
-Only operations that read or mutate the auth store require `KeyringService`.
-Prime sections, pull-request matching/resolution, and pull-request operations
-remain service-free. The invocation helpers preserve the environment of the
-specific operation they invoke, so a missing service is a composition/type
-error rather than a hidden backend choice.
+Trusted built-in auth-provider status and accounts use the internal
+`KeyringService | GitHubAuthCatalogService` discovery environment. GitHub's
+omitted-scope callbacks execute with both services available; accounts reads
+both catalogs, while status may return through its environment fast path. Jira
+and Azure DevOps discovery use the keyring component. Exact-scope and
+custom-probe callbacks retain their narrow resolver paths and do not consult
+the GitHub catalog. Login and logout, top-level legacy auth, Prime status, and
+pull-request auth remain keyring-only where implemented. Prime sections,
+pull-request matching/resolution, and pull-request operations remain
+service-free. The invocation helpers preserve the environment of the specific
+operation they invoke, so a missing service is a composition/type error rather
+than a hidden backend choice.
 
 Trust and service provisioning are separate command properties. Internal
 descriptor registrations are trusted, but each carries one exact provisioning
@@ -447,10 +454,13 @@ same-process validation, not sandboxing.
 At the trusted runner, the provisioning switch installs exactly the declared
 services and each branch reaches a provably service-free Effect before
 `Effect.runPromise`. `registerCommands` has no live default: the CLI entry point
-explicitly passes `KeyringLive`, while tests pass an isolated
-`Layer<KeyringService>`. Internal host-service construction captures that same
-caller-owned layer for trusted capability dispatch; neither Prime nor the auth
-command helpers select or provide `KeyringLive`.
+explicitly passes both `KeyringLive` and `GitHubAuthCatalogLive`, while tests
+pass isolated layers. Internal host-service construction keeps the caller-owned
+keyring-only provisioner and root-composes it with the caller-owned GitHub
+catalog layer only for trusted auth-provider status/accounts. The catalog
+service exposes fixed GitHub auth-catalog discovery, not arbitrary subprocess
+execution. Neither Prime nor the auth command helpers select or provide live
+layers.
 
 `AidePublicPluginDescriptor` in the exported `aide/plugin-api` instantiates
 every capability operation with `R = never`. Its public command descriptor
@@ -460,8 +470,11 @@ no caller-selectable environment parameter. Plugin authors therefore cannot
 widen runtime authority by supplying an arbitrary `R`. That API exports a distinct
 `AideHostServices` contract: auth and Prime discovery return immutable,
 service-free metadata snapshots, and pull-request methods are host-mediated
-service-free Effects. It does not export `KeyringService`, internal descriptor
-types, trusted capability snapshots, or the internal host-services tag.
+service-free Effects. It does not export `KeyringService`,
+`GitHubAuthCatalogService`, `GitHubAuthCatalogLive`, internal descriptor types,
+trusted capability snapshots, registry internals, or the internal host-services
+tag. External plugin capabilities receive neither live layers nor arbitrary
+host services.
 `CommandRegistry.plugins()` returns frozen, registry-owned registration
 snapshots rather than bare descriptors. Each snapshot has mandatory `trusted`
 or `external` plugin provenance plus a nominal runtime identity. Plugin
@@ -593,8 +606,15 @@ public sections, repository Effect matchers, and the shared pull-request
 operation core use the nested Runtime boundary. Prime sections remain
 service-free for either provenance when exposed through public host services.
 External auth-provider status, accounts, login, logout, and login prompt
-continuations use that same Runtime boundary; trusted auth-provider callbacks
-remain on the explicitly keyring-provisioned branch.
+continuations use that same empty-context Runtime boundary and receive no
+keyring, GitHub catalog, internal host, registry, or live-layer authority.
+Every trusted auth-provider status/accounts invocation uses the internal branch
+that starts from `Context.empty()` and provides the combined
+`KeyringService | GitHubAuthCatalogService` layer. Only the default omitted-scope
+GitHub effects request broad catalog discovery. Exact-scope effects and calls
+handled by an injected `probeConfig` bypass broad catalog discovery even though
+both services remain available. Trusted login/logout and the other existing
+keyring-backed compatibility callbacks retain the keyring-only branch.
 
 The nested Runtime and marker compatibility check are malformed-value
 hardening, not Effect-object authentication or a sandbox. The public marker is
@@ -934,11 +954,13 @@ resource controls can contain arbitrary plugin execution.
 
 `createAideHostServices` is likewise generic over every registry environment
 and constructs only the public, service-free host object. The built-in CLI
-composition root separately calls `createAideInternalHostServices` with its
-keyring-specialized registry; that internal object extends the public methods
-with provenance-tagged auth/Prime registrations, trusted-only snapshots, and
-the captured keyring dispatcher, while public command runners receive only its
-`publicServices` member.
+composition root passes `KeyringLive` and `GitHubAuthCatalogLive` to
+`registerCommands`; the adapter forwards those caller-owned layers to
+`createAideInternalHostServices` with the trusted auth-discovery registry. That
+internal object extends the public methods with provenance-tagged auth/Prime
+registrations, trusted-only snapshots, the keyring-only dispatcher, and the
+combined auth-discovery dispatcher, while public command runners receive only
+its `publicServices` member.
 
 Existing unsuffixed auth-store functions and standalone auth Promise helpers
 are deprecated live compatibility adapters for callers outside this migration.
@@ -969,9 +991,10 @@ Both runner families retain the surrounding host pattern:
 
 Auth keeps separate result/prompt semantics, but it must not create a second
 Effect execution bridge. Trusted built-in auth providers remain a separate
-provenance branch: only that branch receives the explicitly captured keyring
-layer, and compatibility adapters mark trusted execution explicitly. Missing
-provenance fails closed as public/external.
+provenance branch: status/accounts receive the combined internal discovery
+services, while login/logout and the existing legacy auth paths receive only
+the captured keyring layer. Compatibility adapters mark trusted execution
+explicitly. Missing provenance fails closed as public/external.
 
 ## Host Services
 

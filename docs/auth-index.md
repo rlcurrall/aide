@@ -110,7 +110,7 @@ Legacy no-scope credentials are not indexed and are never rewritten. Provider
 discovery merges a separate validated legacy probe without adding it to the
 index or migrating it.
 
-## Built-in Jira and Azure DevOps discovery
+## Built-in provider discovery
 
 Jira and Azure DevOps now treat omitted-scope provider account discovery as a
 complete-catalog operation. Each provider independently validates an eligible
@@ -187,14 +187,55 @@ cross the provider operation boundary without raw credential, document, scope,
 target, or backend values. Missing indexed credential targets are still omitted
 and repaired by the shared auth-store reconciliation primitive.
 
-This slice does not add GitHub/`gh` catalog discovery, Prime or whoami account
-presentation, or pull-request account selection. Those consumers must use the
-provider account surface; they must not read this index or construct a second
-identity catalog.
+GitHub uses the same omitted-scope complete-catalog boundary. Its account
+surface combines eligible environment identities, the separately validated
+legacy `github.com` host-only credential, every validated indexed exact-scope
+credential, and every healthy active identity from the bounded `gh` CLI
+catalog. Public environment tokens are eligible only for the `github.com`
+host-only identity, with `GITHUB_TOKEN` before `GH_TOKEN`. The allowlisted
+environment fields are accepted only from own data string properties.
+Enterprise tokens are eligible only when `GH_HOST` canonicalizes to a
+non-`github.com` host, with `GH_ENTERPRISE_TOKEN` before
+`GITHUB_ENTERPRISE_TOKEN`. These rules establish host-only identities;
+environment variables never establish or infer a login.
+
+Stored GitHub discovery calls the same single provider-lease catalog capture
+once. The snapshot includes the separate legacy read and stale indexed-target
+reconciliation. After the capture Effect returns and the provider lease
+finalizer completes, legacy and indexed payloads are validated against their
+captured storage kind and exact scope. Discovery does not create a second
+registry, migrate or write credentials, or infer a login from a token. Malformed
+individual payloads are omitted. All valid GitHub candidates enter
+`assembleBuiltinAuthAccounts` once, where canonical IDs, deterministic
+ordering, deduplication, freezing, and source precedence are applied. The
+precedence is external `gh` CLI, environment, scoped keyring, then legacy
+keyring.
+
+Omitted-scope GitHub accounts fail closed if either the stored catalog or the
+`gh` catalog fails; a usable environment identity cannot make a partial catalog
+successful. Any usable environment identity immediately returns the
+environment-configured detail without reading either catalog, even if another
+environment binding is malformed. Otherwise a stored-catalog failure is
+selected before the `gh` catalog is read, and a `gh`-catalog failure is selected
+next. After both catalogs complete, a healthy active `gh` identity selects the
+`gh`-configured detail even alongside usable stored credentials; otherwise a
+usable stored credential selects the keyring-configured detail. Either usable
+source wins malformed environment or stored siblings and unhealthy active `gh`
+siblings. With no usable source, malformed or unhealthy input is
+`misconfigured`; a truly complete empty result is `not-configured`.
+
+An exact-scope GitHub `status` or `accounts` request keeps the existing exact
+resolver: first the existing exact-host `gh` probe, then an eligible host-bound
+environment credential, and then, if resolution reaches stored state, only the
+selected scoped target. It does not read the provider index, sibling scopes, the
+legacy key, or the all-host `gh` catalog. Exact-scope login and logout retain
+their separate selected-scope containment. Credential values and environment
+tokens are reduced to validated identity candidates and never enter account
+metadata, status details, errors, logs, or serialized provider results.
 
 ## Effect service ownership and composition
 
-The implementation has three ownership boundaries:
+The implementation has five ownership boundaries:
 
 - `auth-index-codec.ts` owns provider/scope canonicalization, the versioned
   schema, hostile-document decoding, canonical serialization, and document
@@ -204,29 +245,41 @@ The implementation has three ownership boundaries:
   `Context.Tag`; it has no embedded `Default` layer. `KeyringLive` is the only
   production adapter that reads `Bun.secrets` and the only auth-store code that
   converts its Promises with `Effect.tryPromise`.
-- `auth-store.ts` owns credential/index orchestration and the public store API.
-  Its `*Effect` operations require `KeyringService` in their environment and do
-  not run Effects or provide the live adapter internally.
+- `auth-index-lock.ts` owns canonical provider-scoped lease
+  acquisition/finalization and the fixed redacted coordination errors.
+- `auth-store.ts` consumes the lock boundary for scoped orchestration and
+  catalog capture and owns the public store API. Its `*Effect` operations
+  require `KeyringService` in their environment and do not run Effects or
+  provide the live adapter internally.
+- `github-auth-catalog.ts` owns `GitHubAuthCatalogService`, the explicit
+  `GitHubAuthCatalogLive` layer, fixed GitHub auth-catalog discovery, bounded
+  parsing and resources, and fixed secret-safe failures. The service exposes
+  only the catalog discovery Effect, not an arbitrary command or subprocess
+  executor.
 
-Trusted built-in plugin descriptors declare `KeyringService` for auth and
-auth-status operations that actually access the store. Auth status, account
-discovery, login, logout, Prime status, and pull-request auth status carry
-independent environment parameters; Prime sections and pull-request
-matching/resolution remain `never`. Core host invocation preserves each
-operation's requirement. Trust does not imply provisioning: each trusted
-descriptor is constructed by the matching `defineAideCommand.none`,
-`.internalHost`, `.keyring`, or `.internalHostAndKeyring` factory and records
-that choice in an immutable private runtime identity. Registration and replay
-reject any cast-based attempt to pair the descriptor with another label, and
-the runner provides exactly the recorded environment. This command-level
-provisioning identity is distinct from the plugin's trusted/external
-registration provenance.
-`registerCommands` requires its caller to supply the keyring layer. The CLI
-entry point supplies `KeyringLive` once, while tests can pass an isolated
-in-memory or fault-injecting layer through the complete descriptor or legacy
-yargs route. Prime's descriptor requires only internal host services; its host
-dispatcher provides the captured layer once around the batch of trusted status
-operations. Existing
+Trusted built-in auth-provider status and account discovery declare the
+internal `KeyringService | GitHubAuthCatalogService` environment. The host
+starts those operations from an empty context and provides one root-composed
+layer containing the caller-supplied keyring and GitHub catalog services.
+Login, logout, top-level legacy auth status, Prime status, and pull-request auth
+status retain their existing keyring-only environments; Prime sections and
+pull-request matching, resolution, and operations remain `never`. Core host
+invocation preserves each operation's requirement.
+
+Trust does not imply provisioning: each trusted command descriptor is
+constructed by the matching `defineAideCommand.none`, `.internalHost`,
+`.keyring`, or `.internalHostAndKeyring` factory and records that choice in an
+immutable private runtime identity. Registration and replay reject any
+cast-based attempt to pair the descriptor with another label, and the runner
+provides exactly the recorded environment. This command-level provisioning
+identity is distinct from the plugin's trusted/external registration
+provenance.
+
+`registerCommands` requires its caller to supply both root layers. The CLI
+entry point supplies `KeyringLive` and `GitHubAuthCatalogLive` once, while tests
+can pass isolated or fault-injecting layers. The internal host keeps separate
+keyring-only and combined discovery provisioners; neither auth command helpers
+nor Prime select a live layer. Existing
 unsuffixed Effect functions and Promise helpers are deprecated live
 compatibility boundaries; the Promise helpers only provide `KeyringLive`, run
 the outer Effect, and rethrow the typed failure itself.
@@ -245,16 +298,18 @@ behavior.
 The exported external plugin descriptor fixes operation environments to
 `never`, and its public host-services contract contains only immutable
 service-free snapshots and mediated service-free methods. It does not export
-the keyring or internal host tags. Registry-owned plugin snapshots and
-capability entries retain mandatory trusted/external provenance. Exact
+the keyring, GitHub catalog service or live layer, internal host tags,
+arbitrary host services, or registry internals. Registry-owned plugin snapshots
+and capability entries retain mandatory trusted/external provenance. Exact
 snapshot replay preserves that provenance, while cloned or forged
 provenance-bearing snapshots fail closed; trusted auth/Prime discovery
 explicitly excludes external capabilities. When internal auth or Prime
 orchestration invokes an external operation, `Effect.mapInputContext` replaces
 its input with `Context.empty()`;
 using `Effect.provide(Context.empty())` would only merge and is not the
-isolation boundary. External plugins therefore receive no raw keyring or
-internal host authority from this internal composition seam. Auth and Prime
+isolation boundary. External plugins therefore receive no raw keyring, GitHub
+auth catalog, internal host authority, or live layer from this internal
+composition seam. Auth and Prime
 status callbacks are invoked lazily inside their provenance-specific boundary,
 so synchronous callback throws follow the same provider normalization or Prime
 fallback behavior as failures from the returned Effect. Prime section
