@@ -18,6 +18,7 @@ import {
 import { createKeyringCommandRegistry } from '@cli/host/command-registry.js';
 import { createAideInternalHostServices } from '@cli/host/runtime-context.js';
 import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 import { exportedErrorText } from '@lib/error-redaction.test-helper.js';
 import {
   resolveGitHubAuthRequest,
@@ -875,7 +876,8 @@ async function run() {
   );
   const services = createAideInternalHostServices(
     registry,
-    makeTestKeyring().layer
+    makeTestKeyring().layer,
+    testGitHubAuthCatalogLayer
   );
   const provider = services.authProviderRegistrations()[0];
   if (provider === undefined || provider.provenance !== 'external') {

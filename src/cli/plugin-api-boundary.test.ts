@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { Effect } from 'effect';
+import * as publicPluginApi from '@aide/plugin-api';
 
 import type {
   AideHostServices,
@@ -25,6 +26,14 @@ import { KeyringService } from '@lib/auth-keyring.js';
 export type { AideInternalHostServices as _NoInternalHostExport } from '@aide/plugin-api';
 // @ts-expect-error Raw keyring services are not exported by @aide/plugin-api.
 export type { KeyringService as _NoKeyringExport } from '@aide/plugin-api';
+// @ts-expect-error Trusted GitHub catalog services are not exported by @aide/plugin-api.
+export type { GitHubAuthCatalogService as _NoGitHubCatalogServiceExport } from '@aide/plugin-api';
+// @ts-expect-error Trusted GitHub catalog layers are not exported by @aide/plugin-api.
+export type { GitHubAuthCatalogLive as _NoGitHubCatalogLiveExport } from '@aide/plugin-api';
+// @ts-expect-error The fixed command executor seam is not exported by @aide/plugin-api.
+export type { GitHubAuthCatalogExecutor as _NoGitHubCatalogExecutorExport } from '@aide/plugin-api';
+// @ts-expect-error The subprocess ownership seam is not exported by @aide/plugin-api.
+export type { GitHubAuthCatalogChild as _NoGitHubCatalogChildExport } from '@aide/plugin-api';
 
 type PublicCapabilities = NonNullable<
   AidePublicPluginDescriptor['capabilities']
@@ -150,6 +159,19 @@ const publicCapabilityChecks = [
 ] satisfies readonly true[];
 
 describe('@aide/plugin-api Effect boundary', () => {
+  test('does not export GitHub auth catalog services, layers, executors, or process seams', () => {
+    expect(
+      [
+        'GitHubAuthCatalogService',
+        'GitHubAuthCatalogLive',
+        'GitHubAuthCatalogExecutor',
+        'GitHubAuthCatalogChild',
+        'makeGitHubAuthCatalogExecutor',
+        'makeGitHubAuthCatalogService',
+      ].filter((name) => name in publicPluginApi)
+    ).toEqual([]);
+  });
+
   test('keeps every public capability operation service-free', () => {
     expect(publicCapabilityChecks).toEqual(
       Array(publicCapabilityChecks.length).fill(true)

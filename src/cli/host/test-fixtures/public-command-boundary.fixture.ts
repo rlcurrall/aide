@@ -14,6 +14,7 @@ import { invokePublicCommandEffect } from '@cli/host/public-command-invocation.j
 import { createAideHostServices } from '@cli/host/runtime-context.js';
 import { registerCommands } from '@cli/host/yargs-adapter.js';
 import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 
 type Mode =
   | 'sync-throw'
@@ -144,7 +145,10 @@ async function execute(): Promise<Record<string, unknown>> {
         .scriptName('aide')
         .exitProcess(false),
       registry,
-      { keyringLayer: makeTestKeyring().layer }
+      {
+        keyringLayer: makeTestKeyring().layer,
+        githubAuthCatalogLayer: testGitHubAuthCatalogLayer,
+      }
     )
       .strict()
       .showHelpOnFail(false)

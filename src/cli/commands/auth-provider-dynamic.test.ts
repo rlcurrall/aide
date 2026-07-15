@@ -16,6 +16,7 @@ import type {
   AideAuthLogoutRequest,
 } from '@cli/host/plugin-descriptor.js';
 import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 
 const testKeyringLayer = makeTestKeyring().layer;
 
@@ -25,6 +26,7 @@ function registerCommands(
 ) {
   return registerCommandsWithKeyring(yargsInstance, registry, {
     keyringLayer: testKeyringLayer,
+    githubAuthCatalogLayer: testGitHubAuthCatalogLayer,
   });
 }
 

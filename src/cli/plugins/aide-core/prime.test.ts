@@ -33,6 +33,7 @@ import { createJiraPlugin } from '@cli/plugins/jira/plugin.js';
 import { pullRequestsPlugin } from '@cli/plugins/pull-requests/plugin.js';
 import type { GitHubAuthProbe } from '@lib/gh-utils.js';
 import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 import { KeyringService, type KeyringServiceShape } from '@lib/auth-keyring.js';
 import {
   AIDE_PLUGIN_API_VERSION,
@@ -69,7 +70,11 @@ function createPrimeTestServices(
     .registerPlugin(createGitHubPlugin({ ghAuthProbe: opts.ghAuthProbe }))
     .registerPlugin(createAzureDevOpsPlugin())
     .registerPlugin(pullRequestsPlugin);
-  return createAideInternalHostServices(registry, makeTestKeyring(store).layer);
+  return createAideInternalHostServices(
+    registry,
+    makeTestKeyring(store).layer,
+    testGitHubAuthCatalogLayer
+  );
 }
 
 async function buildPrimeTestOutput(
@@ -203,7 +208,11 @@ describe('buildPrimeOutput', () => {
       })
     );
     const keyringLayer = makeLayer();
-    const services = createAideInternalHostServices(registry, keyringLayer);
+    const services = createAideInternalHostServices(
+      registry,
+      keyringLayer,
+      testGitHubAuthCatalogLayer
+    );
     const callerAmbient = { marker: 'caller-ambient' };
 
     const caller = await Effect.runPromise(
@@ -431,7 +440,8 @@ describe('buildPrimeOutput', () => {
     const output = await buildPrimeOutput({
       services: createAideInternalHostServices(
         registry,
-        makeTestKeyring(store).layer
+        makeTestKeyring(store).layer,
+        testGitHubAuthCatalogLayer
       ),
     });
 
@@ -475,7 +485,8 @@ describe('buildPrimeOutput', () => {
     const output = await buildPrimeOutput({
       services: createAideInternalHostServices(
         registry,
-        makeTestKeyring(store).layer
+        makeTestKeyring(store).layer,
+        testGitHubAuthCatalogLayer
       ),
     });
 
@@ -560,7 +571,8 @@ describe('buildPrimeOutput', () => {
     );
     const services = createAideInternalHostServices(
       registry,
-      makeTestKeyring(store).layer
+      makeTestKeyring(store).layer,
+      testGitHubAuthCatalogLayer
     );
     const render = () => buildPrimeOutput({ services });
     const ordinaryCallbackSecret = 'SECRET-ORDINARY-STATUS-CALLBACK';
@@ -706,7 +718,8 @@ describe('buildPrimeOutput', () => {
     );
     const services = createAideInternalHostServices(
       registry,
-      makeTestKeyring(store).layer
+      makeTestKeyring(store).layer,
+      testGitHubAuthCatalogLayer
     );
     const fallback = `- ${label}: Misconfigured (Plugin '${pluginId}' ${label} status is unavailable: status Effect execution failed)`;
 
@@ -769,7 +782,8 @@ describe('buildPrimeOutput', () => {
     const output = await buildPrimeOutput({
       services: createAideInternalHostServices(
         registry,
-        makeTestKeyring(store).layer
+        makeTestKeyring(store).layer,
+        testGitHubAuthCatalogLayer
       ),
     });
 
@@ -821,7 +835,8 @@ describe('buildPrimeOutput', () => {
     const output = await buildPrimeOutput({
       services: createAideInternalHostServices(
         registry,
-        makeTestKeyring(store).layer
+        makeTestKeyring(store).layer,
+        testGitHubAuthCatalogLayer
       ),
     });
 
@@ -888,7 +903,8 @@ describe('buildPrimeOutput', () => {
     const output = await buildPrimeOutput({
       services: createAideInternalHostServices(
         registry,
-        makeTestKeyring(store).layer
+        makeTestKeyring(store).layer,
+        testGitHubAuthCatalogLayer
       ),
     });
 
@@ -943,7 +959,8 @@ describe('buildPrimeOutput', () => {
     const output = await buildPrimeOutput({
       services: createAideInternalHostServices(
         registry,
-        makeTestKeyring(store).layer
+        makeTestKeyring(store).layer,
+        testGitHubAuthCatalogLayer
       ),
     });
 
@@ -1033,7 +1050,8 @@ describe('buildPrimeOutput', () => {
     const output = await buildPrimeOutput({
       services: createAideInternalHostServices(
         registry,
-        makeTestKeyring(store).layer
+        makeTestKeyring(store).layer,
+        testGitHubAuthCatalogLayer
       ),
     });
 
@@ -1129,7 +1147,8 @@ describe('buildPrimeOutput', () => {
     const output = await buildPrimeOutput({
       services: createAideInternalHostServices(
         registry,
-        makeTestKeyring(store).layer
+        makeTestKeyring(store).layer,
+        testGitHubAuthCatalogLayer
       ),
     });
 

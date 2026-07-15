@@ -35,6 +35,7 @@ import type {
 } from '@cli/host/plugin-descriptor.js';
 import type { KeyringServiceShape } from '@lib/auth-keyring.js';
 import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 
 class ShadowKeyringService extends Context.Tag('aide/KeyringService')<
   ShadowKeyringService,
@@ -102,7 +103,10 @@ function registerWithFakeKeyring(
       .scriptName('aide')
       .exitProcess(false),
     registry,
-    { keyringLayer: keyring.layer }
+    {
+      keyringLayer: keyring.layer,
+      githubAuthCatalogLayer: testGitHubAuthCatalogLayer,
+    }
   )
     .strict()
     .parseAsync();
@@ -216,7 +220,8 @@ describe('public capability runtime isolation', () => {
 
     const services = createAideInternalHostServices(
       replay,
-      makeTestKeyring(new Map([['aide:jira', fakeSecret]])).layer
+      makeTestKeyring(new Map([['aide:jira', fakeSecret]])).layer,
+      testGitHubAuthCatalogLayer
     );
     const provider = services.authProviderRegistrations()[0];
     expect(provider?.provenance).toBe('external');
@@ -286,7 +291,8 @@ describe('public capability runtime isolation', () => {
     );
     const services = createAideInternalHostServices(
       registry,
-      makeTestKeyring(new Map([['aide:jira', fakeSecret]])).layer
+      makeTestKeyring(new Map([['aide:jira', fakeSecret]])).layer,
+      testGitHubAuthCatalogLayer
     );
     const provider = services.authProviderRegistrations()[0];
     if (provider === undefined) throw new Error('Missing external provider');
@@ -341,7 +347,8 @@ describe('public capability runtime isolation', () => {
     const output = await buildPrimeOutput({
       services: createAideInternalHostServices(
         registry,
-        makeTestKeyring(new Map([['aide:jira', fakeSecret]])).layer
+        makeTestKeyring(new Map([['aide:jira', fakeSecret]])).layer,
+        testGitHubAuthCatalogLayer
       ),
     });
 
@@ -376,7 +383,8 @@ describe('public capability runtime isolation', () => {
     const output = await buildPrimeOutput({
       services: createAideInternalHostServices(
         registry,
-        makeTestKeyring(new Map([['aide:jira', fakeSecret]])).layer
+        makeTestKeyring(new Map([['aide:jira', fakeSecret]])).layer,
+        testGitHubAuthCatalogLayer
       ),
     });
 

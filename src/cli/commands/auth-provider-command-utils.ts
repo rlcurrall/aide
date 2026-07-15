@@ -31,6 +31,7 @@ import {
 } from '@lib/prompts.js';
 import { authInputFieldFlagName } from '@cli/host/auth-input-fields.js';
 import type { KeyringService } from '@lib/auth-keyring.js';
+import type { TrustedAuthDiscoveryServices } from '@cli/host/command-registry.js';
 import type {
   AideAuthProviderRegistration,
   AideInternalHostServices,
@@ -412,21 +413,22 @@ function printMessages(messages: readonly string[] | undefined): void {
   }
 }
 
-function runDynamicAuthProviderEffect<A>(
+function runDynamicAuthProviderEffect<A, R>(
   provider: DynamicAuthProvider,
   services: AideInternalHostServices,
+  provideTrusted: (
+    effect: Effect.Effect<A, unknown, R>
+  ) => Effect.Effect<A, unknown, never>,
   makeTrusted: (
     trusted: Extract<DynamicAuthProvider, { readonly provenance: 'trusted' }>
-  ) => Effect.Effect<A, unknown, KeyringService>,
+  ) => Effect.Effect<A, unknown, R>,
   makeExternal: (
     external: Extract<DynamicAuthProvider, { readonly provenance: 'external' }>
   ) => Effect.Effect<A, unknown, never>
 ): Promise<A> {
   return provider.provenance === 'trusted'
     ? runServiceFreeAuthProviderCommandEffect(
-        services.provideTrustedKeyring(
-          Effect.suspend(() => makeTrusted(provider))
-        )
+        provideTrusted(Effect.suspend(() => makeTrusted(provider)))
       )
     : runServiceFreeAuthProviderCommandEffect(
         services.isolatePublicEffect(
@@ -445,9 +447,13 @@ export async function runDynamicAuthProviderLogin(
     ...request,
     prompt: request.prompt ?? authPrompt(opts.prompter),
   };
-  const result = await runDynamicAuthProviderEffect(
+  const result = await runDynamicAuthProviderEffect<
+    AideAuthLoginResult,
+    KeyringService
+  >(
     provider,
     services,
+    services.provideTrustedKeyring,
     (trusted) => loginWithAuthProvider(trusted, operationRequest),
     (external) => loginWithAuthProvider(external, operationRequest)
   );
@@ -460,9 +466,13 @@ export async function runDynamicAuthProviderLogout(
   services: AideInternalHostServices,
   request?: AideAuthLogoutRequest
 ): Promise<AideAuthLogoutResult> {
-  const result = await runDynamicAuthProviderEffect(
+  const result = await runDynamicAuthProviderEffect<
+    AideAuthLogoutResult,
+    KeyringService
+  >(
     provider,
     services,
+    services.provideTrustedKeyring,
     (trusted) =>
       request === undefined
         ? logoutWithAuthProvider(trusted)
@@ -481,9 +491,13 @@ export function runDynamicAuthProviderStatus(
   services: AideInternalHostServices,
   request: AideAuthStatusRequest = {}
 ): Promise<AidePluginAuthStatus> {
-  return runDynamicAuthProviderEffect(
+  return runDynamicAuthProviderEffect<
+    AidePluginAuthStatus,
+    TrustedAuthDiscoveryServices
+  >(
     provider,
     services,
+    services.provideTrustedAuthDiscovery,
     (trusted) => getAuthProviderStatus(trusted, request),
     (external) => getAuthProviderStatus(external, request)
   );
@@ -494,9 +508,13 @@ export function runDynamicAuthProviderAccounts(
   services: AideInternalHostServices,
   request: AideAuthAccountDiscoveryRequest = {}
 ): Promise<readonly AideAuthAccount[]> {
-  return runDynamicAuthProviderEffect(
+  return runDynamicAuthProviderEffect<
+    readonly AideAuthAccount[],
+    TrustedAuthDiscoveryServices
+  >(
     provider,
     services,
+    services.provideTrustedAuthDiscovery,
     (trusted) => listAuthProviderAccounts(trusted, request),
     (external) => listAuthProviderAccounts(external, request)
   );

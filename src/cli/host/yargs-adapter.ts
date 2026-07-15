@@ -25,6 +25,7 @@ import {
   ownArrayLength,
 } from './host-owned-array.js';
 import type { KeyringService } from '@lib/auth-keyring.js';
+import type { GitHubAuthCatalogService } from '@lib/github-auth-catalog.js';
 
 const getOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
 const ownKeys = Reflect.ownKeys;
@@ -593,6 +594,7 @@ function commandModuleFromRegistryEntry(
 
 export interface RegisterCommandsOptions {
   readonly keyringLayer: Layer.Layer<KeyringService>;
+  readonly githubAuthCatalogLayer: Layer.Layer<GitHubAuthCatalogService>;
 }
 
 export function registerCommands(
@@ -604,7 +606,8 @@ export function registerCommands(
   assertYargsRuntimeIntegrity();
   const services = createAideInternalHostServices(
     registry,
-    options.keyringLayer
+    options.keyringLayer,
+    options.githubAuthCatalogLayer
   );
   let configured = yargs;
 

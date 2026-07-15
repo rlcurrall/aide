@@ -22,6 +22,7 @@ import {
   YargsRuntimeIntegrityError,
 } from '@cli/host/yargs-adapter.js';
 import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 
 type Mode =
   | 'commands-iterator'
@@ -311,6 +312,7 @@ async function runPrototypeSemanticProbe() {
       await captureFailure(() =>
         registerCommands(parser, registry, {
           keyringLayer: makeTestKeyring().layer,
+          githubAuthCatalogLayer: testGitHubAuthCatalogLayer,
         })
       );
       await captureFailure(() => parser.getHelp());
@@ -711,6 +713,7 @@ async function runInnerLifecycleProbe() {
   try {
     await registerCommands(parser, registry, {
       keyringLayer: makeTestKeyring().layer,
+      githubAuthCatalogLayer: testGitHubAuthCatalogLayer,
     })
       .strict()
       .parseAsync();
@@ -854,7 +857,10 @@ async function runNormalYargsLifecycleProbe() {
         registerCommands(
           yargs(args).scriptName('aide').exitProcess(false),
           registry,
-          { keyringLayer: makeTestKeyring().layer }
+          {
+            keyringLayer: makeTestKeyring().layer,
+            githubAuthCatalogLayer: testGitHubAuthCatalogLayer,
+          }
         );
       const helpParser = configure([`n${attempt}`, 'c', '--help']);
       const helpPromise = Reflect.apply(helpParser.getHelp, helpParser, []);

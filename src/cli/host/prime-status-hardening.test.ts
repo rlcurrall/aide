@@ -7,6 +7,7 @@ import {
 } from '@aide/plugin-api';
 import { buildPrimeOutput } from '@cli/plugins/aide-core/prime.js';
 import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 
 import { createKeyringCommandRegistry } from './command-registry.js';
 import { createAideInternalHostServices } from './runtime-context.js';
@@ -57,7 +58,11 @@ function registerStatus(
   );
   return {
     registry,
-    services: createAideInternalHostServices(registry, makeTestKeyring().layer),
+    services: createAideInternalHostServices(
+      registry,
+      makeTestKeyring().layer,
+      testGitHubAuthCatalogLayer
+    ),
   };
 }
 

@@ -22,6 +22,7 @@ import type {
 import { snapshotValidPrimeSections } from '@cli/host/prime-contribution.js';
 import { buildPrimeOutput } from '@cli/plugins/aide-core/prime.js';
 import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 
 type Mode =
   | 'prime-status-proxy'
@@ -189,7 +190,8 @@ async function runPrimeMessagePrototypeProbe() {
       });
       const services = createAideInternalHostServices(
         registry,
-        makeTestKeyring().layer
+        makeTestKeyring().layer,
+        testGitHubAuthCatalogLayer
       );
       await buildPrimeOutput({ services });
       const registration =
@@ -290,7 +292,8 @@ async function runPrimeSectionPrototypeProbe(tolerant: boolean) {
         const output = await buildPrimeOutput({
           services: createAideInternalHostServices(
             registry,
-            makeTestKeyring().layer
+            makeTestKeyring().layer,
+            testGitHubAuthCatalogLayer
           ),
         });
         denseFrozen =
@@ -449,7 +452,8 @@ async function runPrimeDataDescriptorProbe(tolerant: boolean) {
       const output = await buildPrimeOutput({
         services: createAideInternalHostServices(
           registry,
-          makeTestKeyring().layer
+          makeTestKeyring().layer,
+          testGitHubAuthCatalogLayer
         ),
       });
       denseSanitized =
@@ -657,7 +661,8 @@ async function runMode(): Promise<Readonly<Record<string, unknown>>> {
       const output = await buildPrimeOutput({
         services: createAideInternalHostServices(
           registry,
-          makeTestKeyring().layer
+          makeTestKeyring().layer,
+          testGitHubAuthCatalogLayer
         ),
       });
       return {
@@ -695,7 +700,8 @@ async function runMode(): Promise<Readonly<Record<string, unknown>>> {
       const output = await buildPrimeOutput({
         services: createAideInternalHostServices(
           registry,
-          makeTestKeyring().layer
+          makeTestKeyring().layer,
+          testGitHubAuthCatalogLayer
         ),
       });
       return {

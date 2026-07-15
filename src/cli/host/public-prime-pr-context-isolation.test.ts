@@ -24,6 +24,7 @@ import {
   createAideHostServices,
   createAideInternalHostServices,
 } from '@cli/host/runtime-context.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 import type {
   AidePluginAuthStatus,
   AidePrimeSection,
@@ -341,7 +342,8 @@ function makeAmbientRunner() {
   const keyring = makeTestKeyring(new Map([['aide:jira', fakeSecret]]));
   const internalServices = createAideInternalHostServices(
     createKeyringCommandRegistry(),
-    keyring.layer
+    keyring.layer,
+    testGitHubAuthCatalogLayer
   );
   return <A, E>(effect: Effect.Effect<A, E, never>) =>
     Effect.runPromise(

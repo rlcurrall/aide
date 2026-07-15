@@ -12,6 +12,7 @@ import { exportedErrorText } from '@lib/error-redaction.test-helper.js';
 import { createCommandRegistry } from './command-registry.js';
 import { registerCommands } from './yargs-adapter.js';
 import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 
 const captureDiagnostic = 'External plugin metadata capture failed';
 
@@ -2709,6 +2710,7 @@ describe('external plugin metadata capture', () => {
         registry,
         {
           keyringLayer: makeTestKeyring().layer,
+          githubAuthCatalogLayer: testGitHubAuthCatalogLayer,
         }
       ).getHelp();
       expect(help).toContain('full-external');
@@ -2718,6 +2720,7 @@ describe('external plugin metadata capture', () => {
         registry,
         {
           keyringLayer: makeTestKeyring().layer,
+          githubAuthCatalogLayer: testGitHubAuthCatalogLayer,
         }
       ).parseAsync();
     } finally {

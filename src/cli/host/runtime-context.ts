@@ -1,9 +1,10 @@
-import { Context, Effect, type Layer } from 'effect';
+import { Context, Effect, Layer } from 'effect';
 
 import type {
   CommandRegistry,
   KeyringCommandRegistry,
   PluginCapability,
+  TrustedAuthDiscoveryServices,
 } from './command-registry.js';
 import type {
   AideAuthProviderCapability,
@@ -37,6 +38,7 @@ import type {
   AidePullRequestViewResult,
 } from './plugin-descriptor.js';
 import type { KeyringService } from '@lib/auth-keyring.js';
+import type { GitHubAuthCatalogService } from '@lib/github-auth-catalog.js';
 import { isolatePublicCapabilityEffect } from './public-capability-invocation.js';
 import {
   invokePrimeSectionsCallback,
@@ -394,8 +396,8 @@ export type AideTrustedAuthProviderRegistration = Readonly<{
   provenance: 'trusted';
   pluginId: string;
   capability: AideAuthProviderCapability<
-    KeyringService,
-    KeyringService,
+    TrustedAuthDiscoveryServices,
+    TrustedAuthDiscoveryServices,
     KeyringService,
     KeyringService
   >;
@@ -434,8 +436,8 @@ export interface AideInternalHostServices extends AideHostServices {
   readonly primeContributionRegistrations: () => readonly AidePrimeContributionRegistration[];
   readonly trustedAuthProviders: () => readonly AideDiscoveredCapability<
     AideAuthProviderCapability<
-      KeyringService,
-      KeyringService,
+      TrustedAuthDiscoveryServices,
+      TrustedAuthDiscoveryServices,
       KeyringService,
       KeyringService
     >
@@ -445,6 +447,9 @@ export interface AideInternalHostServices extends AideHostServices {
   >[];
   readonly provideTrustedKeyring: <A, E>(
     effect: Effect.Effect<A, E, KeyringService>
+  ) => Effect.Effect<A, E, never>;
+  readonly provideTrustedAuthDiscovery: <A, E>(
+    effect: Effect.Effect<A, E, TrustedAuthDiscoveryServices>
   ) => Effect.Effect<A, E, never>;
   readonly isolatePublicEffect: <A, E>(
     effect: Effect.Effect<A, E, never>
@@ -954,8 +959,13 @@ export function createAideHostServices<
 
 export function createAideInternalHostServices(
   registry: KeyringCommandRegistry,
-  keyringLayer: Layer.Layer<KeyringService>
+  keyringLayer: Layer.Layer<KeyringService>,
+  githubAuthCatalogLayer: Layer.Layer<GitHubAuthCatalogService>
 ): AideInternalHostServices {
+  const trustedAuthDiscoveryLayer = Layer.merge(
+    keyringLayer,
+    githubAuthCatalogLayer
+  );
   const publicServices = createAideHostServices(registry);
   const trustedAuthProviders = discoveredCapabilities(
     registry.capabilities.trustedAuthProviders()
@@ -1029,6 +1039,12 @@ export function createAideInternalHostServices(
       effect: Effect.Effect<A, E, KeyringService>
     ) =>
       isolatePublicCapabilityEffect(effect.pipe(Effect.provide(keyringLayer))),
+    provideTrustedAuthDiscovery: <A, E>(
+      effect: Effect.Effect<A, E, TrustedAuthDiscoveryServices>
+    ) =>
+      isolatePublicCapabilityEffect(
+        effect.pipe(Effect.provide(trustedAuthDiscoveryLayer))
+      ),
     isolatePublicEffect: isolatePublicCapabilityEffect,
   });
 }

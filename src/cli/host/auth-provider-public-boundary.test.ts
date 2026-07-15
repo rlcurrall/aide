@@ -46,6 +46,8 @@ import {
 } from './runtime-context.js';
 import { KeyringService } from '@lib/auth-keyring.js';
 import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { GitHubAuthCatalogService } from '@lib/github-auth-catalog.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 import {
   backendFailureSentinels,
   exportedErrorText,
@@ -140,7 +142,8 @@ function makeExternalProvider(
   );
   const services = createAideInternalHostServices(
     registry,
-    makeTestKeyring(new Map([['aide:jira', 'FAKE-AMBIENT-KEYRING']])).layer
+    makeTestKeyring(new Map([['aide:jira', 'FAKE-AMBIENT-KEYRING']])).layer,
+    testGitHubAuthCatalogLayer
   );
   const provider = services.authProviderRegistrations()[0];
   expect(provider?.provenance).toBe('external');
@@ -1034,6 +1037,7 @@ describe('external auth-provider public Effect boundary', () => {
       string,
       {
         readonly keyring: boolean;
+        readonly catalog: boolean;
         readonly internal: boolean;
         readonly ref: string;
       }
@@ -1043,12 +1047,14 @@ describe('external auth-provider public Effect boundary', () => {
     const observe = (phase: string, result: unknown) =>
       Effect.gen(function* () {
         const keyring = yield* Effect.serviceOption(KeyringService);
+        const catalog = yield* Effect.serviceOption(GitHubAuthCatalogService);
         const internal = yield* Effect.serviceOption(
           AideInternalHostServicesTag
         );
         const ref = yield* FiberRef.get(fiberRef);
         observations.set(phase, {
           keyring: Option.isSome(keyring),
+          catalog: Option.isSome(catalog),
           internal: Option.isSome(internal),
           ref,
         });
@@ -1135,11 +1141,15 @@ describe('external auth-provider public Effect boundary', () => {
         true
       );
       expect(
+        Option.isSome(yield* Effect.serviceOption(GitHubAuthCatalogService))
+      ).toBe(true);
+      expect(
         Option.isSome(yield* Effect.serviceOption(AideInternalHostServicesTag))
       ).toBe(true);
     }).pipe(
       Effect.provideService(AideInternalHostServicesTag, services),
-      Effect.provide(ambientKeyring)
+      Effect.provide(ambientKeyring),
+      Effect.provide(testGitHubAuthCatalogLayer)
     );
 
     await Effect.runPromise(program);
@@ -1160,6 +1170,7 @@ describe('external auth-provider public Effect boundary', () => {
     ]) {
       expect(observations.get(phase), phase).toEqual({
         keyring: false,
+        catalog: false,
         internal: false,
         ref: 'initial',
       });

@@ -10,9 +10,14 @@ import {
   type AidePluginDescriptor,
   type AidePluginAuthStatus,
 } from './plugin-descriptor.js';
-import { createAideHostServices } from './runtime-context.js';
+import {
+  createAideHostServices,
+  createAideInternalHostServices,
+} from './runtime-context.js';
 import { createBuiltinCommandRegistry } from '@cli/plugins/builtin.js';
 import { KeyringService } from '@lib/auth-keyring.js';
+import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 
 class AlternateAuthStatusService extends Context.Tag(
   'aide.test.AlternateAuthStatusService'
@@ -47,6 +52,37 @@ function pullRequestPlugin<R>(
 }
 
 describe('public AideHostServices construction', () => {
+  test('requires an explicit catalog layer and keeps internal provisioners out of public services', async () => {
+    const registry = createKeyringCommandRegistry();
+    const keyringLayer = makeTestKeyring().layer;
+    const missingCatalogLayerDoesNotCompile = () => {
+      // @ts-expect-error Trusted host construction has no hidden GitHub catalog layer.
+      createAideInternalHostServices(registry, keyringLayer);
+    };
+    const internal = createAideInternalHostServices(
+      registry,
+      keyringLayer,
+      testGitHubAuthCatalogLayer
+    );
+    const publicKeys = Reflect.ownKeys(internal.publicServices);
+
+    expect(publicKeys).not.toContain('provideTrustedKeyring');
+    expect(publicKeys).not.toContain('provideTrustedAuthDiscovery');
+    expect(publicKeys).not.toContain('keyringLayer');
+    expect(publicKeys).not.toContain('githubAuthCatalogLayer');
+    expect(missingCatalogLayerDoesNotCompile).toBeFunction();
+    expect(JSON.stringify(internal.publicServices)).not.toContain(
+      'GitHubAuthCatalog'
+    );
+
+    const indexSource = await Bun.file(
+      new URL('../index.ts', import.meta.url)
+    ).text();
+    expect(indexSource).toContain(
+      'githubAuthCatalogLayer: GitHubAuthCatalogLive'
+    );
+  });
+
   test('resolves PR providers from service-free registries', async () => {
     const registry = createCommandRegistry().registerPlugin(
       pullRequestPlugin('service-free-pr', () =>

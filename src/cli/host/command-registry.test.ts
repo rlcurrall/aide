@@ -42,6 +42,7 @@ import {
   registerCommands as registerCommandsWithKeyring,
 } from './yargs-adapter.js';
 import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 import { KeyringService, type KeyringServiceShape } from '@lib/auth-keyring.js';
 import { aideCorePlugin } from '@cli/plugins/aide-core/plugin.js';
 
@@ -53,6 +54,7 @@ function registerCommands(
 ) {
   return registerCommandsWithKeyring(yargsInstance, registry, {
     keyringLayer: testKeyringLayer,
+    githubAuthCatalogLayer: testGitHubAuthCatalogLayer,
   });
 }
 
@@ -4152,6 +4154,7 @@ describe('commandModuleFromDescriptor', () => {
       for (const args of [['none'], ['host', 'keyring'], ['combined']]) {
         await registerCommandsWithKeyring(yargs(args), registry, {
           keyringLayer,
+          githubAuthCatalogLayer: testGitHubAuthCatalogLayer,
         })
           .scriptName('aide')
           .strict()
@@ -4257,6 +4260,7 @@ describe('commandModuleFromDescriptor', () => {
     try {
       await registerCommandsWithKeyring(yargs(['prime']), registry, {
         keyringLayer,
+        githubAuthCatalogLayer: testGitHubAuthCatalogLayer,
       })
         .scriptName('aide')
         .strict()
@@ -4357,7 +4361,8 @@ describe('runtime host context bridge', () => {
     const context: AideHostContext = {
       services: createAideInternalHostServices(
         createKeyringCommandRegistry(),
-        testKeyringLayer
+        testKeyringLayer,
+        testGitHubAuthCatalogLayer
       ),
       keyringLayer: testKeyringLayer,
     };
@@ -4379,14 +4384,16 @@ describe('runtime host context bridge', () => {
     const realContext: AideHostContext = {
       services: createAideInternalHostServices(
         createKeyringCommandRegistry(),
-        testKeyringLayer
+        testKeyringLayer,
+        testGitHubAuthCatalogLayer
       ),
       keyringLayer: testKeyringLayer,
     };
     const forgedContext: AideHostContext = {
       services: createAideInternalHostServices(
         createKeyringCommandRegistry(),
-        testKeyringLayer
+        testKeyringLayer,
+        testGitHubAuthCatalogLayer
       ),
       keyringLayer: testKeyringLayer,
     };
@@ -4410,14 +4417,16 @@ describe('runtime host context bridge', () => {
     const firstContext: AideHostContext = {
       services: createAideInternalHostServices(
         createKeyringCommandRegistry(),
-        testKeyringLayer
+        testKeyringLayer,
+        testGitHubAuthCatalogLayer
       ),
       keyringLayer: testKeyringLayer,
     };
     const secondContext: AideHostContext = {
       services: createAideInternalHostServices(
         createKeyringCommandRegistry(),
-        testKeyringLayer
+        testKeyringLayer,
+        testGitHubAuthCatalogLayer
       ),
       keyringLayer: testKeyringLayer,
     };
@@ -4517,7 +4526,8 @@ describe('registerCommands', () => {
     const forgedContext: AideHostContext = {
       services: createAideInternalHostServices(
         createKeyringCommandRegistry(),
-        testKeyringLayer
+        testKeyringLayer,
+        testGitHubAuthCatalogLayer
       ),
       keyringLayer: testKeyringLayer,
     };
@@ -4563,7 +4573,8 @@ describe('registerCommands', () => {
     const forgedContext: AideHostContext = {
       services: createAideInternalHostServices(
         createKeyringCommandRegistry(),
-        testKeyringLayer
+        testKeyringLayer,
+        testGitHubAuthCatalogLayer
       ),
       keyringLayer: testKeyringLayer,
     };

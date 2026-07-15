@@ -55,6 +55,7 @@ import { authInputFieldFlagName } from './auth-input-fields.js';
 import type { AideHostServicesTag } from './runtime-context.js';
 import { normalizeAuthProviderId } from '@lib/auth-store.js';
 import type { KeyringService } from '@lib/auth-keyring.js';
+import type { GitHubAuthCatalogService } from '@lib/github-auth-catalog.js';
 import {
   hostOwnedBuiltinPullRequestDiagnostic,
   type HostOwnedPullRequestFailureDiagnostic,
@@ -4901,10 +4902,15 @@ export class CommandRegistry<
   }
 }
 
+/** Trusted-only environment for built-in auth status/account discovery. */
+export type TrustedAuthDiscoveryServices =
+  | KeyringService
+  | GitHubAuthCatalogService;
+
 export type KeyringCommandRegistry = CommandRegistry<
   KeyringService,
-  KeyringService,
-  KeyringService,
+  TrustedAuthDiscoveryServices,
+  TrustedAuthDiscoveryServices,
   KeyringService,
   KeyringService,
   KeyringService,
@@ -4914,8 +4920,8 @@ export type KeyringCommandRegistry = CommandRegistry<
 export function createKeyringCommandRegistry(): KeyringCommandRegistry {
   return new CommandRegistry<
     KeyringService,
-    KeyringService,
-    KeyringService,
+    TrustedAuthDiscoveryServices,
+    TrustedAuthDiscoveryServices,
     KeyringService,
     KeyringService,
     KeyringService,

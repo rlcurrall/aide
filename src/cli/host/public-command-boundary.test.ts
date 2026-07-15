@@ -33,6 +33,7 @@ import {
 } from './runtime-context.js';
 import { registerCommands } from './yargs-adapter.js';
 import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 import { exportedErrorText } from '@lib/error-redaction.test-helper.js';
 
 const testKeyringLayer = makeTestKeyring().layer;
@@ -80,7 +81,10 @@ async function parseExternalCommand(
         .scriptName('aide')
         .exitProcess(false),
       registry,
-      { keyringLayer: testKeyringLayer }
+      {
+        keyringLayer: testKeyringLayer,
+        githubAuthCatalogLayer: testGitHubAuthCatalogLayer,
+      }
     )
       .strict()
       .showHelpOnFail(false)

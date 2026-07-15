@@ -16,6 +16,7 @@ import {
 } from './host/yargs-adapter.js';
 import { createBuiltinCommandRegistry } from './plugins/builtin.js';
 import { KeyringLive } from '@lib/auth-keyring.js';
+import { GitHubAuthCatalogLive } from '@lib/github-auth-catalog.js';
 import { safeCliErrorMessage } from './plugins/pull-requests/commands/error.js';
 
 export function renderTopLevelError(error: unknown): string {
@@ -37,7 +38,10 @@ async function main(): Promise<number> {
         .alias('h', 'help')
         .alias('v', 'version'),
       registry,
-      { keyringLayer: KeyringLive }
+      {
+        keyringLayer: KeyringLive,
+        githubAuthCatalogLayer: GitHubAuthCatalogLive,
+      }
     )
       .demandCommand(1, registry.demandMessage())
       .strict()
