@@ -72,8 +72,8 @@ interface ProviderPlugin {
   readonly id: string;
   readonly capabilities?: {
     readonly authProvider?: AideAuthProviderCapability<
-      KeyringService,
-      KeyringService,
+      TrustedAuthDiscoveryServices,
+      TrustedAuthDiscoveryServices,
       KeyringService,
       KeyringService
     >;
@@ -262,10 +262,11 @@ async function exerciseInjectedProvider(options: {
     new Map([[`aide:${options.initialName}`, options.initialValue]])
   );
   const provider = authProvider(options.plugin);
+  const discoveryLayer = Layer.merge(keyring.layer, testGitHubAuthCatalogLayer);
 
   expect(
     await Effect.runPromise(
-      getAuthProviderStatus(provider).pipe(Effect.provide(keyring.layer))
+      getAuthProviderStatus(provider).pipe(Effect.provide(discoveryLayer))
     )
   ).toMatchObject({ state: 'configured' });
   expect(
@@ -663,7 +664,7 @@ describe('trusted auth-provider keyring composition', () => {
     expect(bunDelete).not.toHaveBeenCalled();
   });
 
-  test('GitHub status, login, and delete use only the injected keyring', async () => {
+  test('GitHub status uses injected discovery while login and delete stay on the injected keyring', async () => {
     const bunGet = spyOn(Bun.secrets, 'get').mockRejectedValue(
       new Error('Bun.secrets.get must not run')
     );

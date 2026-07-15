@@ -5,6 +5,7 @@ import type {
   AideDiscoveredCapability,
 } from '@cli/host/plugin-descriptor.js';
 import { AuthProviderOperationError } from '@cli/host/auth-provider-operations.js';
+import type { TrustedAuthDiscoveryServices } from '@cli/host/command-registry.js';
 import { createAzureDevOpsPlugin } from '@cli/plugins/azure-devops/plugin.js';
 import { createGitHubPlugin } from '@cli/plugins/github/plugin.js';
 import { createJiraPlugin } from '@cli/plugins/jira/plugin.js';
@@ -57,8 +58,8 @@ function authProvider(plugin: {
   readonly id: string;
   readonly capabilities?: {
     readonly authProvider?: AideAuthProviderCapability<
-      KeyringService,
-      KeyringService,
+      TrustedAuthDiscoveryServices,
+      TrustedAuthDiscoveryServices,
       KeyringService,
       KeyringService
     >;
@@ -73,7 +74,27 @@ function authProvider(plugin: {
 > {
   const provider = plugin.capabilities?.authProvider;
   if (provider === undefined) throw new Error('Plugin has no auth provider');
-  return Object.freeze({ pluginId: plugin.id, capability: provider });
+  const loginOnlyCapability: AideAuthProviderCapability<
+    KeyringService,
+    KeyringService,
+    KeyringService,
+    KeyringService
+  > = Object.freeze({
+    providerId: provider.providerId,
+    label: provider.label,
+    ...(provider.login === undefined ? {} : { login: provider.login }),
+    ...(provider.logout === undefined ? {} : { logout: provider.logout }),
+    status: () => {
+      throw new Error('Login tests do not invoke auth-provider status.');
+    },
+    ...(provider.operations === undefined
+      ? {}
+      : { operations: provider.operations }),
+  });
+  return Object.freeze({
+    pluginId: plugin.id,
+    capability: loginOnlyCapability,
+  });
 }
 
 describe('provider-backed login', () => {

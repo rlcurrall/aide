@@ -72,6 +72,10 @@ import {
   messages,
   promptAuthField,
 } from '../auth-operation-utils.js';
+import {
+  discoverGitHubAuthAccountsEffect,
+  discoverGitHubAuthStatusEffect,
+} from './auth-discovery.js';
 
 type ProbeGithubConfig = (options: {
   readonly host?: string;
@@ -360,6 +364,16 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
       scope: authRequest.keyringScope,
     }).pipe(Effect.map((status) => githubAuthAccounts(status, authRequest)));
   };
+  const authProviderStatus = (request?: { readonly scope?: AuthStoreScope }) =>
+    customProbeConfig === undefined && request?.scope === undefined
+      ? discoverGitHubAuthStatusEffect()
+      : authStatus(request);
+  const authProviderAccounts = (request?: {
+    readonly scope?: AuthStoreScope;
+  }) =>
+    customProbeConfig === undefined && request?.scope === undefined
+      ? discoverGitHubAuthAccountsEffect()
+      : authAccounts(request);
 
   const listPullRequests = (
     request: AidePullRequestListRequest
@@ -943,8 +957,8 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
         logout: {
           summary: 'Remove GitHub credentials',
         },
-        status: authStatus,
-        accounts: authAccounts,
+        status: authProviderStatus,
+        accounts: authProviderAccounts,
         operations: {
           login: (request) => loginGitHubAuth(request, probeConfigEffect),
           logout: logoutGitHubAuth,

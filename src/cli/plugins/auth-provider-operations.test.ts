@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { Effect } from 'effect';
+import { Effect, Layer } from 'effect';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +11,7 @@ import type {
   AideAuthProviderCapability,
 } from '@cli/host/plugin-descriptor.js';
 import { listAuthProviderAccounts } from '@cli/host/auth-provider-operations.js';
+import type { TrustedAuthDiscoveryServices } from '@cli/host/command-registry.js';
 import { loadJiraConfigForArgs } from '@cli/commands/jira/auth-scope.js';
 import { createAzureDevOpsPlugin } from './azure-devops/plugin.js';
 import { createGitHubPlugin } from './github/plugin.js';
@@ -21,6 +22,7 @@ import {
   type TestKeyring,
 } from '@lib/auth-keyring.test-helper.js';
 import type { KeyringService } from '@lib/auth-keyring.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 import {
   authenticatedGitHubAuthProbe,
   installMockSecrets,
@@ -73,8 +75,8 @@ let testKeyring: TestKeyring;
 function authProvider(plugin: {
   readonly capabilities?: {
     readonly authProvider?: AideAuthProviderCapability<
-      KeyringService,
-      KeyringService,
+      TrustedAuthDiscoveryServices,
+      TrustedAuthDiscoveryServices,
       KeyringService,
       KeyringService
     >;
@@ -85,12 +87,22 @@ function authProvider(plugin: {
   return {
     ...provider,
     status: (request) =>
-      provider.status(request).pipe(Effect.provide(testKeyring.layer)),
+      provider
+        .status(request)
+        .pipe(
+          Effect.provide(
+            Layer.merge(testKeyring.layer, testGitHubAuthCatalogLayer)
+          )
+        ),
     accounts:
       provider.accounts === undefined
         ? undefined
         : (request) =>
-            provider.accounts!(request).pipe(Effect.provide(testKeyring.layer)),
+            provider.accounts!(request).pipe(
+              Effect.provide(
+                Layer.merge(testKeyring.layer, testGitHubAuthCatalogLayer)
+              )
+            ),
     operations:
       provider.operations === undefined
         ? undefined
@@ -117,8 +129,8 @@ function discoveredAuthProvider(plugin: {
   readonly id: string;
   readonly capabilities?: {
     readonly authProvider?: AideAuthProviderCapability<
-      KeyringService,
-      KeyringService,
+      TrustedAuthDiscoveryServices,
+      TrustedAuthDiscoveryServices,
       KeyringService,
       KeyringService
     >;
@@ -255,7 +267,12 @@ describe('auth provider operations', () => {
     const githubAccounts = await Effect.runPromise(
       listAuthProviderAccounts(
         discoveredAuthProvider(
-          createGitHubPlugin({ ghAuthProbe: authenticatedGitHubAuthProbe })
+          createGitHubPlugin({
+            probeConfig: async () => ({
+              kind: 'env',
+              value: { source: 'gh-cli' },
+            }),
+          })
         )
       )
     );
