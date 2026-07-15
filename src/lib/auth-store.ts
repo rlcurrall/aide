@@ -206,6 +206,70 @@ interface AuthIndexState {
   readonly document: AuthIndexDocument;
 }
 
+interface CapturedAuthProviderCatalogEntry {
+  readonly scope: NormalizedAuthStoreScope;
+  readonly value: string;
+}
+
+interface ParsedAuthProviderCatalog<T> {
+  readonly legacy: T;
+  readonly indexed: readonly T[];
+}
+
+const redactedCatalogJson = objectFreeze({
+  type: 'CapturedAuthProviderCatalog',
+} as const);
+const nodeInspectCustom = Symbol.for('nodejs.util.inspect.custom');
+
+class CapturedAuthProviderCatalog {
+  readonly #legacyValue: string | null;
+  readonly #entries: readonly CapturedAuthProviderCatalogEntry[];
+
+  constructor(
+    legacyValue: string | null,
+    entries: readonly CapturedAuthProviderCatalogEntry[]
+  ) {
+    this.#legacyValue = legacyValue;
+    this.#entries = entries;
+    objectFreeze(this);
+  }
+
+  parse<T>(
+    parser: (value: string | null, scope?: AuthStoreScope) => T
+  ): ParsedAuthProviderCatalog<T> {
+    const indexed: T[] = [];
+    const entryCount = ownHostArrayLength(this.#entries);
+    if (entryCount === undefined) {
+      throw new TypeError('Invalid captured auth catalog entries');
+    }
+    for (let index = 0; index < entryCount; index += 1) {
+      const entry = ownHostArrayValue<CapturedAuthProviderCatalogEntry>(
+        this.#entries,
+        index
+      );
+      if (entry === undefined) {
+        throw new TypeError('Invalid captured auth catalog entry');
+      }
+      appendHostArrayValue(indexed, parser(entry.value, entry.scope));
+    }
+    return objectFreeze({
+      legacy: parser(this.#legacyValue),
+      indexed: objectFreeze(indexed),
+    });
+  }
+
+  toJSON(): typeof redactedCatalogJson {
+    return redactedCatalogJson;
+  }
+
+  [nodeInspectCustom](): string {
+    return 'CapturedAuthProviderCatalog { <redacted> }';
+  }
+}
+
+objectFreeze(CapturedAuthProviderCatalog.prototype);
+objectFreeze(CapturedAuthProviderCatalog);
+
 export function authSecretCandidates(
   providerId: AuthProviderId,
   scope: AuthStoreScope | undefined
@@ -661,16 +725,37 @@ function deleteScopedAuthSecret(
   });
 }
 
-function enumerateIndexedAuthScopes(
+function capturedEntryScopes(
+  entries: readonly CapturedAuthProviderCatalogEntry[]
+): readonly NormalizedAuthStoreScope[] {
+  const scopes: NormalizedAuthStoreScope[] = [];
+  const entryCount = ownHostArrayLength(entries);
+  if (entryCount === undefined) {
+    throw new TypeError('Invalid host captured auth entries');
+  }
+  for (let index = 0; index < entryCount; index += 1) {
+    const entry = ownHostArrayValue<CapturedAuthProviderCatalogEntry>(
+      entries,
+      index
+    );
+    if (entry === undefined) {
+      throw new TypeError('Invalid host captured auth entry');
+    }
+    appendHostArrayValue(scopes, entry.scope);
+  }
+  return objectFreeze(scopes);
+}
+
+function captureIndexedAuthTargets(
   providerId: string,
   keyring: KeyringServiceShape
 ): Effect.Effect<
-  readonly NormalizedAuthStoreScope[],
+  readonly CapturedAuthProviderCatalogEntry[],
   AuthIndexDocumentError | KeyringUnavailableError | AuthIndexConsistencyError
 > {
   return Effect.gen(function* () {
     const state = yield* readAuthIndexState(providerId, keyring);
-    const liveScopes: NormalizedAuthStoreScope[] = [];
+    const liveEntries: CapturedAuthProviderCatalogEntry[] = [];
     const scopeCount = ownHostArrayLength(state.document.scopes);
     if (scopeCount === undefined) {
       throw new TypeError('Invalid host auth index scopes');
@@ -684,13 +769,15 @@ function enumerateIndexedAuthScopes(
         throw new TypeError('Invalid host auth index scope');
       }
       const value = yield* keyring.get(authIndexScopeName(scope));
-      if (value !== null) appendHostArrayValue(liveScopes, scope);
+      if (value !== null) {
+        appendHostArrayValue(liveEntries, objectFreeze({ scope, value }));
+      }
     }
 
-    if (liveScopes.length !== state.document.scopes.length) {
+    if (liveEntries.length !== state.document.scopes.length) {
       const indexName = authIndexSecretName(providerId);
       const repairedValue = serializeAuthIndexDocument(
-        makeAuthIndexDocument(providerId, liveScopes)
+        makeAuthIndexDocument(providerId, capturedEntryScopes(liveEntries))
       );
       const repair = yield* verifiedMutation(
         keyring,
@@ -711,8 +798,67 @@ function enumerateIndexedAuthScopes(
         );
       }
     }
-    return objectFreeze(liveScopes);
+    return objectFreeze(liveEntries);
   });
+}
+
+function enumerateIndexedAuthScopes(
+  providerId: string,
+  keyring: KeyringServiceShape
+): Effect.Effect<
+  readonly NormalizedAuthStoreScope[],
+  AuthIndexDocumentError | KeyringUnavailableError | AuthIndexConsistencyError
+> {
+  return Effect.map(
+    captureIndexedAuthTargets(providerId, keyring),
+    capturedEntryScopes
+  );
+}
+
+function captureAuthProviderCatalog(
+  providerId: string,
+  keyring: KeyringServiceShape
+): Effect.Effect<
+  CapturedAuthProviderCatalog,
+  AuthIndexDocumentError | KeyringUnavailableError | AuthIndexConsistencyError
+> {
+  return Effect.gen(function* () {
+    const entries = yield* captureIndexedAuthTargets(providerId, keyring);
+    const legacyName = legacyAuthSecretName(providerId);
+    const legacyValue =
+      legacyName === null ? null : yield* keyring.get(legacyName);
+    return new CapturedAuthProviderCatalog(legacyValue, entries);
+  });
+}
+
+/**
+ * @internal Trusted built-in provider discovery only.
+ *
+ * Captures the provider index, every live indexed payload, and the separate
+ * legacy payload while holding one provider-scoped cross-process lease. Aide-
+ * managed scoped writers use the same lease and therefore linearize strictly
+ * before or after this capture. Payload parsing must happen only after this
+ * Effect returns and releases the lease.
+ */
+export function captureAuthProviderCatalogEffect(
+  providerId: AuthProviderId
+): Effect.Effect<
+  CapturedAuthProviderCatalog,
+  AuthIndexReadError,
+  KeyringService
+> {
+  const normalizedProviderId = normalizeAuthProviderId(providerId);
+  if (normalizedProviderId === undefined) {
+    return Effect.fail(new AuthIndexProviderError());
+  }
+  return Effect.flatMap(KeyringService, (keyring) =>
+    withAuthIndexLock(
+      normalizedProviderId,
+      Effect.uninterruptible(
+        captureAuthProviderCatalog(normalizedProviderId, keyring)
+      )
+    )
+  );
 }
 
 export function listIndexedAuthScopesEffect(

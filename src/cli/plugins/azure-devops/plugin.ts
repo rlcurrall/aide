@@ -42,7 +42,9 @@ import {
 } from '@lib/ado-utils.js';
 import {
   loadAzureDevOpsConfig,
+  probeAdoEnvironmentConfig,
   probeAdoConfigEffect,
+  probeAdoStoredConfigValue,
   readAdoEnvForMigration,
   type ConfigStatus,
 } from '@lib/config.js';
@@ -81,6 +83,11 @@ import {
   promptAuthField,
   validateUrl,
 } from '../auth-operation-utils.js';
+import {
+  discoverBuiltinAuthAccountsEffect,
+  discoverBuiltinAuthStatusEffect,
+  type BuiltinAuthProviderDiscoveryOptions,
+} from '../builtin-auth-provider-discovery.js';
 
 type ProbeAdoConfig = (
   scope?: AuthStoreScope
@@ -237,6 +244,26 @@ function azureDevOpsAuthAccounts(
   ];
 }
 
+const azureDevOpsDiscoveryOptions = {
+  providerId: 'azure-devops',
+  probeEnvironment: probeAdoEnvironmentConfig,
+  parseStored: probeAdoStoredConfigValue,
+  candidate: (value, source) => ({
+    scope: {
+      providerId: 'azure-devops',
+      host: value.orgUrl,
+    },
+    source,
+    authMethod: value.authMethod,
+    ...(value.defaultProject === undefined
+      ? {}
+      : { defaultProject: value.defaultProject }),
+  }),
+  mapStatus: mapAzureDevOpsAuthStatus,
+  malformedReason:
+    "Stored Azure DevOps account discovery data is malformed. Re-run 'aide login ado' to reconfigure.",
+} satisfies BuiltinAuthProviderDiscoveryOptions<AzureDevOpsConfig>;
+
 function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
   return Effect.gen(function* () {
     if (request.fromEnv) {
@@ -337,11 +364,17 @@ export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
       return { client: new AzureDevOpsClient(config), config };
     });
   const authStatus = (request?: { readonly scope?: AuthStoreScope }) =>
-    probeConfigEffect(request?.scope).pipe(
-      Effect.map(mapAzureDevOpsAuthStatus)
-    );
+    request?.scope !== undefined || customProbeConfig !== undefined
+      ? probeConfigEffect(request?.scope).pipe(
+          Effect.map(mapAzureDevOpsAuthStatus)
+        )
+      : discoverBuiltinAuthStatusEffect(azureDevOpsDiscoveryOptions);
   const authAccounts = (request?: { readonly scope?: AuthStoreScope }) =>
-    probeConfigEffect(request?.scope).pipe(Effect.map(azureDevOpsAuthAccounts));
+    request?.scope !== undefined || customProbeConfig !== undefined
+      ? probeConfigEffect(request?.scope).pipe(
+          Effect.map(azureDevOpsAuthAccounts)
+        )
+      : discoverBuiltinAuthAccountsEffect(azureDevOpsDiscoveryOptions);
 
   const listPullRequests = (
     request: AidePullRequestListRequest

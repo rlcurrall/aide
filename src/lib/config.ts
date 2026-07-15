@@ -93,6 +93,11 @@ function readJiraFromEnv(): ConfigStatus<JiraConfig> | null {
   return { kind: 'env', value: parsed.output };
 }
 
+/** Independently validated Jira environment candidate for account discovery. */
+export function probeJiraEnvironmentConfig(): ConfigStatus<JiraConfig> | null {
+  return readJiraFromEnv();
+}
+
 type KeyringResult<T> =
   | { kind: 'found'; value: T }
   | { kind: 'missing' }
@@ -145,6 +150,25 @@ function parseJiraFromKeyring(
     };
   }
   return { kind: 'found', value: parsed.output };
+}
+
+function jiraKeyringResultStatus(
+  fromKeyring: KeyringResult<JiraConfig>
+): ConfigStatus<JiraConfig> {
+  if (fromKeyring.kind === 'found') {
+    return { kind: 'keyring', value: fromKeyring.value };
+  }
+  if (fromKeyring.kind === 'unreachable') return { kind: 'unreachable' };
+  if (fromKeyring.kind === 'malformed') return fromKeyring;
+  return { kind: 'missing' };
+}
+
+/** @internal Parses one captured Jira keyring payload without performing I/O. */
+export function probeJiraStoredConfigValue(
+  raw: string | null,
+  scope?: AuthStoreScope
+): ConfigStatus<JiraConfig> {
+  return jiraKeyringResultStatus(parseJiraFromKeyring(raw, scope));
 }
 
 function readJiraFromKeyringEffect(scope?: AuthStoreScope) {
@@ -247,6 +271,11 @@ function readAdoFromEnv(): ConfigStatus<AzureDevOpsConfig> | null {
   return { kind: 'env', value: parsed.output };
 }
 
+/** Independently validated ADO environment candidate for account discovery. */
+export function probeAdoEnvironmentConfig(): ConfigStatus<AzureDevOpsConfig> | null {
+  return readAdoFromEnv();
+}
+
 function adoConfigMatchesScope(
   config: AzureDevOpsConfig,
   scope: AuthStoreScope
@@ -292,6 +321,25 @@ function parseAdoFromKeyring(
     };
   }
   return { kind: 'found', value: parsed.output };
+}
+
+function adoKeyringResultStatus(
+  fromKeyring: KeyringResult<AzureDevOpsConfig>
+): ConfigStatus<AzureDevOpsConfig> {
+  if (fromKeyring.kind === 'found') {
+    return { kind: 'keyring', value: fromKeyring.value };
+  }
+  if (fromKeyring.kind === 'unreachable') return { kind: 'unreachable' };
+  if (fromKeyring.kind === 'malformed') return fromKeyring;
+  return { kind: 'missing' };
+}
+
+/** @internal Parses one captured ADO keyring payload without performing I/O. */
+export function probeAdoStoredConfigValue(
+  raw: string | null,
+  scope?: AuthStoreScope
+): ConfigStatus<AzureDevOpsConfig> {
+  return adoKeyringResultStatus(parseAdoFromKeyring(raw, scope));
 }
 
 function readAdoFromKeyringEffect(scope?: AuthStoreScope) {

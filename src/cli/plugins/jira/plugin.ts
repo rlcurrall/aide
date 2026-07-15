@@ -12,7 +12,9 @@ import {
   pluginCommandModule,
 } from '@cli/host/plugin-descriptor.js';
 import {
+  probeJiraEnvironmentConfig,
   probeJiraConfigEffect,
+  probeJiraStoredConfigValue,
   readJiraEnvForMigration,
   type ConfigStatus,
 } from '@lib/config.js';
@@ -31,6 +33,11 @@ import {
   validateNonEmpty,
   validateUrl,
 } from '../auth-operation-utils.js';
+import {
+  discoverBuiltinAuthAccountsEffect,
+  discoverBuiltinAuthStatusEffect,
+  type BuiltinAuthProviderDiscoveryOptions,
+} from '../builtin-auth-provider-discovery.js';
 
 type ProbeJiraConfig = (
   scope?: AuthStoreScope
@@ -200,6 +207,26 @@ function jiraAuthAccounts(
   ];
 }
 
+const jiraDiscoveryOptions = {
+  providerId: 'jira',
+  probeEnvironment: probeJiraEnvironmentConfig,
+  parseStored: probeJiraStoredConfigValue,
+  candidate: (value, source) => ({
+    scope: {
+      providerId: 'jira',
+      host: value.url,
+      account: value.email,
+    },
+    source,
+    ...(value.defaultProject === undefined
+      ? {}
+      : { defaultProject: value.defaultProject }),
+  }),
+  mapStatus: mapJiraAuthStatus,
+  malformedReason:
+    "Stored Jira account discovery data is malformed. Re-run 'aide login jira' to reconfigure.",
+} satisfies BuiltinAuthProviderDiscoveryOptions<JiraConfig>;
+
 function loginJiraAuth(request: AideAuthLoginRequest) {
   return Effect.gen(function* () {
     if (request.fromEnv) {
@@ -282,9 +309,13 @@ export function createJiraPlugin(opts: JiraPluginOptions = {}) {
             catch: (error) => error,
           });
   const authStatus = (request?: { readonly scope?: AuthStoreScope }) =>
-    probeConfigEffect(request?.scope).pipe(Effect.map(mapJiraAuthStatus));
+    request?.scope !== undefined || customProbeConfig !== undefined
+      ? probeConfigEffect(request?.scope).pipe(Effect.map(mapJiraAuthStatus))
+      : discoverBuiltinAuthStatusEffect(jiraDiscoveryOptions);
   const authAccounts = (request?: { readonly scope?: AuthStoreScope }) =>
-    probeConfigEffect(request?.scope).pipe(Effect.map(jiraAuthAccounts));
+    request?.scope !== undefined || customProbeConfig !== undefined
+      ? probeConfigEffect(request?.scope).pipe(Effect.map(jiraAuthAccounts))
+      : discoverBuiltinAuthAccountsEffect(jiraDiscoveryOptions);
 
   return defineAidePlugin({
     id: 'jira',

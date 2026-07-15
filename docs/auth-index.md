@@ -2,7 +2,7 @@
 
 The operating-system keyring API used by aide can read an exact key but cannot
 enumerate keys. Scoped credentials therefore have a separate identity-only
-catalog so a later account-discovery layer can find their exact targets.
+catalog so provider account discovery can find their exact targets.
 
 ## Ownership and format
 
@@ -106,9 +106,91 @@ Valid returned scopes are fresh, frozen, null-prototype snapshots in canonical
 order. Only a missing key (`null`) means absent: an empty credential value is
 still live, while an empty index value is malformed JSON.
 
-Legacy no-scope credentials are not indexed and are never rewritten. A later
-discovery layer can merge a separate legacy probe without inventing an account
-identity.
+Legacy no-scope credentials are not indexed and are never rewritten. Provider
+discovery merges a separate validated legacy probe without adding it to the
+index or migrating it.
+
+## Built-in Jira and Azure DevOps discovery
+
+Jira and Azure DevOps now treat omitted-scope provider account discovery as a
+complete-catalog operation. Each provider independently validates an eligible
+environment candidate and calls the trusted internal
+`captureAuthProviderCatalogEffect`. That Effect acquires the existing canonical
+provider-scoped cross-process index lock once. Under the same lease it decodes
+the provider index with the existing codec, reads every reconstructed indexed
+target payload, applies the existing stale-target reconciliation, and reads the
+legacy key separately without indexing, synthesizing, rewriting, or migrating
+it. The result is a detached frozen in-memory snapshot containing canonical
+scopes, their captured payload strings, and the captured legacy string.
+
+This single lease is the catalog linearization boundary for Aide-managed scoped
+writes and deletes: those operations use the same provider lock, so each occurs
+strictly before or after capture and blocks while capture owns the lease. The
+separate legacy value is determined by its one exact read under that lease;
+because Aide-managed scoped state cannot change during the lease, that legacy
+read is also a coherent point for the combined captured catalog. Snapshot
+success, typed failure, and interruption all finalize the lease through the
+existing lock lifecycle.
+
+The snapshot guarantee is intentionally limited to mutations coordinated by
+Aide's provider lock. Arbitrary out-of-band keyring or index mutation that
+bypasses that lock is not made atomic and can race individual backend reads.
+Callers must not describe the boundary as a general keyring transaction.
+
+`listIndexedAuthScopesEffect` keeps its existing API and behavior by projecting
+canonical scopes from the same locked indexed-target capture/reconciliation
+primitive. There is no second registry, codec, or schema. The raw-payload
+snapshot Effect is internal to trusted built-in provider code and is not part of
+`@aide/plugin-api`. Captured values live in private snapshot state; inspection
+and JSON serialization are fixed/redacted, and values are exposed only to the
+trusted parser callback after lease release. They never enter errors, logs,
+account metadata, or public provider results.
+
+After the capture Effect returns and the lease is released, Jira and ADO parse
+only the captured legacy/indexed strings with their existing stored credential
+schemas. Candidate validation and bounded pure account assembly also occur
+after release. No later keyring read participates in that discovery call.
+
+Only usable, closed candidates reach `assembleBuiltinAuthAccounts`. Jira
+identity is inferred from the validated URL and email; Azure DevOps identity is
+inferred from the validated organization URL. The pure assembly helper derives
+both account and scope IDs from the canonical indexed target name, deduplicates
+coincident environment/legacy/scoped identities, preserves allowlisted source
+and storage-kind provenance, freezes snapshots, and returns canonical ID order.
+Malformed credential payloads are omitted rather than advertised.
+
+Explicit-scope `accounts` and `status` requests retain the pre-existing exact
+path: they read only the selected scoped key and neither enumerate nor consult
+the legacy key. Omitted-scope status returns configured immediately for an
+independently usable environment candidate and does not read the stored catalog.
+Without that sole fast path, it always aggregates the captured legacy and
+indexed values before selecting a result. The exact priority is:
+
+1. A malformed, future, or noncanonical index is `misconfigured`.
+2. An unavailable index, keyring, or index lock, or any unreachable captured
+   stored value is `unavailable`; no usable stored credential can hide an
+   incomplete catalog.
+3. After a successfully captured catalog with no unreachable stored
+   candidate, any usable legacy or scoped credential is `configured` and wins
+   over individually malformed credential payloads.
+4. With no usable stored credential, any malformed environment, legacy, or
+   scoped credential is `misconfigured`.
+5. Only missing, empty, or stale-and-repaired stored state is
+   `not-configured`.
+
+Omitted-scope accounts fail closed instead of returning a partial catalog when
+the index is malformed, the keyring or lock is unavailable, a stored candidate
+is unreachable, or snapshot capture fails. A usable environment candidate can
+keep status configured during those failures, but it cannot make accounts
+partial-successful. Existing fixed typed keyring/index/lock/consistency errors
+cross the provider operation boundary without raw credential, document, scope,
+target, or backend values. Missing indexed credential targets are still omitted
+and repaired by the shared auth-store reconciliation primitive.
+
+This slice does not add GitHub/`gh` catalog discovery, Prime or whoami account
+presentation, or pull-request account selection. Those consumers must use the
+provider account surface; they must not read this index or construct a second
+identity catalog.
 
 ## Effect service ownership and composition
 
