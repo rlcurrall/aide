@@ -18,7 +18,13 @@ Services: `jira`, `pr`, `plugin`. Top-level: `login`, `logout`, `whoami`,
 - PR: list, view, diff, create, update, comments, comment, reply
 - Plugin: install, status, uninstall
 
-Each command is a yargs CommandModule under `src/cli/commands/<service>/`.
+Command ownership is hybrid. Built-in plugin descriptors live under
+`src/cli/plugins/*`; plugin-owned PR and Prime implementations are co-located
+there under pull-requests and aide-core. Internal command/plugin descriptors,
+`CommandRegistry`, and runtime composition live in `src/cli/host`. yargs remains
+the CLI adapter at `src/cli/host/yargs-adapter.ts`. Remaining legacy yargs
+`CommandModule`s are still under `src/cli/commands` and are registered through
+their owning built-in plugins.
 
 ## Running
 
@@ -30,8 +36,12 @@ Each command is a yargs CommandModule under `src/cli/commands/<service>/`.
 
 ## Credentials
 
-OS keyring first (set via `aide login <service>`), environment variables
-as fallback. See `src/lib/config.ts` for the probe functions.
+Credential resolution and account discovery are provider- and scope-specific;
+do not assume one universal precedence. Scoped stored credentials use the auth
+store/keyring. See `src/lib/config.ts` for Jira/ADO probes,
+`src/lib/github-credential-resolver.ts` for exact GitHub resolution, and
+`src/cli/plugins/builtin-auth-provider-discovery.ts` plus
+`src/cli/plugins/github/auth-discovery.ts` for omitted-scope account discovery.
 
 ## Output Formats
 
@@ -41,7 +51,10 @@ Most commands accept `--format json|text|markdown`. Agents should prefer
 ## Conventions
 
 - Conventional commits: `type(scope): message`
-- Errors are thrown, not `process.exit`. Top-level handler at
-  `src/cli/index.ts` translates to exit codes.
+- Descriptor and new command implementations propagate failures or throw rather
+  than calling `process.exit`. Existing legacy and plugin-local yargs handlers
+  may still render errors and exit through local helpers. yargs `.fail` owns
+  parser/usage failures; the top-level catch owns propagated failures and
+  cancellation.
 - Auto-discovery of org/project/repo from git remote; override with
   explicit flags when needed.
