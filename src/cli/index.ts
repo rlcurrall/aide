@@ -10,40 +10,40 @@ import { hideBin } from 'yargs/helpers';
 import { VERSION, CLI_NAME } from './help.js';
 import { cleanupOldBackup } from './update.js';
 import { UserCancelledError } from '@lib/prompts.js';
+import {
+  assertYargsRuntimeIntegrity,
+  registerCommands,
+} from './host/yargs-adapter.js';
+import { createBuiltinCommandRegistry } from './plugins/builtin.js';
+import { KeyringLive } from '@lib/auth-keyring.js';
+import { GitHubAuthCatalogLive } from '@lib/github-auth-catalog.js';
+import { safeCliErrorMessage } from './plugins/pull-requests/commands/error.js';
 
-// Import service command modules
-import { jiraCommands } from './commands/jira/index.js';
-import { prCommands } from './commands/pr/index.js';
-import { pluginCommands } from './commands/plugin/index.js';
-import primeCommand from './commands/prime.js';
-import upgradeCommand from './commands/upgrade.js';
-import loginCommand from './commands/login.js';
-import logoutCommand from './commands/logout.js';
-import whoamiCommand from './commands/whoami.js';
+export function renderTopLevelError(error: unknown): string {
+  return `Error: ${safeCliErrorMessage(error)}`;
+}
 
 async function main(): Promise<number> {
   // Clean up any old backup files from previous upgrades
   cleanupOldBackup();
+  const registry = createBuiltinCommandRegistry();
 
   try {
-    await yargs(hideBin(process.argv))
-      .scriptName(CLI_NAME)
-      .version(VERSION)
-      .help()
-      .alias('h', 'help')
-      .alias('v', 'version')
-      .command(jiraCommands)
-      .command(prCommands)
-      .command(pluginCommands)
-      .command(primeCommand)
-      .command(upgradeCommand)
-      .command(loginCommand)
-      .command(logoutCommand)
-      .command(whoamiCommand)
-      .demandCommand(
-        1,
-        'Please specify a command (jira, pr, plugin, prime, upgrade, login, logout, whoami)'
-      )
+    assertYargsRuntimeIntegrity();
+    await registerCommands(
+      yargs(hideBin(process.argv))
+        .scriptName(CLI_NAME)
+        .version(VERSION)
+        .help()
+        .alias('h', 'help')
+        .alias('v', 'version'),
+      registry,
+      {
+        keyringLayer: KeyringLive,
+        githubAuthCatalogLayer: GitHubAuthCatalogLive,
+      }
+    )
+      .demandCommand(1, registry.demandMessage())
       .strict()
       .wrap(Math.min(100, process.stdout.columns || 80))
       .fail((msg, err) => {
@@ -60,7 +60,7 @@ async function main(): Promise<number> {
     if (error instanceof UserCancelledError) {
       return error.exitCode; // 130, silent
     }
-    console.error(`Error: ${error instanceof Error ? error.message : error}`);
+    console.error(renderTopLevelError(error));
     return 1;
   }
 }

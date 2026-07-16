@@ -18,15 +18,23 @@ export type { OutputFormat };
 export const PrCreateArgsSchema = v.object({
   title: NonEmptyStringSchema,
   body: v.optional(v.string()), // --body (gh), --description (az alias)
+  bodyFile: v.optional(v.string()), // --body-file
   head: v.optional(v.string()), // --head (gh), --source (az alias)
   base: v.optional(v.string()), // --base (gh), --target (az alias)
   draft: v.optional(v.boolean(), false),
   tag: v.optional(v.array(v.string()), []),
+  provider: v.optional(v.string()),
+  host: v.optional(v.string()),
+  owner: v.optional(v.string()),
+  org: v.optional(v.string()),
   project: v.optional(v.string()),
   repo: v.optional(v.string()),
   format: v.optional(OutputFormatSchema, 'text'),
   // Aliases from yargs (for validation compatibility)
   description: v.optional(v.string()), // Alias for body
+  descriptionFile: v.optional(v.string()), // Alias for bodyFile
+  'body-file': v.optional(v.string()), // Alias for bodyFile
+  'description-file': v.optional(v.string()), // Alias for bodyFile
   source: v.optional(v.string()), // Alias for head
   target: v.optional(v.string()), // Alias for base
   'source-branch': v.optional(v.string()), // Alias for head

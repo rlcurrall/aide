@@ -19,6 +19,10 @@ export type { OutputFormat };
 export const PrCommentArgsSchema = v.object({
   pr: v.optional(v.string()),
   comment: NonEmptyStringSchema,
+  provider: v.optional(v.string()),
+  host: v.optional(v.string()),
+  owner: v.optional(v.string()),
+  org: v.optional(v.string()),
   project: v.optional(v.string()),
   repo: v.optional(v.string()),
   format: v.optional(OutputFormatSchema, 'text'),

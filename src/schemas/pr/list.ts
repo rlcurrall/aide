@@ -22,6 +22,10 @@ export type PrStatus = v.InferOutput<typeof PrStatusSchema>;
  * Schema for PR list command arguments
  */
 export const ListArgsSchema = v.object({
+  provider: v.optional(v.string()),
+  host: v.optional(v.string()),
+  owner: v.optional(v.string()),
+  org: v.optional(v.string()),
   project: v.optional(v.string()),
   repo: v.optional(v.string()),
   format: v.optional(OutputFormatSchema, 'text'),

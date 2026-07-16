@@ -1,0 +1,1443 @@
+import { Effect } from 'effect';
+import * as v from 'valibot';
+
+import {
+  defineAidePlugin,
+  type AideAuthAccount,
+  type AideAuthInputField,
+  type AideAuthLoginRequest,
+  type AideAuthLogoutRequest,
+  type AidePullRequestAddCommentRequest,
+  type AidePullRequestBranchLookupRequest,
+  type AidePullRequestBranchLookupResult,
+  type AidePullRequestComment,
+  type AidePullRequestCommentKind,
+  type AidePullRequestCommentMutationResult,
+  type AidePullRequestCommentThread,
+  type AidePullRequestCommentsRequest,
+  type AidePullRequestCommentsResult,
+  type AidePullRequestCreateRequest,
+  type AidePullRequestCreateResult,
+  type AidePullRequestDiffFileStatus,
+  type AidePullRequestDiffRequest,
+  type AidePullRequestDiffResult,
+  type AidePullRequestListRequest,
+  type AidePullRequestListResult,
+  type AidePullRequestRepositoryRef,
+  type AidePullRequestReplyCommentRequest,
+  type AidePullRequestUpdateRequest,
+  type AidePullRequestUpdateResult,
+  type AidePullRequestViewRequest,
+  type AidePullRequestViewResult,
+  type AidePluginAuthStatus,
+} from '@cli/host/plugin-descriptor.js';
+import { defineImmutableBuiltinPlugin } from '@cli/host/immutable-builtin-plugin.js';
+import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
+import {
+  MissingRepoContextError,
+  buildPrUrl,
+  parseGitRemote,
+  parsePRUrl,
+  resolveRepoContext,
+} from '@lib/ado-utils.js';
+import {
+  loadAzureDevOpsConfig,
+  probeAdoEnvironmentConfig,
+  probeAdoConfigEffect,
+  probeAdoStoredConfigValue,
+  readAdoEnvForMigration,
+  type ConfigStatus,
+} from '@lib/config.js';
+import { ensureRefPrefix, extractBranchName } from '@lib/git-utils.js';
+import {
+  authSecretScopesMatch,
+  deleteAuthSecretEffect,
+  type AuthStoreScope,
+  writeAuthSecretEffect,
+} from '@lib/auth-store.js';
+import { azureDevOpsRepositoryAuthScope } from '@lib/repository-auth-scope.js';
+import {
+  AZURE_DEVOPS_CANONICAL_AUTH_HOST,
+  canonicalizeAzureDevOpsAuthIdentity,
+} from '@lib/azure-devops-auth-identity.js';
+import type {
+  AzureDevOpsChangeType,
+  AzureDevOpsCreateCommentResponse,
+  AzureDevOpsPRChange,
+  AzureDevOpsPRComment,
+  AzureDevOpsPullRequest,
+  AdoFlattenedComment,
+  CreateThreadResponse,
+  PullRequestUpdateOptions,
+} from '@lib/types.js';
+import {
+  StoredAdoSchema,
+  type AuthMethod,
+  type AzureDevOpsConfig,
+} from '@schemas/config.js';
+import {
+  authInputString,
+  formatMigrationError,
+  formatUnsetHint,
+  messages,
+  promptAuthField,
+  validateUrl,
+} from '../auth-operation-utils.js';
+import {
+  discoverBuiltinAuthAccountsEffect,
+  discoverBuiltinAuthStatusEffect,
+  type BuiltinAuthProviderDiscoveryOptions,
+} from '../builtin-auth-provider-discovery.js';
+
+type ProbeAdoConfig = (
+  scope?: AuthStoreScope
+) => Promise<ConfigStatus<AzureDevOpsConfig>>;
+type AzureDevOpsPullRequestClient = Pick<
+  AzureDevOpsClient,
+  | 'listPullRequests'
+  | 'getPullRequest'
+  | 'getPullRequestLabels'
+  | 'getAllPullRequestChanges'
+  | 'getAllComments'
+> &
+  Partial<
+    Pick<
+      AzureDevOpsClient,
+      | 'createPullRequest'
+      | 'createPullRequestThread'
+      | 'createThreadComment'
+      | 'updatePullRequest'
+      | 'addPullRequestLabel'
+      | 'removePullRequestLabel'
+    >
+  >;
+type CreateAzureDevOpsClient = (options?: {
+  readonly scope?: AuthStoreScope;
+}) => Promise<{
+  readonly client: AzureDevOpsPullRequestClient;
+  readonly config: AzureDevOpsConfig;
+}>;
+
+interface AzureDevOpsPluginOptions {
+  readonly probeConfig?: ProbeAdoConfig;
+  readonly createClient?: CreateAzureDevOpsClient;
+}
+
+function azureDevOpsScopeValidationError(
+  credentials: AzureDevOpsConfig,
+  scope: AuthStoreScope | undefined
+): Error | null {
+  if (scope === undefined) return null;
+  if (
+    authSecretScopesMatch('azure-devops', scope, {
+      providerId: 'azure-devops',
+      host: credentials.orgUrl,
+    })
+  ) {
+    return null;
+  }
+  return new Error(
+    'Azure DevOps credential organization identity does not match the explicit authentication scope.'
+  );
+}
+
+function createAzureDevOpsLoginFields() {
+  const orgUrlField = {
+    kind: 'text',
+    key: 'orgUrl',
+    label: 'Azure DevOps org URL',
+    description: 'ADO org URL',
+    required: true,
+    validate: validateUrl,
+  } as const satisfies AideAuthInputField;
+  const patField = {
+    kind: 'secret',
+    key: 'pat',
+    label: 'PAT',
+    description: 'ADO PAT',
+    required: true,
+    stdin: true,
+  } as const satisfies AideAuthInputField;
+  const authMethodField = {
+    kind: 'select',
+    key: 'authMethod',
+    label: 'Auth method',
+    description: 'Auth method',
+    choices: [
+      { value: 'pat', label: 'PAT' },
+      { value: 'bearer', label: 'Bearer' },
+    ],
+    default: 'pat',
+  } as const satisfies AideAuthInputField;
+  return [orgUrlField, patField, authMethodField] as const;
+}
+
+function mapAzureDevOpsAuthStatus(
+  status: ConfigStatus<AzureDevOpsConfig>
+): AidePluginAuthStatus {
+  switch (status.kind) {
+    case 'env':
+      return {
+        state: 'configured',
+        detail: `configured via environment (${status.value.authMethod})`,
+      };
+    case 'keyring':
+      return {
+        state: 'configured',
+        detail: `configured via keyring (${status.value.authMethod})`,
+      };
+    case 'missing':
+      return {
+        state: 'not-configured',
+        detail: "run 'aide login ado'",
+      };
+    case 'malformed':
+      return { state: 'misconfigured', detail: status.reason };
+    case 'unreachable':
+      return {
+        state: 'unavailable',
+        detail:
+          'system keyring is unreachable and Azure DevOps env vars are not set',
+      };
+  }
+}
+
+function azureDevOpsAuthAccounts(
+  status: ConfigStatus<AzureDevOpsConfig>
+): readonly AideAuthAccount[] {
+  if (status.kind !== 'env' && status.kind !== 'keyring') return [];
+
+  const sourceKind = status.kind;
+  const identity = canonicalizeAzureDevOpsAuthIdentity({
+    host: status.value.orgUrl,
+  });
+  const org = identity?.org;
+  const metadata = {
+    authMethod: status.value.authMethod,
+    ...(status.value.defaultProject === undefined
+      ? {}
+      : { defaultProject: status.value.defaultProject }),
+  };
+
+  return [
+    {
+      id: org ?? status.value.orgUrl,
+      providerId: 'azure-devops',
+      label: org ?? status.value.orgUrl,
+      detail: `${status.value.orgUrl} (${status.value.authMethod}, ${sourceKind})`,
+      sourceKind,
+      metadata,
+      ...(identity === null
+        ? {}
+        : {
+            scope: {
+              id: `https://${identity.host}/${identity.org}`,
+              providerId: 'azure-devops',
+              host: identity.host,
+              org: identity.org,
+              label: status.value.orgUrl,
+              sourceKind,
+              metadata,
+            },
+          }),
+    },
+  ];
+}
+
+const azureDevOpsDiscoveryOptions = {
+  providerId: 'azure-devops',
+  probeEnvironment: probeAdoEnvironmentConfig,
+  parseStored: probeAdoStoredConfigValue,
+  candidate: (value, source) => ({
+    scope: {
+      providerId: 'azure-devops',
+      host: value.orgUrl,
+    },
+    source,
+    authMethod: value.authMethod,
+    ...(value.defaultProject === undefined
+      ? {}
+      : { defaultProject: value.defaultProject }),
+  }),
+  mapStatus: mapAzureDevOpsAuthStatus,
+  malformedReason:
+    "Stored Azure DevOps account discovery data is malformed. Re-run 'aide login ado' to reconfigure.",
+} satisfies BuiltinAuthProviderDiscoveryOptions<AzureDevOpsConfig>;
+
+function loginAzureDevOpsAuth(request: AideAuthLoginRequest) {
+  return Effect.gen(function* () {
+    if (request.fromEnv) {
+      const result = readAdoEnvForMigration();
+      if (result.kind !== 'ok') {
+        return yield* Effect.fail(
+          new Error(formatMigrationError('Azure DevOps', result))
+        );
+      }
+
+      const scopeError = azureDevOpsScopeValidationError(
+        result.value,
+        request.scope
+      );
+      if (scopeError !== null) return yield* Effect.fail(scopeError);
+
+      yield* writeAuthSecretEffect(
+        'azure-devops',
+        JSON.stringify(result.value),
+        request.scope
+      );
+      return {
+        status: 'stored' as const,
+        messages: messages(
+          'Migrated Azure DevOps credentials from env to keyring.',
+          formatUnsetHint(result.varsUsed)
+        ),
+      };
+    }
+
+    const [orgUrlField, patField] = createAzureDevOpsLoginFields();
+    const orgUrl = yield* promptAuthField(request, orgUrlField);
+    const pat = yield* promptAuthField(request, patField);
+    const authMethod = (authInputString(request, 'authMethod') ??
+      'pat') as AuthMethod;
+
+    const validated = yield* Effect.try({
+      try: () =>
+        v.parse(StoredAdoSchema, {
+          orgUrl,
+          pat,
+          authMethod,
+        }),
+      catch: (error) => error,
+    });
+
+    const scopeError = azureDevOpsScopeValidationError(
+      validated,
+      request.scope
+    );
+    if (scopeError !== null) return yield* Effect.fail(scopeError);
+
+    yield* writeAuthSecretEffect(
+      'azure-devops',
+      JSON.stringify(validated),
+      request.scope
+    );
+
+    return {
+      status: 'stored' as const,
+      messages: ['Saved credentials for ado.'],
+    };
+  });
+}
+
+function logoutAzureDevOpsAuth(request?: AideAuthLogoutRequest) {
+  return Effect.gen(function* () {
+    const removed = yield* deleteAuthSecretEffect(
+      'azure-devops',
+      request?.scope
+    );
+    return {
+      status: removed ? ('removed' as const) : ('not-found' as const),
+      messages: [
+        removed
+          ? 'Removed stored credentials for ado.'
+          : 'No stored credentials for ado.',
+      ],
+    };
+  });
+}
+
+export function createAzureDevOpsPlugin(opts: AzureDevOpsPluginOptions = {}) {
+  const azureDevOpsLoginFields = createAzureDevOpsLoginFields();
+  const customProbeConfig = opts.probeConfig;
+  const probeConfigEffect =
+    customProbeConfig === undefined
+      ? probeAdoConfigEffect
+      : (scope?: AuthStoreScope) =>
+          Effect.tryPromise({
+            try: () => customProbeConfig(scope),
+            catch: (error) => error,
+          });
+  const createClient =
+    opts.createClient ??
+    (async ({ scope } = {}) => {
+      const { config } = await loadAzureDevOpsConfig(scope);
+      return { client: new AzureDevOpsClient(config), config };
+    });
+  const authStatus = (request?: { readonly scope?: AuthStoreScope }) =>
+    request?.scope !== undefined || customProbeConfig !== undefined
+      ? probeConfigEffect(request?.scope).pipe(
+          Effect.map(mapAzureDevOpsAuthStatus)
+        )
+      : discoverBuiltinAuthStatusEffect(azureDevOpsDiscoveryOptions);
+  const authAccounts = (request?: { readonly scope?: AuthStoreScope }) =>
+    request?.scope !== undefined || customProbeConfig !== undefined
+      ? probeConfigEffect(request?.scope).pipe(
+          Effect.map(azureDevOpsAuthAccounts)
+        )
+      : discoverBuiltinAuthAccountsEffect(azureDevOpsDiscoveryOptions);
+
+  const listPullRequests = (
+    request: AidePullRequestListRequest
+  ): Effect.Effect<AidePullRequestListResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async (signal) => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot list pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
+
+        const response = await client.listPullRequests(
+          repository.project,
+          repository.repo,
+          {
+            status: request.status,
+            top: request.limit,
+          },
+          signal
+        );
+
+        let prs = response.value;
+        if (request.createdBy) {
+          const searchTerm = request.createdBy.toLowerCase();
+          prs = prs.filter((pr) => {
+            const displayName = pr.createdBy.displayName.toLowerCase();
+            const uniqueName = pr.createdBy.uniqueName?.toLowerCase() || '';
+            return (
+              displayName.includes(searchTerm) ||
+              uniqueName.includes(searchTerm)
+            );
+          });
+        }
+
+        return {
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequests: prs.map(azureDevOpsPullRequestToListItem),
+        };
+      },
+      catch: (error) => error,
+    });
+
+  const getPullRequest = (
+    request: AidePullRequestViewRequest
+  ): Effect.Effect<AidePullRequestViewResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async (signal) => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot get pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
+
+        const [pr, labelsResponse] = await Promise.all([
+          client.getPullRequest(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number,
+            signal
+          ),
+          client.getPullRequestLabels(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number,
+            signal
+          ),
+        ]);
+
+        return {
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: azureDevOpsPullRequestToViewItem(
+            pr,
+            labelsResponse.value
+              .filter((label) => label.active)
+              .map((label) => label.name)
+          ),
+        };
+      },
+      catch: (error) => error,
+    });
+
+  const createPullRequest = (
+    request: AidePullRequestCreateRequest
+  ): Effect.Effect<AidePullRequestCreateResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async (signal) => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot create pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
+        if (client.createPullRequest === undefined) {
+          throw new Error(
+            'Azure DevOps client does not support creating pull requests'
+          );
+        }
+
+        const warnings: string[] = [];
+        const pr = await client.createPullRequest(
+          repository.project,
+          repository.repo,
+          ensureRefPrefix(request.sourceBranch),
+          ensureRefPrefix(request.targetBranch),
+          request.title,
+          request.description ?? '',
+          { isDraft: request.draft ?? false },
+          signal
+        );
+
+        const addedLabels: string[] = [];
+        for (const labelName of request.labels ?? []) {
+          if (client.addPullRequestLabel === undefined) {
+            warnings.push(
+              'Failed to add tag: Azure DevOps client does not support labels'
+            );
+            continue;
+          }
+          try {
+            await client.addPullRequestLabel(
+              repository.project,
+              repository.repo,
+              pr.pullRequestId,
+              labelName,
+              signal
+            );
+            addedLabels.push(labelName);
+          } catch {
+            warnings.push('Failed to add tag: provider request failed');
+          }
+        }
+
+        let labels = addedLabels;
+        try {
+          const labelsResponse = await client.getPullRequestLabels(
+            repository.project,
+            repository.repo,
+            pr.pullRequestId,
+            signal
+          );
+          labels = labelsResponse.value
+            .filter((label) => label.active)
+            .map((label) => label.name);
+        } catch {
+          warnings.push('Failed to refresh labels: provider request failed');
+        }
+        const url = buildPrUrl(
+          {
+            org: repository.org,
+            project: repository.project,
+            repo: repository.repo,
+          },
+          pr.pullRequestId,
+          config.orgUrl
+        );
+
+        return {
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: azureDevOpsPullRequestToViewItem(pr, labels, url),
+          ...(warnings.length === 0 ? {} : { warnings }),
+        };
+      },
+      catch: (error) => error,
+    });
+
+  const updatePullRequest = (
+    request: AidePullRequestUpdateRequest
+  ): Effect.Effect<AidePullRequestUpdateResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async (signal) => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot update pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
+
+        const warnings: string[] = [];
+        const updates: PullRequestUpdateOptions = {};
+        if (request.title !== undefined) {
+          updates.title = request.title;
+        }
+        if (request.description !== undefined) {
+          updates.description = request.description;
+        }
+        if (request.targetBranch !== undefined) {
+          updates.targetRefName = ensureRefPrefix(request.targetBranch);
+        }
+        if (request.draft !== undefined) {
+          updates.isDraft = request.draft;
+        }
+        if (request.status !== undefined) {
+          updates.status = request.status;
+        }
+
+        let pr: AzureDevOpsPullRequest;
+        if (Object.keys(updates).length > 0) {
+          if (client.updatePullRequest === undefined) {
+            throw new Error(
+              'Azure DevOps client does not support updating pull requests'
+            );
+          }
+          pr = await client.updatePullRequest(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number,
+            updates,
+            signal
+          );
+        } else {
+          pr = await client.getPullRequest(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number,
+            signal
+          );
+        }
+
+        const labelsToRemove = request.labelsToRemove ?? [];
+        if (labelsToRemove.length > 0) {
+          const labelsResponse = await client.getPullRequestLabels(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number,
+            signal
+          );
+          for (const labelName of labelsToRemove) {
+            const label = labelsResponse.value.find(
+              (entry) => entry.name.toLowerCase() === labelName.toLowerCase()
+            );
+            if (label === undefined) {
+              warnings.push(
+                'Failed to remove tag: requested tag was not found on the pull request'
+              );
+              continue;
+            }
+            if (client.removePullRequestLabel === undefined) {
+              warnings.push(
+                'Failed to remove tag: Azure DevOps client does not support labels'
+              );
+              continue;
+            }
+            try {
+              await client.removePullRequestLabel(
+                repository.project,
+                repository.repo,
+                request.pullRequest.number,
+                label.id,
+                signal
+              );
+            } catch {
+              warnings.push('Failed to remove tag: provider request failed');
+            }
+          }
+        }
+
+        for (const labelName of request.labelsToAdd ?? []) {
+          if (client.addPullRequestLabel === undefined) {
+            warnings.push(
+              'Failed to add tag: Azure DevOps client does not support labels'
+            );
+            continue;
+          }
+          try {
+            await client.addPullRequestLabel(
+              repository.project,
+              repository.repo,
+              request.pullRequest.number,
+              labelName,
+              signal
+            );
+          } catch {
+            warnings.push('Failed to add tag: provider request failed');
+          }
+        }
+
+        const labelsResponse = await client.getPullRequestLabels(
+          repository.project,
+          repository.repo,
+          request.pullRequest.number,
+          signal
+        );
+        const url = buildPrUrl(
+          {
+            org: repository.org,
+            project: repository.project,
+            repo: repository.repo,
+          },
+          request.pullRequest.number,
+          config.orgUrl
+        );
+
+        return {
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: azureDevOpsPullRequestToViewItem(
+            pr,
+            labelsResponse.value
+              .filter((label) => label.active)
+              .map((label) => label.name),
+            url
+          ),
+          ...(warnings.length === 0 ? {} : { warnings }),
+        };
+      },
+      catch: (error) => error,
+    });
+
+  const getPullRequestDiff = (
+    request: AidePullRequestDiffRequest
+  ): Effect.Effect<AidePullRequestDiffResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async (signal) => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot get pull request diffs for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
+
+        const [pr, labelsResponse, changes] = await Promise.all([
+          client.getPullRequest(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number,
+            signal
+          ),
+          client.getPullRequestLabels(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number,
+            signal
+          ),
+          client.getAllPullRequestChanges(
+            repository.project,
+            repository.repo,
+            request.pullRequest.number,
+            signal
+          ),
+        ]);
+
+        return {
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: azureDevOpsPullRequestToViewItem(
+            pr,
+            labelsResponse.value
+              .filter((label) => label.active)
+              .map((label) => label.name)
+          ),
+          files: changes.map(azureDevOpsPullRequestChangeToDiffFile),
+        };
+      },
+      catch: (error) => error,
+    });
+
+  const listPullRequestComments = (
+    request: AidePullRequestCommentsRequest
+  ): Effect.Effect<AidePullRequestCommentsResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async (signal) => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot list pull request comments for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
+
+        const comments = await client.getAllComments(
+          repository.project,
+          repository.repo,
+          request.pullRequest.number,
+          signal
+        );
+
+        return {
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: { number: request.pullRequest.number },
+          threads: azureDevOpsCommentsToThreads(comments),
+        };
+      },
+      catch: (error) => error,
+    });
+
+  const addPullRequestComment = (
+    request: AidePullRequestAddCommentRequest
+  ): Effect.Effect<AidePullRequestCommentMutationResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async (signal) => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot add pull request comments for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
+        if (client.createPullRequestThread === undefined) {
+          throw new Error(
+            'Azure DevOps client does not support creating pull request threads'
+          );
+        }
+
+        const thread = await client.createPullRequestThread(
+          repository.project,
+          repository.repo,
+          request.pullRequest.number,
+          request.body,
+          request.position === undefined
+            ? undefined
+            : {
+                filePath: request.position.filePath,
+                line: request.position.lineNumber,
+                endLine: request.position.endLineNumber,
+              },
+          signal
+        );
+
+        return azureDevOpsThreadMutationResult(
+          repository,
+          request.pullRequest.number,
+          thread
+        );
+      },
+      catch: (error) => error,
+    });
+
+  const replyToPullRequestComment = (
+    request: AidePullRequestReplyCommentRequest
+  ): Effect.Effect<AidePullRequestCommentMutationResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async (signal) => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot reply to pull request comments for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
+        if (client.createThreadComment === undefined) {
+          throw new Error(
+            'Azure DevOps client does not support creating thread comments'
+          );
+        }
+
+        const response = await client.createThreadComment(
+          repository.project,
+          repository.repo,
+          request.pullRequest.number,
+          request.threadId,
+          request.body,
+          request.parentCommentId,
+          signal
+        );
+        const comment = azureDevOpsCreatedReplyToComment(response);
+
+        return {
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: { number: request.pullRequest.number },
+          comment,
+          thread: Object.freeze({
+            id: request.threadId,
+            replies: Object.freeze([comment]),
+          }),
+        };
+      },
+      catch: (error) => error,
+    });
+
+  const findPullRequestForBranch = (
+    request: AidePullRequestBranchLookupRequest
+  ): Effect.Effect<AidePullRequestBranchLookupResult, unknown, never> =>
+    Effect.tryPromise({
+      try: async (signal) => {
+        const repository = request.match.repository;
+        if (repository.kind !== 'azure-devops') {
+          throw new Error(
+            `Azure DevOps provider cannot find pull requests for '${repository.kind}' repository refs`
+          );
+        }
+
+        const { client, config } = await createClient({
+          scope: azureDevOpsRepositoryAuthScope(repository.org),
+        });
+        assertAzureDevOpsConfiguredOrg(config.orgUrl, repository.org);
+
+        const response = await client.listPullRequests(
+          repository.project,
+          repository.repo,
+          {
+            sourceRefName: `refs/heads/${request.branch}`,
+            status: 'all',
+          },
+          signal
+        );
+        const selected = selectAzureDevOpsPullRequestForBranch(response.value);
+        if (selected === undefined) {
+          throw new Error(
+            `No pull request found for branch '${request.branch}'.\n\nTo create a PR, push your branch and create one in Azure DevOps, or specify a PR ID directly:\n  aide ado comments <pr-id>`
+          );
+        }
+
+        const [pr, labelsResponse] = await Promise.all([
+          client.getPullRequest(
+            repository.project,
+            repository.repo,
+            selected.pullRequestId,
+            signal
+          ),
+          client.getPullRequestLabels(
+            repository.project,
+            repository.repo,
+            selected.pullRequestId,
+            signal
+          ),
+        ]);
+
+        return {
+          branch: request.branch,
+          repository,
+          repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+          pullRequest: azureDevOpsPullRequestToViewItem(
+            pr,
+            labelsResponse.value
+              .filter((label) => label.active)
+              .map((label) => label.name)
+          ),
+        };
+      },
+      catch: (error) => error,
+    });
+
+  return defineAidePlugin({
+    id: 'azure-devops',
+    summary: 'Azure DevOps pull request provider',
+    commands: [],
+    capabilities: {
+      auth: { status: authStatus },
+      authProvider: {
+        providerId: 'azure-devops',
+        label: 'Azure DevOps',
+        login: {
+          command: {
+            name: 'ado',
+          },
+          summary: 'Save Azure DevOps credentials',
+          fields: azureDevOpsLoginFields,
+          envMigration: {
+            description:
+              'Migrate AZURE_DEVOPS_ORG_URL / AZURE_DEVOPS_PAT into the keyring',
+            variables: [
+              'AZURE_DEVOPS_ORG_URL',
+              'AZURE_DEVOPS_PAT',
+              'AZURE_DEVOPS_AUTH_METHOD',
+            ],
+          },
+        },
+        logout: {
+          command: {
+            name: 'ado',
+          },
+          summary: 'Remove Azure DevOps credentials',
+        },
+        status: authStatus,
+        accounts: authAccounts,
+        operations: {
+          login: loginAzureDevOpsAuth,
+          logout: logoutAzureDevOpsAuth,
+        },
+      },
+      primeContribution: {
+        status: [
+          {
+            groupId: 'pull-requests',
+            groupLabel: 'Pull Requests',
+            label: 'Azure DevOps',
+            messages: {
+              misconfigured:
+                'run `aide login github` or `aide login ado` to reconfigure',
+              notConfigured:
+                'run `gh auth login`, `aide login github`, or `aide login ado`',
+            },
+            status: authStatus,
+          },
+        ],
+      },
+      pullRequestProvider: {
+        providerId: 'azure-devops',
+        priority: 100,
+        features: {
+          draftPullRequests: true,
+          threadedComments: true,
+        },
+        authStatus,
+        matchRemote: (remoteUrl) => {
+          const parsed = parseGitRemote(remoteUrl);
+          if (parsed === null) return null;
+          return {
+            source: 'git-remote',
+            priority: 100,
+            detail: `${parsed.org}/${parsed.project}/${parsed.repo}`,
+            repository: {
+              kind: 'azure-devops',
+              org: parsed.org,
+              project: parsed.project,
+              repo: parsed.repo,
+            },
+          };
+        },
+        matchRepository: (request) =>
+          Effect.tryPromise({
+            try: async () => {
+              if (
+                request.providerId !== undefined &&
+                request.providerId !== 'azure-devops'
+              ) {
+                return null;
+              }
+              if (request.owner !== undefined) {
+                return null;
+              }
+
+              const hostOrg = azureDevOpsOrgFromHost(request.host);
+              if (hostOrg === null) {
+                return null;
+              }
+
+              if (request.project === undefined && request.repo === undefined) {
+                return null;
+              }
+
+              const context = resolveRepoContext(request.project, request.repo);
+              const requestedOrg = request.org ?? context.org ?? hostOrg;
+              const org =
+                requestedOrg ??
+                azureDevOpsOrgFromUrl((await createClient()).config.orgUrl);
+              if (org === null) {
+                throw new MissingRepoContextError(
+                  'Could not determine Azure DevOps organization. Run this command from an Azure DevOps git repository, pass --org, or configure AZURE_DEVOPS_ORG_URL via `aide login ado`.'
+                );
+              }
+
+              return {
+                source: 'repository-ref' as const,
+                priority: 100,
+                detail: `${org}/${context.project}/${context.repo}`,
+                repository: {
+                  kind: 'azure-devops' as const,
+                  org,
+                  project: context.project,
+                  repo: context.repo,
+                },
+              };
+            },
+            catch: (error) => error,
+          }),
+        matchPullRequestUrl: (url) => {
+          const parsed = parsePRUrl(url);
+          if (parsed === null) return null;
+          return {
+            source: 'pull-request-url',
+            priority: 100,
+            detail: `${parsed.org}/${parsed.project}/${parsed.repo}#${parsed.prId}`,
+            repository: {
+              kind: 'azure-devops',
+              org: parsed.org,
+              project: parsed.project,
+              repo: parsed.repo,
+            },
+            pullRequest: {
+              number: parsed.prId,
+            },
+          };
+        },
+        operations: {
+          listPullRequests,
+          getPullRequest,
+          createPullRequest,
+          updatePullRequest,
+          getPullRequestDiff,
+          listPullRequestComments,
+          addPullRequestComment,
+          replyToPullRequestComment,
+          findPullRequestForBranch,
+        },
+      },
+    },
+  });
+}
+
+export const azureDevOpsPlugin = defineImmutableBuiltinPlugin(
+  createAzureDevOpsPlugin()
+);
+
+function azureDevOpsOrgFromHost(
+  host: string | undefined
+): string | undefined | null {
+  if (host === undefined || host.length === 0) {
+    return undefined;
+  }
+
+  const identity = canonicalizeAzureDevOpsAuthIdentity({ host });
+  if (identity !== null) return identity.org;
+
+  const normalizedHost = host
+    .trim()
+    .toLowerCase()
+    .replace(/^ssh\./, '');
+  if (normalizedHost === 'dev.azure.com') {
+    return undefined;
+  }
+  return null;
+}
+
+function azureDevOpsOrgFromUrl(orgUrl: string): string | null {
+  return canonicalizeAzureDevOpsAuthIdentity({ host: orgUrl })?.org ?? null;
+}
+
+function assertAzureDevOpsConfiguredOrg(
+  configuredOrgUrl: string,
+  repositoryOrg: string
+): void {
+  const configuredIdentity = canonicalizeAzureDevOpsAuthIdentity({
+    host: configuredOrgUrl,
+  });
+  if (configuredIdentity === null) return;
+
+  const repositoryIdentity = canonicalizeAzureDevOpsAuthIdentity({
+    host: AZURE_DEVOPS_CANONICAL_AUTH_HOST,
+    org: repositoryOrg,
+  });
+  if (
+    repositoryIdentity === null ||
+    configuredIdentity.org !== repositoryIdentity.org
+  ) {
+    throw new Error(
+      `Azure DevOps remote org '${repositoryOrg}' does not match configured org '${configuredIdentity.org}'`
+    );
+  }
+}
+
+function azureDevOpsPullRequestToListItem(pr: AzureDevOpsPullRequest) {
+  return {
+    id: pr.pullRequestId,
+    title: pr.title,
+    status: pr.isDraft ? 'draft' : pr.status,
+    createdAt: pr.creationDate,
+    author: {
+      displayName: pr.createdBy.displayName,
+      ...(pr.createdBy.uniqueName === undefined
+        ? {}
+        : { email: pr.createdBy.uniqueName }),
+    },
+    ...(pr.description === undefined ? {} : { description: pr.description }),
+    draft: pr.isDraft ?? false,
+  } as const;
+}
+
+function selectAzureDevOpsPullRequestForBranch(
+  prs: readonly AzureDevOpsPullRequest[]
+): AzureDevOpsPullRequest | undefined {
+  if (prs.length === 1) {
+    return prs[0];
+  }
+
+  const activePRs = prs.filter((pr) => pr.status === 'active');
+  if (activePRs.length === 1) {
+    return activePRs[0];
+  }
+
+  const candidates = activePRs.length > 0 ? activePRs : prs;
+  return [...candidates].sort(
+    (a, b) =>
+      new Date(b.creationDate).getTime() - new Date(a.creationDate).getTime()
+  )[0];
+}
+
+function azureDevOpsPullRequestToViewItem(
+  pr: AzureDevOpsPullRequest,
+  labels: readonly string[],
+  url?: string
+) {
+  return {
+    ...azureDevOpsPullRequestToListItem(pr),
+    ...(pr.sourceRefName === undefined
+      ? {}
+      : { sourceBranch: extractBranchName(pr.sourceRefName) }),
+    ...(pr.targetRefName === undefined
+      ? {}
+      : { targetBranch: extractBranchName(pr.targetRefName) }),
+    ...(url === undefined ? {} : { url }),
+    labels,
+  } as const;
+}
+
+function azureDevOpsPullRequestChangeToDiffFile(entry: AzureDevOpsPRChange) {
+  const previousPath = entry.originalPath ?? entry.sourceServerItem;
+  return {
+    path: entry.item?.path ?? entry.sourceServerItem ?? 'unknown',
+    status: azureDevOpsDiffFileStatus(entry.changeType),
+    providerStatus: entry.changeType,
+    ...(previousPath === undefined ? {} : { previousPath }),
+  } as const;
+}
+
+function azureDevOpsCommentKind(
+  comment: AdoFlattenedComment
+): AidePullRequestCommentKind {
+  if (comment.comment.commentType === 'system') {
+    return 'system';
+  }
+  if (comment.comment.parentCommentId > 0) {
+    return 'reply';
+  }
+  return comment.filePath === undefined ? 'issue' : 'review';
+}
+
+function azureDevOpsCommentToComment(
+  comment: AdoFlattenedComment
+): AidePullRequestComment {
+  return {
+    id: comment.comment.id,
+    kind: azureDevOpsCommentKind(comment),
+    author: {
+      displayName: comment.comment.author.displayName,
+      ...(comment.comment.author.uniqueName === undefined
+        ? {}
+        : { email: comment.comment.author.uniqueName }),
+    },
+    body: comment.comment.content ?? '[deleted comment]',
+    createdAt: comment.comment.publishedDate,
+    updatedAt: comment.comment.lastUpdatedDate,
+    ...(comment.filePath === undefined ? {} : { filePath: comment.filePath }),
+    ...(comment.lineNumber === undefined
+      ? {}
+      : { lineNumber: comment.lineNumber }),
+    ...(comment.comment.parentCommentId <= 0
+      ? {}
+      : { parentId: comment.comment.parentCommentId }),
+    providerType: comment.comment.commentType,
+  };
+}
+
+function azureDevOpsCreatedThreadCommentToComment(
+  comment: AzureDevOpsPRComment,
+  thread: CreateThreadResponse
+): AidePullRequestComment {
+  const filePath = thread.threadContext?.filePath;
+  const lineNumber = thread.threadContext?.rightFileStart?.line;
+  return {
+    id: comment.id,
+    kind: filePath === undefined ? 'issue' : 'review',
+    author: {
+      displayName: comment.author.displayName,
+      ...(comment.author.uniqueName === undefined
+        ? {}
+        : { email: comment.author.uniqueName }),
+    },
+    body: comment.content ?? '[deleted comment]',
+    createdAt: comment.publishedDate,
+    updatedAt: comment.lastUpdatedDate,
+    ...(filePath === undefined ? {} : { filePath }),
+    ...(lineNumber === undefined ? {} : { lineNumber }),
+    providerType: comment.commentType,
+  };
+}
+
+function azureDevOpsCreatedReplyToComment(
+  comment: AzureDevOpsCreateCommentResponse
+): AidePullRequestComment {
+  return {
+    id: comment.id,
+    kind: 'reply',
+    author: {
+      displayName: comment.author.displayName,
+      ...(comment.author.uniqueName === undefined
+        ? {}
+        : { email: comment.author.uniqueName }),
+    },
+    body: comment.content,
+    createdAt: comment.publishedDate,
+    updatedAt: comment.lastUpdatedDate,
+    ...(comment.parentCommentId <= 0
+      ? {}
+      : { parentId: comment.parentCommentId }),
+    providerType: comment.commentType,
+  };
+}
+
+function azureDevOpsThreadMutationResult(
+  repository: Extract<AidePullRequestRepositoryRef, { kind: 'azure-devops' }>,
+  pullRequestNumber: number,
+  thread: CreateThreadResponse
+): AidePullRequestCommentMutationResult {
+  const rootComment = thread.comments[0];
+  if (rootComment === undefined) {
+    throw new Error('Azure DevOps created thread did not include a comment');
+  }
+
+  const comment = azureDevOpsCreatedThreadCommentToComment(rootComment, thread);
+  const filePath = thread.threadContext?.filePath;
+  const lineNumber = thread.threadContext?.rightFileStart?.line;
+
+  return {
+    repository,
+    repositoryLabel: `${repository.org}/${repository.project}/${repository.repo}`,
+    pullRequest: { number: pullRequestNumber },
+    comment,
+    thread: Object.freeze({
+      id: thread.id,
+      status: thread.status,
+      ...(filePath === undefined ? {} : { filePath }),
+      ...(lineNumber === undefined ? {} : { lineNumber }),
+      rootComment: comment,
+      replies: Object.freeze([]),
+    }),
+  };
+}
+
+function azureDevOpsCommentsToThreads(
+  comments: readonly AdoFlattenedComment[]
+): readonly AidePullRequestCommentThread[] {
+  const threads = new Map<
+    number,
+    {
+      readonly id: number;
+      readonly status: string;
+      readonly filePath?: string;
+      readonly lineNumber?: number;
+      rootComment?: AidePullRequestComment;
+      replies: AidePullRequestComment[];
+    }
+  >();
+
+  for (const comment of comments) {
+    let thread = threads.get(comment.threadId);
+    if (thread === undefined) {
+      thread = {
+        id: comment.threadId,
+        status: comment.threadStatus,
+        ...(comment.filePath === undefined
+          ? {}
+          : { filePath: comment.filePath }),
+        ...(comment.lineNumber === undefined
+          ? {}
+          : { lineNumber: comment.lineNumber }),
+        replies: [],
+      };
+      threads.set(comment.threadId, thread);
+    }
+
+    const normalized = azureDevOpsCommentToComment(comment);
+    if (comment.comment.parentCommentId === 0) {
+      if (
+        thread.rootComment === undefined ||
+        normalized.id < thread.rootComment.id
+      ) {
+        if (thread.rootComment !== undefined) {
+          thread.replies.push(thread.rootComment);
+        }
+        thread.rootComment = normalized;
+      } else {
+        thread.replies.push(normalized);
+      }
+    } else {
+      thread.replies.push(normalized);
+    }
+  }
+
+  return Object.freeze(
+    [...threads.values()]
+      .map((thread) =>
+        Object.freeze({
+          id: thread.id,
+          status: thread.status,
+          ...(thread.filePath === undefined
+            ? {}
+            : { filePath: thread.filePath }),
+          ...(thread.lineNumber === undefined
+            ? {}
+            : { lineNumber: thread.lineNumber }),
+          ...(thread.rootComment === undefined
+            ? {}
+            : { rootComment: thread.rootComment }),
+          replies: Object.freeze(
+            [...thread.replies].sort((a, b) => a.id - b.id)
+          ),
+        })
+      )
+      .sort((a, b) => latestCommentThreadDate(b) - latestCommentThreadDate(a))
+  );
+}
+
+function latestCommentThreadDate(thread: AidePullRequestCommentThread): number {
+  const dates = [
+    ...(thread.rootComment === undefined ? [] : [thread.rootComment.createdAt]),
+    ...thread.replies.map((reply) => reply.createdAt),
+  ];
+  return Math.max(...dates.map((date) => new Date(date).getTime()));
+}
+
+function azureDevOpsDiffFileStatus(
+  changeType: AzureDevOpsChangeType
+): AidePullRequestDiffFileStatus {
+  switch (changeType) {
+    case 'add':
+      return 'added';
+    case 'edit':
+      return 'modified';
+    case 'delete':
+      return 'deleted';
+    case 'rename':
+    case 'sourceRename':
+    case 'targetRename':
+      return 'renamed';
+    case 'none':
+      return 'unchanged';
+    default:
+      return 'unknown';
+  }
+}

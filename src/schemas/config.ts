@@ -132,11 +132,40 @@ export const StoredAdoSchema = v.object({
 
 export type StoredAdo = v.InferOutput<typeof StoredAdoSchema>;
 
-export const StoredGithubSchema = v.object({
-  token: v.pipe(
-    v.string('Token must be a string'),
-    v.minLength(1, 'Token cannot be empty')
-  ),
+const StoredGithubTokenSchema = v.pipe(
+  v.string('Token must be a string'),
+  v.minLength(1, 'Token cannot be empty')
+);
+
+/**
+ * Legacy token-only shape. This remains valid only for the historical
+ * omitted-host/omitted-account key; selection code enforces that boundary.
+ */
+export const StoredGithubLegacySchema = v.object({
+  token: StoredGithubTokenSchema,
 });
+
+/** New scoped shape. Identity is mandatory so exact keys can be validated. */
+export const StoredGithubScopedSchema = v.object({
+  token: StoredGithubTokenSchema,
+  identity: v.object({
+    host: v.pipe(
+      v.string('GitHub identity host must be a string'),
+      v.minLength(1, 'GitHub identity host cannot be empty')
+    ),
+    account: v.optional(
+      v.pipe(
+        v.string('GitHub identity account must be a string'),
+        v.minLength(1, 'GitHub identity account cannot be empty')
+      )
+    ),
+  }),
+});
+
+/** Parse either storage generation; key-aware validation decides eligibility. */
+export const StoredGithubSchema = v.union([
+  StoredGithubScopedSchema,
+  StoredGithubLegacySchema,
+]);
 
 export type StoredGithub = v.InferOutput<typeof StoredGithubSchema>;

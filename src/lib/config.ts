@@ -1,3 +1,4 @@
+import { Effect } from 'effect';
 import * as v from 'valibot';
 import {
   JiraConfigSchema,
@@ -8,8 +9,30 @@ import {
   type JiraConfig,
   type AzureDevOpsConfig,
 } from '../schemas/config.js';
-import { getSecret, KeyringUnavailableError } from './secrets.js';
-import { isGhCliAvailable } from './gh-utils.js';
+import {
+  KeyringLive,
+  KeyringService,
+  KeyringUnavailableError,
+} from './auth-keyring.js';
+import {
+  authSecretScopesMatch,
+  resolveAuthSecretEffect,
+  resolveAuthSecretPromise,
+  type AuthStoreScope,
+} from './auth-store.js';
+import {
+  canonicalizeGitHubAuthHost,
+  DEFAULT_GITHUB_HOST,
+  githubEnvironmentCredential,
+  resolveGitHubAuthRequest,
+  validateGitHubStoredCredential,
+} from './github-auth.js';
+import {
+  resolveGitHubCredential,
+  resolveGitHubCredentialEffect,
+  type GitHubCredentialResolution,
+} from './github-credential-resolver.js';
+import type { GitHubAuthProbe } from './gh-utils.js';
 
 export type ConfigSource = 'env' | 'keyring';
 
@@ -18,10 +41,20 @@ export interface LoadedConfig<T> {
   source: ConfigSource;
 }
 
+const configErrorDiagnostics = new WeakMap<object, string>();
+
+export function configErrorDiagnostic(error: unknown): string | undefined {
+  return (typeof error === 'object' && error !== null) ||
+    typeof error === 'function'
+    ? configErrorDiagnostics.get(error)
+    : undefined;
+}
+
 export class ConfigError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ConfigError';
+    configErrorDiagnostics.set(this, message);
   }
 }
 
@@ -60,20 +93,32 @@ function readJiraFromEnv(): ConfigStatus<JiraConfig> | null {
   return { kind: 'env', value: parsed.output };
 }
 
+/** Independently validated Jira environment candidate for account discovery. */
+export function probeJiraEnvironmentConfig(): ConfigStatus<JiraConfig> | null {
+  return readJiraFromEnv();
+}
+
 type KeyringResult<T> =
   | { kind: 'found'; value: T }
   | { kind: 'missing' }
   | { kind: 'unreachable' }
   | { kind: 'malformed'; reason: string };
 
-async function readJiraFromKeyring(): Promise<KeyringResult<JiraConfig>> {
-  let raw: string | null;
-  try {
-    raw = await getSecret('jira');
-  } catch (err) {
-    if (err instanceof KeyringUnavailableError) return { kind: 'unreachable' };
-    throw err;
-  }
+function jiraConfigMatchesScope(
+  config: JiraConfig,
+  scope: AuthStoreScope
+): boolean {
+  return authSecretScopesMatch('jira', scope, {
+    providerId: 'jira',
+    host: config.url,
+    account: config.email,
+  });
+}
+
+function parseJiraFromKeyring(
+  raw: string | null,
+  scope?: AuthStoreScope
+): KeyringResult<JiraConfig> {
   if (raw === null) return { kind: 'missing' };
 
   let json: unknown;
@@ -96,23 +141,90 @@ async function readJiraFromKeyring(): Promise<KeyringResult<JiraConfig>> {
         ". Re-run 'aide login jira' to reconfigure.",
     };
   }
+  if (scope !== undefined && !jiraConfigMatchesScope(parsed.output, scope)) {
+    return {
+      kind: 'malformed',
+      reason:
+        'Stored scoped Jira credential identity does not match the requested authentication scope. ' +
+        "Re-run 'aide login jira' to reconfigure.",
+    };
+  }
   return { kind: 'found', value: parsed.output };
 }
 
-export async function probeJiraConfig(): Promise<ConfigStatus<JiraConfig>> {
-  const fromEnv = readJiraFromEnv();
-  if (fromEnv !== null) return fromEnv;
-
-  const fromKeyring = await readJiraFromKeyring();
-  if (fromKeyring.kind === 'found')
+function jiraKeyringResultStatus(
+  fromKeyring: KeyringResult<JiraConfig>
+): ConfigStatus<JiraConfig> {
+  if (fromKeyring.kind === 'found') {
     return { kind: 'keyring', value: fromKeyring.value };
+  }
   if (fromKeyring.kind === 'unreachable') return { kind: 'unreachable' };
   if (fromKeyring.kind === 'malformed') return fromKeyring;
   return { kind: 'missing' };
 }
 
-export async function loadConfig(): Promise<LoadedConfig<JiraConfig>> {
-  const status = await probeJiraConfig();
+/** @internal Parses one captured Jira keyring payload without performing I/O. */
+export function probeJiraStoredConfigValue(
+  raw: string | null,
+  scope?: AuthStoreScope
+): ConfigStatus<JiraConfig> {
+  return jiraKeyringResultStatus(parseJiraFromKeyring(raw, scope));
+}
+
+function readJiraFromKeyringEffect(scope?: AuthStoreScope) {
+  return Effect.matchEffect(resolveAuthSecretEffect('jira', scope), {
+    onFailure: (error) =>
+      error instanceof KeyringUnavailableError
+        ? Effect.succeed<KeyringResult<JiraConfig>>({ kind: 'unreachable' })
+        : Effect.fail(error),
+    onSuccess: (resolved) =>
+      Effect.succeed(parseJiraFromKeyring(resolved?.value ?? null, scope)),
+  });
+}
+
+async function readJiraFromKeyring(
+  scope?: AuthStoreScope
+): Promise<KeyringResult<JiraConfig>> {
+  return Effect.runPromise(
+    readJiraFromKeyringEffect(scope).pipe(Effect.provide(KeyringLive))
+  );
+}
+
+export function probeJiraConfigEffect(scope?: AuthStoreScope) {
+  const fromEnv = readJiraFromEnv();
+  if (
+    fromEnv !== null &&
+    (scope === undefined ||
+      (fromEnv.kind === 'env' && jiraConfigMatchesScope(fromEnv.value, scope)))
+  ) {
+    return Effect.succeed(fromEnv);
+  }
+
+  return Effect.map(readJiraFromKeyringEffect(scope), (fromKeyring) => {
+    if (fromKeyring.kind === 'found') {
+      return { kind: 'keyring' as const, value: fromKeyring.value };
+    }
+    if (fromKeyring.kind === 'unreachable') {
+      return { kind: 'unreachable' as const };
+    }
+    if (fromKeyring.kind === 'malformed') return fromKeyring;
+    return { kind: 'missing' as const };
+  });
+}
+
+/** @deprecated Live compatibility adapter. Use probeJiraConfigEffect. */
+export async function probeJiraConfig(
+  scope?: AuthStoreScope
+): Promise<ConfigStatus<JiraConfig>> {
+  return Effect.runPromise(
+    probeJiraConfigEffect(scope).pipe(Effect.provide(KeyringLive))
+  );
+}
+
+export async function loadConfig(
+  scope?: AuthStoreScope
+): Promise<LoadedConfig<JiraConfig>> {
+  const status = await probeJiraConfig(scope);
   if (status.kind === 'env') return { config: status.value, source: 'env' };
   if (status.kind === 'keyring')
     return { config: status.value, source: 'keyring' };
@@ -159,14 +271,25 @@ function readAdoFromEnv(): ConfigStatus<AzureDevOpsConfig> | null {
   return { kind: 'env', value: parsed.output };
 }
 
-async function readAdoFromKeyring(): Promise<KeyringResult<AzureDevOpsConfig>> {
-  let raw: string | null;
-  try {
-    raw = await getSecret('ado');
-  } catch (err) {
-    if (err instanceof KeyringUnavailableError) return { kind: 'unreachable' };
-    throw err;
-  }
+/** Independently validated ADO environment candidate for account discovery. */
+export function probeAdoEnvironmentConfig(): ConfigStatus<AzureDevOpsConfig> | null {
+  return readAdoFromEnv();
+}
+
+function adoConfigMatchesScope(
+  config: AzureDevOpsConfig,
+  scope: AuthStoreScope
+): boolean {
+  return authSecretScopesMatch('azure-devops', scope, {
+    providerId: 'azure-devops',
+    host: config.orgUrl,
+  });
+}
+
+function parseAdoFromKeyring(
+  raw: string | null,
+  scope?: AuthStoreScope
+): KeyringResult<AzureDevOpsConfig> {
   if (raw === null) return { kind: 'missing' };
 
   let json: unknown;
@@ -189,27 +312,92 @@ async function readAdoFromKeyring(): Promise<KeyringResult<AzureDevOpsConfig>> {
         ". Re-run 'aide login ado' to reconfigure.",
     };
   }
+  if (scope !== undefined && !adoConfigMatchesScope(parsed.output, scope)) {
+    return {
+      kind: 'malformed',
+      reason:
+        'Stored scoped Azure DevOps credential identity does not match the requested authentication scope. ' +
+        "Re-run 'aide login ado' to reconfigure.",
+    };
+  }
   return { kind: 'found', value: parsed.output };
 }
 
-export async function probeAdoConfig(): Promise<
-  ConfigStatus<AzureDevOpsConfig>
-> {
-  const fromEnv = readAdoFromEnv();
-  if (fromEnv !== null) return fromEnv;
-
-  const fromKeyring = await readAdoFromKeyring();
-  if (fromKeyring.kind === 'found')
+function adoKeyringResultStatus(
+  fromKeyring: KeyringResult<AzureDevOpsConfig>
+): ConfigStatus<AzureDevOpsConfig> {
+  if (fromKeyring.kind === 'found') {
     return { kind: 'keyring', value: fromKeyring.value };
+  }
   if (fromKeyring.kind === 'unreachable') return { kind: 'unreachable' };
   if (fromKeyring.kind === 'malformed') return fromKeyring;
   return { kind: 'missing' };
 }
 
-export async function loadAzureDevOpsConfig(): Promise<
-  LoadedConfig<AzureDevOpsConfig>
-> {
-  const status = await probeAdoConfig();
+/** @internal Parses one captured ADO keyring payload without performing I/O. */
+export function probeAdoStoredConfigValue(
+  raw: string | null,
+  scope?: AuthStoreScope
+): ConfigStatus<AzureDevOpsConfig> {
+  return adoKeyringResultStatus(parseAdoFromKeyring(raw, scope));
+}
+
+function readAdoFromKeyringEffect(scope?: AuthStoreScope) {
+  return Effect.matchEffect(resolveAuthSecretEffect('azure-devops', scope), {
+    onFailure: (error) =>
+      error instanceof KeyringUnavailableError
+        ? Effect.succeed<KeyringResult<AzureDevOpsConfig>>({
+            kind: 'unreachable',
+          })
+        : Effect.fail(error),
+    onSuccess: (resolved) =>
+      Effect.succeed(parseAdoFromKeyring(resolved?.value ?? null, scope)),
+  });
+}
+
+async function readAdoFromKeyring(
+  scope?: AuthStoreScope
+): Promise<KeyringResult<AzureDevOpsConfig>> {
+  return Effect.runPromise(
+    readAdoFromKeyringEffect(scope).pipe(Effect.provide(KeyringLive))
+  );
+}
+
+export function probeAdoConfigEffect(scope?: AuthStoreScope) {
+  const fromEnv = readAdoFromEnv();
+  if (
+    fromEnv !== null &&
+    (scope === undefined ||
+      (fromEnv.kind === 'env' && adoConfigMatchesScope(fromEnv.value, scope)))
+  ) {
+    return Effect.succeed(fromEnv);
+  }
+
+  return Effect.map(readAdoFromKeyringEffect(scope), (fromKeyring) => {
+    if (fromKeyring.kind === 'found') {
+      return { kind: 'keyring' as const, value: fromKeyring.value };
+    }
+    if (fromKeyring.kind === 'unreachable') {
+      return { kind: 'unreachable' as const };
+    }
+    if (fromKeyring.kind === 'malformed') return fromKeyring;
+    return { kind: 'missing' as const };
+  });
+}
+
+/** @deprecated Live compatibility adapter. Use probeAdoConfigEffect. */
+export async function probeAdoConfig(
+  scope?: AuthStoreScope
+): Promise<ConfigStatus<AzureDevOpsConfig>> {
+  return Effect.runPromise(
+    probeAdoConfigEffect(scope).pipe(Effect.provide(KeyringLive))
+  );
+}
+
+export async function loadAzureDevOpsConfig(
+  scope?: AuthStoreScope
+): Promise<LoadedConfig<AzureDevOpsConfig>> {
+  const status = await probeAdoConfig(scope);
   if (status.kind === 'env') return { config: status.value, source: 'env' };
   if (status.kind === 'keyring')
     return { config: status.value, source: 'keyring' };
@@ -238,59 +426,73 @@ export async function loadAzureDevOpsConfig(): Promise<
 // ---------------------------------------------------------------------------
 
 export type GithubConfigValue =
-  | { source: 'gh-cli' }
+  | { source: 'gh-cli'; account?: string }
   | { source: 'env' }
-  | { source: 'stored'; token: string };
+  | { source: 'stored'; token: string; account?: string };
 
+interface GithubConfigProbeOptions {
+  readonly ghAuthProbe?: GitHubAuthProbe;
+  readonly host?: string;
+  readonly scope?: AuthStoreScope;
+}
+
+function githubConfigStatus(
+  credential: GitHubCredentialResolution
+): ConfigStatus<GithubConfigValue> {
+  switch (credential.kind) {
+    case 'gh-cli':
+      return {
+        kind: 'env',
+        value: {
+          source: 'gh-cli',
+          ...(credential.account === undefined
+            ? {}
+            : { account: credential.account }),
+        },
+      };
+    case 'env':
+      return { kind: 'env', value: { source: 'env' } };
+    case 'stored':
+      return {
+        kind: 'keyring',
+        value: {
+          source: 'stored',
+          token: credential.token,
+          ...(credential.account === undefined
+            ? {}
+            : { account: credential.account }),
+        },
+      };
+    case 'missing':
+      return { kind: 'missing' };
+    case 'unreachable':
+      return { kind: 'unreachable' };
+    case 'failure':
+      return { kind: 'malformed', reason: credential.reason };
+  }
+}
+
+export function probeGithubConfigEffect(
+  opts: GithubConfigProbeOptions = {}
+): Effect.Effect<ConfigStatus<GithubConfigValue>, unknown, KeyringService> {
+  const request = resolveGitHubAuthRequest(opts);
+  if (!request.ok) {
+    return Effect.succeed({ kind: 'malformed', reason: request.reason });
+  }
+
+  return Effect.map(
+    resolveGitHubCredentialEffect(request, opts),
+    githubConfigStatus
+  );
+}
+
+/** @deprecated Live compatibility adapter. Use probeGithubConfigEffect. */
 export async function probeGithubConfig(
-  opts: { ghAvailable?: () => boolean } = {}
+  opts: GithubConfigProbeOptions = {}
 ): Promise<ConfigStatus<GithubConfigValue>> {
-  const ghCheck = opts.ghAvailable ?? isGhCliAvailable;
-
-  if (ghCheck()) {
-    return { kind: 'env', value: { source: 'gh-cli' } };
-  }
-
-  const envToken = Bun.env.GITHUB_TOKEN || Bun.env.GH_TOKEN;
-  if (envToken) {
-    return { kind: 'env', value: { source: 'env' } };
-  }
-
-  let raw: string | null;
-  try {
-    raw = await getSecret('github');
-  } catch (err) {
-    if (err instanceof KeyringUnavailableError) return { kind: 'unreachable' };
-    throw err;
-  }
-
-  if (raw === null) return { kind: 'missing' };
-
-  let json: unknown;
-  try {
-    json = JSON.parse(raw);
-  } catch {
-    return {
-      kind: 'malformed',
-      reason:
-        "Stored GitHub credentials are malformed. Re-run 'aide login github' to reconfigure.",
-    };
-  }
-
-  const parsed = v.safeParse(StoredGithubSchema, json);
-  if (!parsed.success) {
-    return {
-      kind: 'malformed',
-      reason:
-        'Stored GitHub credentials failed validation. ' +
-        "Re-run 'aide login github' to reconfigure.",
-    };
-  }
-
-  return {
-    kind: 'keyring',
-    value: { source: 'stored', token: parsed.output.token },
-  };
+  const request = resolveGitHubAuthRequest(opts);
+  if (!request.ok) return { kind: 'malformed', reason: request.reason };
+  return githubConfigStatus(await resolveGitHubCredential(request, opts));
 }
 
 // ---------------------------------------------------------------------------
@@ -356,17 +558,45 @@ export function readAdoEnvForMigration(): ReadEnvResult<
   return { kind: 'ok', value: parsed.output, varsUsed };
 }
 
-export function readGithubEnvForMigration(): ReadEnvResult<
-  v.InferOutput<typeof StoredGithubSchema>
-> {
-  const tokenVar = Bun.env.GITHUB_TOKEN ? 'GITHUB_TOKEN' : 'GH_TOKEN';
-  const token = Bun.env.GITHUB_TOKEN || Bun.env.GH_TOKEN;
-  if (!token)
-    return { kind: 'missing', missingVars: ['GITHUB_TOKEN (or GH_TOKEN)'] };
-  const parsed = v.safeParse(StoredGithubSchema, { token });
+export function readGithubEnvForMigration(
+  requestedHost: string = DEFAULT_GITHUB_HOST
+): ReadEnvResult<v.InferOutput<typeof StoredGithubSchema>> {
+  const host = canonicalizeGitHubAuthHost(requestedHost);
+  if (host === null) {
+    return {
+      kind: 'invalid',
+      reason: `Invalid GitHub authentication host '${requestedHost}'.`,
+    };
+  }
+
+  const credential = githubEnvironmentCredential(host);
+  if (credential === null) {
+    if (host === DEFAULT_GITHUB_HOST) {
+      return { kind: 'missing', missingVars: ['GITHUB_TOKEN (or GH_TOKEN)'] };
+    }
+    const missingVars: string[] = [];
+    if (!Bun.env.GH_HOST) missingVars.push('GH_HOST');
+    if (!Bun.env.GH_ENTERPRISE_TOKEN && !Bun.env.GITHUB_ENTERPRISE_TOKEN) {
+      missingVars.push('GH_ENTERPRISE_TOKEN (or GITHUB_ENTERPRISE_TOKEN)');
+    }
+    if (missingVars.length > 0) return { kind: 'missing', missingVars };
+    return {
+      kind: 'invalid',
+      reason: `GH_HOST must canonically match requested GitHub host '${host}'.`,
+    };
+  }
+
+  const parsed = v.safeParse(StoredGithubSchema, { token: credential.token });
   if (!parsed.success)
     return { kind: 'invalid', reason: formatIssues(parsed.issues) };
-  return { kind: 'ok', value: parsed.output, varsUsed: [tokenVar] };
+  return {
+    kind: 'ok',
+    value: parsed.output,
+    varsUsed:
+      host === DEFAULT_GITHUB_HOST
+        ? [credential.variable]
+        : ['GH_HOST', credential.variable],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -403,33 +633,47 @@ export function activeGithubEnvVars(): string[] {
 }
 
 /**
- * Returns true if the OS keyring has a valid credential blob stored for
- * `name`. Returns false if the entry is missing, the backend is unreachable,
- * or the stored blob fails schema validation. Does not throw.
+ * Returns true if the unscoped production keyring reader would accept the
+ * credential stored for `name`, without consulting environment variables or
+ * the gh CLI. Missing, unreachable, malformed, or wrong-generation entries
+ * return false.
+ *
+ * Unexpected failures still propagate, matching the underlying production
+ * readers so the whoami Effect boundary can retain them in its typed error
+ * channel. GitHub validator failures are treated as malformed, as they are by
+ * resolveGitHubCredential.
  */
 export async function isKeyringCredentialValid(
   name: 'jira' | 'ado' | 'github'
 ): Promise<boolean> {
-  let raw: string | null;
+  if (name === 'jira') {
+    return (await readJiraFromKeyring()).kind === 'found';
+  }
+  if (name === 'ado') {
+    return (await readAdoFromKeyring()).kind === 'found';
+  }
+
+  const request = resolveGitHubAuthRequest({});
+  if (!request.ok) return false;
+
+  let resolved;
   try {
-    raw = await getSecret(name);
+    resolved = await resolveAuthSecretPromise('github');
+  } catch (error) {
+    if (error instanceof KeyringUnavailableError) return false;
+    throw error;
+  }
+  if (resolved === null) return false;
+
+  try {
+    return validateGitHubStoredCredential(
+      request,
+      resolved.kind,
+      resolved.value
+    ).ok;
   } catch {
     return false;
   }
-  if (!raw) return false;
-  let json: unknown;
-  try {
-    json = JSON.parse(raw);
-  } catch {
-    return false;
-  }
-  const schema =
-    name === 'jira'
-      ? StoredJiraSchema
-      : name === 'ado'
-        ? StoredAdoSchema
-        : StoredGithubSchema;
-  return v.safeParse(schema, json).success;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,142 @@
+import { Effect } from 'effect';
+
+import {
+  defineAideCommand,
+  textResult,
+  type InternalHostAideCommandDescriptor,
+  type InternalHostAndKeyringAideCommandDescriptor,
+  type KeyringAideCommandDescriptor,
+  type ServiceFreeAideCommandDescriptor,
+} from '@aide/internal-command-descriptor';
+import { AideInternalHostServicesTag } from '@cli/host/runtime-context.js';
+import { KeyringService } from '@lib/auth-keyring.js';
+import type {
+  AidePluginCommandDescriptor,
+  AidePrimeContributionCapability,
+  AidePullRequestProviderCapability,
+} from '@aide/plugin-api';
+
+// @diagnostic symbol:not-exported
+import { descriptorEnvironmentNominality } from '@aide/internal-command-descriptor';
+
+const none = defineAideCommand.none<object, never>({
+  id: 'none',
+  route: 'none',
+  summary: 'No services',
+  run: () => Effect.succeed(textResult('none')),
+});
+const internalHost = defineAideCommand.internalHost<object, never>({
+  id: 'internal-host',
+  route: 'internal-host',
+  summary: 'Internal host',
+  run: () =>
+    Effect.map(AideInternalHostServicesTag, () => textResult('internal-host')),
+});
+const keyring = defineAideCommand.keyring<object, never>({
+  id: 'keyring',
+  route: 'keyring',
+  summary: 'Keyring',
+  run: () => Effect.map(KeyringService, () => textResult('keyring')),
+});
+const combined = defineAideCommand.internalHostAndKeyring<object, never>({
+  id: 'combined',
+  route: 'combined',
+  summary: 'Internal host and keyring',
+  run: () =>
+    Effect.all([AideInternalHostServicesTag, KeyringService]).pipe(
+      Effect.map(() => textResult('combined'))
+    ),
+});
+
+// @diagnostic cross:none-to-internal-host
+const noneToInternalHost: InternalHostAideCommandDescriptor = none;
+// @diagnostic cross:none-to-keyring
+const noneToKeyring: KeyringAideCommandDescriptor = none;
+// @diagnostic cross:none-to-combined
+const noneToCombined: InternalHostAndKeyringAideCommandDescriptor = none;
+// @diagnostic cross:internal-host-to-none
+const internalHostToNone: ServiceFreeAideCommandDescriptor = internalHost;
+// @diagnostic cross:internal-host-to-keyring
+const internalHostToKeyring: KeyringAideCommandDescriptor = internalHost;
+// @diagnostic cross:internal-host-to-combined
+const internalHostToCombined: InternalHostAndKeyringAideCommandDescriptor =
+  internalHost;
+// @diagnostic cross:keyring-to-none
+const keyringToNone: ServiceFreeAideCommandDescriptor = keyring;
+// @diagnostic cross:keyring-to-internal-host
+const keyringToInternalHost: InternalHostAideCommandDescriptor = keyring;
+// @diagnostic cross:keyring-to-combined
+const keyringToCombined: InternalHostAndKeyringAideCommandDescriptor = keyring;
+// @diagnostic cross:combined-to-none
+const combinedToNone: ServiceFreeAideCommandDescriptor = combined;
+// @diagnostic cross:combined-to-internal-host
+const combinedToInternalHost: InternalHostAideCommandDescriptor = combined;
+// @diagnostic cross:combined-to-keyring
+const combinedToKeyring: KeyringAideCommandDescriptor = combined;
+
+const raw = {
+  id: 'raw',
+  route: 'raw',
+  summary: 'Raw descriptor',
+  run: () => Effect.succeed(textResult('raw')),
+};
+// @diagnostic raw:none
+const rawNone: ServiceFreeAideCommandDescriptor = raw;
+// @diagnostic raw:internal-host
+const rawInternalHost: InternalHostAideCommandDescriptor = raw;
+// @diagnostic raw:keyring
+const rawKeyring: KeyringAideCommandDescriptor = raw;
+// @diagnostic raw:combined
+const rawCombined: InternalHostAndKeyringAideCommandDescriptor = raw;
+
+// @diagnostic spread:none
+const spreadNone: ServiceFreeAideCommandDescriptor = { ...none };
+// @diagnostic spread:internal-host
+const spreadInternalHost: InternalHostAideCommandDescriptor = {
+  ...internalHost,
+};
+// @diagnostic spread:keyring
+const spreadKeyring: KeyringAideCommandDescriptor = { ...keyring };
+// @diagnostic spread:combined
+const spreadCombined: InternalHostAndKeyringAideCommandDescriptor = {
+  ...combined,
+};
+
+void descriptorEnvironmentNominality;
+
+interface ExternalAuthority {
+  readonly secret: string;
+}
+
+// @diagnostic public-runtime:command
+type ArbitraryCommandEnvironment = AidePluginCommandDescriptor<object, unknown, ExternalAuthority>;
+// @diagnostic public-runtime:prime
+type ArbitraryPrimeEnvironment = AidePrimeContributionCapability<ExternalAuthority>;
+// @diagnostic public-runtime:pull-request
+type ArbitraryPullRequestEnvironment = AidePullRequestProviderCapability<ExternalAuthority>;
+
+void [
+  noneToInternalHost,
+  noneToKeyring,
+  noneToCombined,
+  internalHostToNone,
+  internalHostToKeyring,
+  internalHostToCombined,
+  keyringToNone,
+  keyringToInternalHost,
+  keyringToCombined,
+  combinedToNone,
+  combinedToInternalHost,
+  combinedToKeyring,
+  rawNone,
+  rawInternalHost,
+  rawKeyring,
+  rawCombined,
+  spreadNone,
+  spreadInternalHost,
+  spreadKeyring,
+  spreadCombined,
+];
+void (0 as unknown as ArbitraryCommandEnvironment);
+void (0 as unknown as ArbitraryPrimeEnvironment);
+void (0 as unknown as ArbitraryPullRequestEnvironment);

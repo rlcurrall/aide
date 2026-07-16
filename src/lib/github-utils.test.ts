@@ -39,6 +39,9 @@ describe('githubApiBase', () => {
   test('derives api host for github.com and ghe.com', () => {
     expect(githubApiBase('github.com')).toBe('https://api.github.com');
     expect(githubApiBase('acme.ghe.com')).toBe('https://api.acme.ghe.com');
+    expect(githubApiBase('GITHUB.EXAMPLE.COM')).toBe(
+      'https://github.example.com/api/v3'
+    );
   });
 });
 

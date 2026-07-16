@@ -1,0 +1,190 @@
+import { Effect } from 'effect';
+
+import {
+  defineAideCommand,
+  textResult,
+  type InternalHostAideCommandDescriptor,
+  type InternalHostAndKeyringAideCommandDescriptor,
+  type KeyringAideCommandDescriptor,
+  type ServiceFreeAideCommandDescriptor,
+} from '@aide/internal-command-descriptor';
+import {
+  AideHostServicesTag,
+  defineAidePlugin,
+  defineAideCommand as definePublicAideCommand,
+  pluginCommandDescriptor as publicPluginCommandDescriptor,
+  type AideAuthCommandNames,
+  type AideAuthLoginMetadata,
+  type AideAuthLogoutMetadata,
+  type AideAuthProviderCapability,
+  type AidePluginCapabilities,
+  type AidePluginManifest,
+  type AidePrimeContributionCapability,
+  type AidePrimeStatusContribution,
+  type AidePullRequestProviderCapability,
+} from '@aide/plugin-api';
+import { AideInternalHostServicesTag } from '@cli/host/runtime-context.js';
+import { KeyringService } from '@lib/auth-keyring.js';
+
+const none = defineAideCommand.none<object, never>({
+  id: 'none',
+  route: 'none',
+  summary: 'No services',
+  run: () => Effect.succeed(textResult('none')),
+});
+const internalHost = defineAideCommand.internalHost<object, never>({
+  id: 'internal-host',
+  route: 'internal-host',
+  summary: 'Internal host',
+  run: () =>
+    Effect.map(AideInternalHostServicesTag, () => textResult('internal-host')),
+});
+const keyring = defineAideCommand.keyring<object, never>({
+  id: 'keyring',
+  route: 'keyring',
+  summary: 'Keyring',
+  run: () => Effect.map(KeyringService, () => textResult('keyring')),
+});
+const combined = defineAideCommand.internalHostAndKeyring<object, never>({
+  id: 'combined',
+  route: 'combined',
+  summary: 'Internal host and keyring',
+  run: () =>
+    Effect.all([AideInternalHostServicesTag, KeyringService]).pipe(
+      Effect.map(() => textResult('combined'))
+    ),
+});
+
+// @valid same:none
+const sameNone: ServiceFreeAideCommandDescriptor = none;
+// @valid same:internal-host
+const sameInternalHost: InternalHostAideCommandDescriptor = internalHost;
+// @valid same:keyring
+const sameKeyring: KeyringAideCommandDescriptor = keyring;
+// @valid same:combined
+const sameCombined: InternalHostAndKeyringAideCommandDescriptor = combined;
+
+// @valid public:service-free-raw
+const publicServiceFree = definePublicAideCommand({
+  id: 'external:service-free',
+  route: 'service-free',
+  summary: 'Structural service-free public descriptor',
+  run: () => Effect.succeed(textResult('public')),
+});
+// @valid public:host-raw
+const publicHost = definePublicAideCommand({
+  id: 'external:host',
+  route: 'host',
+  summary: 'Structural host public descriptor',
+  run: () => Effect.map(AideHostServicesTag, () => textResult('public-host')),
+});
+// @valid public:service-free-spread
+const publicServiceFreeFromSpread = definePublicAideCommand({
+  ...publicServiceFree,
+});
+// @valid public:host-spread
+const publicHostFromSpread = definePublicAideCommand({ ...publicHost });
+
+publicPluginCommandDescriptor(publicServiceFreeFromSpread);
+publicPluginCommandDescriptor(publicHostFromSpread);
+const publicPrime = {
+  sections: () => Effect.succeed([]),
+} satisfies AidePrimeContributionCapability;
+const publicPullRequests = {
+  providerId: 'external-provider',
+  priority: 10,
+  features: {},
+  authStatus: () => Effect.succeed({ state: 'configured' as const }),
+  matchRemote: () => null,
+  matchPullRequestUrl: () => null,
+} satisfies AidePullRequestProviderCapability;
+
+// @valid public:optional-undefined
+const optionalUndefinedManifest: AidePluginManifest = {
+  id: 'optional-undefined',
+  version: '1.0.0',
+  aidePluginApiVersion: 1,
+  capabilities: undefined,
+  loading: undefined,
+  conflicts: undefined,
+};
+const optionalUndefinedLoading: NonNullable<AidePluginManifest['loading']> = {
+  after: undefined,
+  before: undefined,
+};
+const optionalUndefinedCommandNames: AideAuthCommandNames = {
+  aliases: undefined,
+};
+const optionalUndefinedLogin: AideAuthLoginMetadata = {
+  command: undefined,
+  fields: undefined,
+  envMigration: undefined,
+};
+const optionalUndefinedLogout: AideAuthLogoutMetadata = {
+  command: undefined,
+};
+const optionalUndefinedAuthProvider: AideAuthProviderCapability = {
+  providerId: 'optional-undefined-auth',
+  label: 'Optional undefined auth',
+  login: undefined,
+  logout: undefined,
+  status: () => Effect.succeed({ state: 'configured' }),
+  operations: undefined,
+};
+const optionalUndefinedPrimeStatus: AidePrimeStatusContribution = {
+  groupId: 'optional-undefined',
+  groupLabel: 'Optional undefined',
+  label: 'Optional undefined',
+  messages: undefined,
+  status: () => Effect.succeed({ state: 'configured' }),
+};
+const optionalUndefinedPrime: AidePrimeContributionCapability = {
+  status: undefined,
+};
+const optionalUndefinedPullRequests: AidePullRequestProviderCapability = {
+  ...publicPullRequests,
+  operations: undefined,
+};
+const optionalUndefinedCapabilities: AidePluginCapabilities = {
+  auth: undefined,
+  authProvider: undefined,
+  primeContribution: undefined,
+  pullRequestProvider: undefined,
+};
+publicPluginCommandDescriptor(publicServiceFreeFromSpread, {
+  extension: undefined,
+});
+defineAidePlugin({
+  id: 'optional-undefined-plugin',
+  summary: 'Optional undefined plugin',
+  commands: [],
+  capabilities: undefined,
+});
+defineAidePlugin({
+  id: 'external-plugin',
+  summary: 'External structural declaration consumer',
+  commands: [
+    publicPluginCommandDescriptor(publicServiceFreeFromSpread),
+    publicPluginCommandDescriptor(publicHostFromSpread),
+  ],
+  capabilities: {
+    primeContribution: publicPrime,
+    pullRequestProvider: publicPullRequests,
+  },
+});
+void [
+  sameNone,
+  sameInternalHost,
+  sameKeyring,
+  sameCombined,
+  optionalUndefinedManifest,
+  optionalUndefinedLoading,
+  optionalUndefinedCommandNames,
+  optionalUndefinedLogin,
+  optionalUndefinedLogout,
+  optionalUndefinedAuthProvider,
+  optionalUndefinedPrimeStatus,
+  optionalUndefinedPrime,
+  optionalUndefinedPullRequests,
+  optionalUndefinedCapabilities,
+];

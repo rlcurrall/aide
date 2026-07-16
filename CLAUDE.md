@@ -18,7 +18,7 @@ The CLI follows a hierarchical command structure: `aide <service> <action> [opti
 
 - `prime` - Output aide context for session start hook
 - `upgrade` - Upgrade aide to the latest version
-- `login` - Save credentials to OS keyring (`aide login <jira|ado|github>`)
+- `login` - Configure provider authentication; stored-credential flows use the OS keyring (`aide login <jira|ado|github>`)
 - `logout` - Remove stored credentials (`aide logout <service>`)
 - `whoami` - Show configured credentials and their source
 
@@ -93,23 +93,37 @@ bunx tsc --noEmit         # Type check without emitting
 ```
 src/
   cli/                    # CLI implementation
-    index.ts              # Main entry point, top-level yargs wiring
+    index.ts              # Composition root; registry-to-yargs handoff
     help.ts               # VERSION constant and CLI_NAME
     update.ts             # Upgrade/cleanup helpers
+    host/
+      command-descriptor.ts # Internal Effect command descriptors
+      plugin-descriptor.ts  # Built-in plugin and capability descriptors
+      command-registry.ts   # CommandRegistry ownership and registration
+      runtime-context.ts    # Runtime service composition
+      yargs-adapter.ts      # Current parser/execution adapter
+    plugins/
+      builtin.ts          # Built-in plugin registration list
+      aide-core/          # Core descriptor and Prime implementation
+      pull-requests/      # PR descriptor and owned command implementations
+      jira/               # Jira descriptor, auth-provider/discovery, Prime contribution, and legacy-group registration
+      azure-devops/       # Azure DevOps auth and PR provider implementation
+      github/             # GitHub auth, discovery, and PR provider implementation
+      claude-code/        # Claude Code plugin-management descriptor
+      legacy-auth/        # Login, logout, and whoami descriptor ownership
     commands/
-      jira/               # Jira service commands
-      pr/                 # Pull request service commands
-      plugin/             # Plugin management commands
-      login.ts            # aide login <service>
-      logout.ts           # aide logout <service>
-      whoami.ts           # aide whoami
-      prime.ts            # aide prime
-      upgrade.ts          # aide upgrade
+      jira/               # Legacy Jira ticket-command implementations
+      plugin/             # Remaining legacy plugin-management modules
+      pr/                 # Compatibility re-exports for plugin-owned PR commands
+      login.ts            # Legacy host-aware aide login module
+      logout.ts           # Legacy host-aware aide logout module
+      whoami.ts           # Whoami descriptor plus yargs compatibility export
+      upgrade.ts          # Remaining legacy aide upgrade module
   lib/                    # Shared libraries
     config.ts             # Config loading; probeJiraConfig, probeAdoConfig, probeGithubConfig
     jira-client.ts        # Jira REST API client
     azure-devops-client.ts # Azure DevOps REST API client
-    github-client.ts      # GitHub REST API client (via gh CLI or GITHUB_TOKEN)
+    github-client.ts      # GitHub REST API client
     github-types.ts       # GitHub API response types
     github-utils.ts       # GitHub-specific URL parsing and helpers
     gh-utils.ts           # gh CLI availability check
@@ -124,8 +138,8 @@ src/
     value-formatter.ts    # Auto-format field values by type
     jira-utils.ts         # Shared Jira command helpers
     validation.ts         # Argument validation via valibot schemas
-    errors.ts             # handleCommandError, UserCancelledError
-    prompts.ts            # Interactive prompt helpers (text, password, confirm)
+    errors.ts             # Legacy handleCommandError helper
+    prompts.ts            # Prompting helpers and UserCancelledError
     secrets.ts            # Bun.secrets wrapper for OS keyring credential storage
     types.ts              # TypeScript interfaces
 
@@ -165,11 +179,11 @@ skills/                   # Claude Code skills (auto-discovered by Claude)
 
 ### Command Architecture
 
-Commands are **yargs `CommandModule` objects** with four fields: `command` (the name/positionals), `describe` (help text), `builder` (option/positional definitions via the yargs fluent API), and `handler` (async function that does the work).
+The command architecture is hybrid. Built-in plugin descriptors in `src/cli/plugins/*` declare command ownership and capabilities. `src/cli/plugins/builtin.ts` registers them with the internal `CommandRegistry` in `src/cli/host/command-registry.ts`. The pull-requests plugin owns the PR command group and implementations; the aide-core plugin owns the Prime descriptor. Remaining legacy yargs `CommandModule`s, including Jira and plugin management, still live under `src/cli/commands` and are registered by their owning built-in plugins.
 
-Services (`jira`, `pr`, `plugin`) each expose their own `CommandModule` in `src/cli/commands/<service>/index.ts`. The builder for a service module chains `.command(subcommand)` calls to compose all subcommands, then calls `.demandCommand(1, ...)` to require a subcommand.
+`src/cli/host/command-descriptor.ts` and `plugin-descriptor.ts` define the internal descriptor model, while `runtime-context.ts` composes host services. yargs remains the current parser adapter at `src/cli/host/yargs-adapter.ts`: it turns descriptors into yargs modules, supplies Effect services at execution, wraps remaining legacy modules with host context, and registers the registry entries at the yargs boundary.
 
-The top-level `main()` in `src/cli/index.ts` registers every service and top-level command via `.command(...)`, then calls `.parse()`. Errors are thrown; `main()` catches them and prints via `handleCommandError` in `@lib/errors.ts`, exiting 1 (or 130 for `UserCancelledError`).
+The top-level `main()` in `src/cli/index.ts` creates the built-in registry and live layers, passes them to `registerCommands`, and owns the yargs usage and final error boundary. Descriptor commands run as Effects through the adapter; legacy yargs handlers remain supported, so do not assume every command is Effect-native. Descriptor and new command implementations should propagate failures or throw rather than call `process.exit`. Existing legacy and plugin-local yargs handlers may still render errors and exit through local helpers. yargs `.fail` owns parser/usage failures; the top-level catch owns propagated failures and cancellation, preserving silent exit 130 for `UserCancelledError`.
 
 **Auto-Discovery:**
 PR commands automatically discover organization, project, and repository from git remote URLs:
@@ -184,7 +198,7 @@ PR commands automatically discover organization, project, and repository from gi
 For GHE Cloud hosts the REST/GraphQL API base is derived as `https://api.{subdomain}.ghe.com`, and the `gh` CLI transport passes `--hostname {subdomain}.ghe.com`. Self-hosted GitHub Enterprise Server (`/api/v3` hosts) is not supported.
 
 **Multiple Output Formats:**
-All commands support `--format` flag:
+Most data-oriented commands accept a `--format` flag:
 
 - `text` - Human-readable (default)
 - `json` - Structured data for AI/script processing
@@ -192,49 +206,20 @@ All commands support `--format` flag:
 
 ## Adding New Commands
 
-### Adding a Command to an Existing Service
+### Extending an Existing Built-in Plugin
 
-1. **Create the command file** (e.g., `src/cli/commands/jira/new-cmd.ts`):
+1. Find the owning descriptor under `src/cli/plugins/*/plugin.ts`. Keep descriptor and plugin-local implementations with that plugin: PR commands belong under `src/cli/plugins/pull-requests/`, and Prime belongs under `src/cli/plugins/aide-core/`. For intentionally legacy Jira, plugin-management, auth, or upgrade work, follow the next section and retain existing `src/cli/commands` ownership where applicable.
+2. Prefer the established internal descriptor path (`defineAideCommand` plus `pluginCommandDescriptor`) and the owning plugin's Effect operation/service patterns. Where an owned surface still uses plugin-local yargs modules, such as PR commands, follow that existing pattern and declare them with `pluginCommandModule`.
+3. Add the command to the owning plugin's `commands` array. A child command gets `parentId`; an ordinary leaf gets no extension policy. A command that itself accepts children gets `acceptsChildren` and its own `extension` policy. `CommandRegistry` validates ownership and routes; `yargs-adapter.ts` performs parser registration.
+4. Add focused descriptor/registry/runtime tests and command behavior tests beside the owning implementation.
 
-```typescript
-import type { ArgumentsCamelCase, CommandModule } from 'yargs';
+### Intentionally Legacy Commands
 
-interface NewCmdArgs {
-  ticket?: string;
-  verbose?: boolean;
-}
+Use `src/cli/commands` and a yargs `CommandModule` only when extending an intentionally legacy surface, including existing Jira, plugin-management, auth, and upgrade implementations. Register the module through the owning built-in plugin descriptor with `pluginCommandModule`; do not add direct top-level `.command(...)` wiring in `src/cli/index.ts`.
 
-const command: CommandModule<{}, NewCmdArgs> = {
-  command: 'new-cmd [ticket]',
-  describe: 'Short description shown in help',
-  builder: (yargs) =>
-    yargs
-      .positional('ticket', {
-        type: 'string',
-        describe: 'Ticket ID',
-      })
-      .option('verbose', {
-        type: 'boolean',
-        describe: 'Verbose output',
-        default: false,
-      }),
-  handler: async (argv: ArgumentsCamelCase<NewCmdArgs>) => {
-    // Implementation - throw on error, don't call process.exit
-    // Use shared helpers from @lib/cli-utils.ts for progress/formatting
-  },
-};
+### Adding a New Built-in Service
 
-export default command;
-```
-
-2. **Register in the service index** (`src/cli/commands/jira/index.ts`) by adding `.command(newCmdCommand)` to the builder chain.
-
-### Adding a New Service
-
-1. Create a new directory: `src/cli/commands/myservice/`
-2. Create the index (`index.ts`) as a `CommandModule` that composes subcommands in its builder
-3. Create command files for each action
-4. Register the service in `src/cli/index.ts` via `.command(myserviceCommands)`
+Create its descriptor and implementation under `src/cli/plugins/<service>/`, expose commands and capabilities from that descriptor, and add the plugin to `src/cli/plugins/builtin.ts`. Reuse the established Effect operation/service boundaries and host tests for comparable built-ins.
 
 ## Important Implementation Notes
 
@@ -242,10 +227,10 @@ export default command;
 Jira uses Atlassian Document Format (ADF) for rich text. The conversion utilities handle bidirectional conversion. Always convert ADF to markdown for readability when displaying content.
 
 **Azure DevOps API Versions:**
-Use API version `7.2-preview.1` for Azure DevOps endpoints. The preview version is required for PR threads/comments endpoints.
+Azure DevOps API versions are endpoint-specific. Before changing or adding a call, check the version used by the current client and the endpoint's API contract, and preserve that version unless the contract requires a change.
 
 **Error Handling:**
-Commands throw errors rather than calling `process.exit`. The top-level `main()` in `src/cli/index.ts` catches errors and prints them, then exits with code 1. `UserCancelledError` exits with code 130 (silent). Use `handleCommandError` from `@lib/errors.ts` inside individual command handlers.
+Descriptor commands return Effects that the yargs adapter executes with their declared services. Remaining legacy handlers run through the legacy yargs bridge and may use established helpers such as `src/cli/commands/effect-bridge.ts` for Effect operations. Descriptor and new command implementations should propagate failures or throw rather than call `process.exit`; existing legacy and plugin-local yargs handlers may still render errors and exit through local helpers. yargs `.fail` owns parser/usage failures; the top-level catch owns propagated failures and cancellation. `UserCancelledError` exits silently with code 130.
 
 **Git Remote Detection:**
 PR commands use `spawnSync(['git', 'config', '--get', 'remote.origin.url'])` to detect repository context and auto-route to the appropriate platform (Azure DevOps or GitHub).
@@ -265,11 +250,11 @@ Descriptions should be written in Markdown format. The CLI automatically convert
 
 ### Interactive Setup (Recommended)
 
-Use `aide login <service>` to store credentials in the OS keyring (macOS Keychain, Windows Credential Manager, or libsecret on Linux):
+Use `aide login <service>` to configure provider authentication. Stored credentials use the OS keyring (macOS Keychain, Windows Credential Manager, or libsecret on Linux):
 
     aide login jira     # prompts for URL, email, API token
     aide login ado      # prompts for org URL, PAT
-    aide login github   # stores token if gh CLI is unavailable
+    aide login github   # uses eligible gh auth or stores a requested-host token
 
 To migrate existing env var credentials into the keyring without retyping, pass `--from-env`:
 
@@ -279,7 +264,11 @@ To migrate existing env var credentials into the keyring without retyping, pass 
 
 Check what's configured with `aide whoami` (prints a hint when any service is sourced from env). Remove with `aide logout <service>`.
 
-### Environment Variables (Fallback)
+### Environment Variables and Provider Resolution
+
+Credential resolution and account discovery are provider- and scope-specific; there is no universal keyring-first or environment-fallback rule. Jira and Azure DevOps config probes accept a complete matching environment configuration before stored credentials. Exact GitHub resolution considers the requested host/account across the `gh` CLI, eligible host-bound environment credentials, and the selected stored credential. Omitted-scope account discovery separately assembles each provider's eligible environment and stored accounts, plus GitHub's bounded `gh` account catalog. Scoped stored credentials use the auth store/keyring.
+
+See `src/lib/config.ts`, `src/lib/github-credential-resolver.ts`, `src/cli/plugins/builtin-auth-provider-discovery.ts`, and `src/cli/plugins/github/auth-discovery.ts` before changing credential behavior.
 
 #### Jira
 
@@ -299,7 +288,7 @@ export AZURE_DEVOPS_AUTH_METHOD="pat"  # optional, default: pat
 
 #### GitHub
 
-GitHub authentication is handled automatically via the `gh` CLI. If you have `gh` installed and authenticated (`gh auth login`), no additional configuration is needed.
+GitHub can use an authenticated `gh` CLI account for the requested host/account. Eligible environment or scoped stored credentials participate according to the exact resolver described above.
 
 For CI/headless environments without `gh`, set:
 

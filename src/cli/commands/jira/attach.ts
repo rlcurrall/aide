@@ -4,7 +4,7 @@
  */
 
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
-import { loadConfig } from '@lib/config.js';
+import { loadJiraConfigForArgs } from './auth-scope.js';
 import { JiraClient } from '@lib/jira-client.js';
 import { validateArgs } from '@lib/validation.js';
 import { AttachArgsSchema, type AttachArgs } from '@schemas/jira/attach.js';
@@ -79,7 +79,7 @@ async function handler(argv: ArgumentsCamelCase<AttachArgs>): Promise<void> {
       throw new Error('Only one operation can be performed at a time');
     }
 
-    const { config } = await loadConfig();
+    const { config } = await loadJiraConfigForArgs(argv);
     const client = new JiraClient(config);
 
     // List attachments

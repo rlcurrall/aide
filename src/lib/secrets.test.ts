@@ -1,5 +1,5 @@
 /**
- * Tests for secrets.ts
+ * Tests for the live Bun keyring adapter and its Promise compatibility surface.
  *
  * Success-path tests run against the real OS keyring under a scoped service
  * name, so they verify the actual Bun.secrets integration rather than just a
@@ -30,6 +30,11 @@ import {
   cleanupTestService,
   type Store,
 } from './test-helpers.js';
+import {
+  backendFailureSentinels,
+  exportedErrorText,
+  maliciousBackendFailure,
+} from './error-redaction.test-helper.js';
 
 // ---------------------------------------------------------------------------
 // Real-keyring integration tests
@@ -105,7 +110,7 @@ describeIfKeyring('secrets wrapper (real keyring)', () => {
 // a real backend failure on a host where the keyring works).
 // ---------------------------------------------------------------------------
 
-describe('secrets wrapper (keyring unavailable)', () => {
+describe('live Bun keyring adapter (keyring unavailable)', () => {
   let store: Store;
   let restore: () => void;
 
@@ -137,5 +142,116 @@ describe('secrets wrapper (keyring unavailable)', () => {
     await expect(deleteSecret('github')).rejects.toBeInstanceOf(
       KeyringUnavailableError
     );
+  });
+
+  test('redacts arbitrary backend failures for get, set, and delete', async () => {
+    const rawName = 'auth:github:host:raw-name.invalid:account:raw-account';
+    const rawCredential = 'RAW_CREDENTIAL_VALUE_8af9';
+    const rawIndex =
+      '{"version":1,"providerId":"github","scopes":[{"account":"RAW_INDEX_VALUE_b762"}]}';
+
+    for (const operation of ['get', 'set', 'delete'] as const) {
+      restore?.();
+      const fixture = maliciousBackendFailure([
+        rawName,
+        rawCredential,
+        rawIndex,
+      ]);
+      const original = (Bun as unknown as { secrets: unknown }).secrets;
+      (Bun as unknown as { secrets: unknown }).secrets = {
+        async get() {
+          throw fixture.failure;
+        },
+        async set() {
+          throw fixture.failure;
+        },
+        async delete() {
+          throw fixture.failure;
+        },
+      };
+      restore = () => {
+        (Bun as unknown as { secrets: unknown }).secrets = original;
+      };
+
+      const result = await (
+        operation === 'get'
+          ? getSecret('github')
+          : operation === 'set'
+            ? setSecret('github', rawCredential)
+            : deleteSecret('github')
+      ).catch((error: unknown) => error);
+
+      expect(result).toBeInstanceOf(KeyringUnavailableError);
+      const error = result as KeyringUnavailableError;
+      expect(error).toMatchObject({ operation, classification: 'unavailable' });
+      expect(Object.getOwnPropertyDescriptor(error, 'cause')).toBeUndefined();
+      const rendered = exportedErrorText(error);
+      for (const secret of [
+        ...backendFailureSentinels,
+        rawName,
+        rawCredential,
+        rawIndex,
+      ]) {
+        expect(rendered).not.toContain(secret);
+      }
+      expect(fixture.getterReads()).toBe(0);
+    }
+  });
+
+  test('does not inspect or retain a hostile proxy rejection', async () => {
+    let trapCalls = 0;
+    const raw = new Proxy(Object.create(null) as object, {
+      get() {
+        trapCalls += 1;
+        throw new Error('proxy get trap must not run');
+      },
+      getOwnPropertyDescriptor() {
+        trapCalls += 1;
+        throw new Error('proxy descriptor trap must not run');
+      },
+      getPrototypeOf() {
+        trapCalls += 1;
+        throw new Error('proxy prototype trap must not run');
+      },
+      ownKeys() {
+        trapCalls += 1;
+        throw new Error('proxy keys trap must not run');
+      },
+    });
+    const original = (Bun as unknown as { secrets: unknown }).secrets;
+    (Bun as unknown as { secrets: unknown }).secrets = {
+      async get() {
+        throw raw;
+      },
+      async set() {},
+      async delete() {
+        return false;
+      },
+    };
+    restore = () => {
+      (Bun as unknown as { secrets: unknown }).secrets = original;
+    };
+
+    const result = await getSecret('jira').catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(KeyringUnavailableError);
+    expect(trapCalls).toBe(0);
+    expect(
+      Reflect.ownKeys(result as object).some(
+        (key) =>
+          Object.getOwnPropertyDescriptor(result as object, key)?.value === raw
+      )
+    ).toBe(false);
+    expect(trapCalls).toBe(0);
+
+    const compatibilityError = new KeyringUnavailableError(raw);
+    expect(compatibilityError.operation).toBe('unknown');
+    expect(
+      Reflect.ownKeys(compatibilityError).some(
+        (key) =>
+          Object.getOwnPropertyDescriptor(compatibilityError, key)?.value ===
+          raw
+      )
+    ).toBe(false);
+    expect(trapCalls).toBe(0);
   });
 });

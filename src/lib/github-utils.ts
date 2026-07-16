@@ -13,6 +13,12 @@ import type { FindPRResult } from './ado-utils.js';
 import { GitHubClient } from './github-client.js';
 import { regex } from 'arkregex';
 import { getCurrentBranch, getGitRemoteUrl } from './git-utils.js';
+import {
+  canonicalizeGitHubAuthHost,
+  DEFAULT_GITHUB_HOST,
+} from './github-auth.js';
+
+export { DEFAULT_GITHUB_HOST } from './github-auth.js';
 
 // ============================================================================
 // GitHub URL Helpers
@@ -21,8 +27,6 @@ import { getCurrentBranch, getGitRemoteUrl } from './git-utils.js';
 /**
  * Default GitHub host when none is detected.
  */
-export const DEFAULT_GITHUB_HOST = 'github.com';
-
 /**
  * Normalize a raw host from a git remote or PR URL to a canonical GitHub web
  * host, or return null if it isn't a supported GitHub host.
@@ -47,9 +51,35 @@ export function normalizeGitHubHost(rawHost: string): string | null {
  * Derive the REST API base URL for a GitHub host.
  * - github.com -> https://api.github.com
  * - acme.ghe.com -> https://api.acme.ghe.com
+ * - github.example.com (GHES) -> https://github.example.com/api/v3
  */
 export function githubApiBase(host: string): string {
-  return `https://api.${host}`;
+  const canonicalHost = canonicalizeGitHubAuthHost(host);
+  if (canonicalHost === null) {
+    throw new Error(`Unsupported GitHub API host '${host}'`);
+  }
+  if (
+    canonicalHost === DEFAULT_GITHUB_HOST ||
+    canonicalHost.endsWith('.ghe.com')
+  ) {
+    return `https://api.${canonicalHost}`;
+  }
+  return `https://${canonicalHost}/api/v3`;
+}
+
+/** Derive the GraphQL endpoint for GitHub.com, GHE Cloud, or GHES. */
+export function githubGraphqlEndpoint(host: string): string {
+  const canonicalHost = canonicalizeGitHubAuthHost(host);
+  if (canonicalHost === null) {
+    throw new Error(`Unsupported GitHub API host '${host}'`);
+  }
+  if (
+    canonicalHost === DEFAULT_GITHUB_HOST ||
+    canonicalHost.endsWith('.ghe.com')
+  ) {
+    return `${githubApiBase(canonicalHost)}/graphql`;
+  }
+  return `https://${canonicalHost}/api/graphql`;
 }
 
 /**
