@@ -1,7 +1,7 @@
 import { configErrorDiagnostic } from '@lib/config.js';
-import { githubAuthErrorDiagnostic } from '@lib/github-client.js';
 import { azureDevOpsPlugin } from '@cli/plugins/azure-devops/plugin.js';
 import { githubPlugin } from '@cli/plugins/github/plugin.js';
+import { githubPullRequestErrorDiagnostic } from '@cli/plugins/github/pull-request-client.js';
 
 export type HostOwnedPullRequestFailureDiagnostic = (
   failure: unknown
@@ -16,7 +16,7 @@ const hostOwnedBuiltinPullRequestDiagnostics = new WeakMap<
   object,
   HostOwnedPullRequestFailureDiagnostic
 >([
-  [githubPlugin, githubAuthErrorDiagnostic],
+  [githubPlugin, githubPullRequestErrorDiagnostic],
   [azureDevOpsPlugin, configErrorDiagnostic],
 ]);
 

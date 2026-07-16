@@ -1,7 +1,10 @@
 import { Effect } from 'effect';
 
 import type { AideHostServices } from '@cli/host/runtime-context.js';
-import { corePullRequestProviderOwner } from '@cli/host/plugin-descriptor.js';
+import {
+  corePullRequestProviderOwner,
+  type AideAuthScope,
+} from '@cli/host/plugin-descriptor.js';
 import type { ResolvedPullRequestProvider } from './provider-resolver.js';
 import { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import type { AuthStoreScope } from '@lib/auth-store.js';
@@ -9,10 +12,11 @@ import { loadAzureDevOpsConfig } from '@lib/config.js';
 import { GitHubClient } from '@lib/github-client.js';
 import { normalizeGitHubHost } from '@lib/github-utils.js';
 import type { PlatformContext } from '@lib/platform.js';
+import { azureDevOpsRepositoryAuthScope } from '@lib/repository-auth-scope.js';
 import {
-  azureDevOpsRepositoryAuthScope,
-  githubRepositoryAuthScope,
-} from '@lib/repository-auth-scope.js';
+  createProductionGitHubPullRequestClient,
+  createSelectedGitHubPullRequestClient,
+} from '../github/pull-request-client.js';
 
 export interface PullRequestProviderContextClients {
   readonly createGitHubClient: (options: {
@@ -55,9 +59,11 @@ function isTrustedCoreProvider(provider: ResolvedPullRequestProvider): boolean {
 
 export async function platformContextFromPullRequestProvider(
   provider: ResolvedPullRequestProvider,
-  clients: PullRequestProviderContextClients = defaultClients
+  clients?: PullRequestProviderContextClients,
+  authScope?: AideAuthScope
 ): Promise<PlatformContext> {
   const { repository } = provider.match;
+  const activeClients = clients ?? defaultClients;
 
   switch (repository.kind) {
     case 'github': {
@@ -68,13 +74,19 @@ export async function platformContextFromPullRequestProvider(
           `Pull request provider 'github' returned unsupported GitHub host '${repository.host}'`
         );
       }
-      const scope = githubRepositoryAuthScope(host);
       return {
         platform: 'github',
         host,
         owner: repository.owner,
         repo: repository.repo,
-        client: await clients.createGitHubClient({ host, scope }),
+        client:
+          clients === undefined
+            ? await createProductionGitHubPullRequestClient(host, authScope)
+            : await createSelectedGitHubPullRequestClient(
+                host,
+                authScope,
+                (options) => clients.createGitHubClient(options)
+              ),
         autoDiscovered: true,
       };
     }
@@ -86,7 +98,7 @@ export async function platformContextFromPullRequestProvider(
         org: repository.org,
         project: repository.project,
         repo: repository.repo,
-        client: await clients.createAzureDevOpsClient({ scope }),
+        client: await activeClients.createAzureDevOpsClient({ scope }),
         autoDiscovered: true,
       };
     }
@@ -100,12 +112,13 @@ export async function platformContextFromPullRequestProvider(
 export async function resolvePullRequestPlatformContextForRemote(
   hostServices: Pick<AideHostServices, 'resolvePullRequestProviderForRemote'>,
   remoteUrl: string,
-  clients: PullRequestProviderContextClients = defaultClients
+  clients?: PullRequestProviderContextClients,
+  authScope?: AideAuthScope
 ): Promise<PlatformContext> {
   const provider = await Effect.runPromise(
     hostServices.resolvePullRequestProviderForRemote(remoteUrl, {
       preferred: isTrustedCoreProvider,
     })
   );
-  return platformContextFromPullRequestProvider(provider, clients);
+  return platformContextFromPullRequestProvider(provider, clients, authScope);
 }

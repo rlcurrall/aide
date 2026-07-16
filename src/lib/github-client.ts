@@ -83,6 +83,12 @@ export interface GitHubClientDeps {
   fetch?: FetchFn;
 }
 
+export interface GitHubClientCreateOptions extends GitHubClientDeps {
+  ghAuthProbe?: GitHubAuthProbe;
+  host?: string;
+  scope?: AuthStoreScope;
+}
+
 interface ValidatedGitHubClientDeps {
   readonly spawn: SpawnSyncFn;
   readonly fetch: FetchFn;
@@ -355,6 +361,83 @@ function resolveGhAccountToken(
   }
 }
 
+type ConstructGitHubClient = (
+  mode: TransportMode,
+  host: string,
+  token?: string,
+  deps?: ValidatedGitHubClientDeps
+) => GitHubClient;
+
+let constructGitHubClient: ConstructGitHubClient = () => {
+  throw new Error('GitHub client constructor is not initialized');
+};
+
+/**
+ * Create a GitHubClient with host-bound credential selection.
+ *
+ * This immutable module binding owns the production creation algorithm.
+ * GitHubClient.create delegates here for compatibility.
+ */
+export const createGitHubClient = async (
+  opts: GitHubClientCreateOptions = {}
+): Promise<GitHubClient> => {
+  const request = resolveGitHubAuthRequest(opts);
+  if (!request.ok) {
+    throw new GitHubAuthError(request.host, request.code, request.reason);
+  }
+  const host = request.host;
+  const deps = validatedClientDependencies(opts);
+  if (deps === null) {
+    throw new GitHubAuthError(
+      host,
+      'malformed-credential',
+      'Invalid GitHub client dependencies.',
+      request.account
+    );
+  }
+  const credential = await resolveGitHubCredential(
+    request,
+    opts as GitHubCredentialResolverOptions
+  );
+  switch (credential.kind) {
+    case 'gh-cli': {
+      if (credential.account !== undefined) {
+        const token = resolveGhAccountToken(
+          credential.host,
+          credential.account,
+          deps.spawn
+        );
+        return constructGitHubClient('token', credential.host, token, deps);
+      }
+      return constructGitHubClient('gh-cli', host, undefined, deps);
+    }
+    case 'env':
+      return constructGitHubClient(
+        'token',
+        host,
+        credential.credential.token,
+        deps
+      );
+    case 'stored':
+      return constructGitHubClient('token', host, credential.token, deps);
+    case 'failure':
+      throw new GitHubAuthError(
+        host,
+        credential.code,
+        credential.reason,
+        request.account
+      );
+    case 'missing':
+    case 'unreachable':
+      throw new GitHubAuthError(
+        host,
+        'not-configured',
+        undefined,
+        request.account
+      );
+  }
+};
+
 export class GitHubClient {
   private mode: TransportMode;
   private token?: string;
@@ -379,6 +462,11 @@ export class GitHubClient {
     this.apiOrigin = new URL(githubApiBase(host)).origin;
   }
 
+  static {
+    constructGitHubClient = (mode, host, token, deps) =>
+      new GitHubClient(mode, host, token, deps);
+  }
+
   /**
    * Create a GitHubClient with host-bound credential selection.
    *
@@ -397,69 +485,9 @@ export class GitHubClient {
    * @throws {GitHubAuthError} if no auth source is available
    */
   static async create(
-    opts: {
-      ghAuthProbe?: GitHubAuthProbe;
-      host?: string;
-      scope?: AuthStoreScope;
-      spawn?: SpawnSyncFn;
-      fetch?: FetchFn;
-    } = {}
+    opts: GitHubClientCreateOptions = {}
   ): Promise<GitHubClient> {
-    const request = resolveGitHubAuthRequest(opts);
-    if (!request.ok) {
-      throw new GitHubAuthError(request.host, request.code, request.reason);
-    }
-    const host = request.host;
-    const deps = validatedClientDependencies(opts);
-    if (deps === null) {
-      throw new GitHubAuthError(
-        host,
-        'malformed-credential',
-        'Invalid GitHub client dependencies.',
-        request.account
-      );
-    }
-    const credential = await resolveGitHubCredential(
-      request,
-      opts as unknown as GitHubCredentialResolverOptions
-    );
-    switch (credential.kind) {
-      case 'gh-cli': {
-        if (credential.account !== undefined) {
-          const token = resolveGhAccountToken(
-            credential.host,
-            credential.account,
-            deps.spawn
-          );
-          return new GitHubClient('token', credential.host, token, deps);
-        }
-        return new GitHubClient('gh-cli', host, undefined, deps);
-      }
-      case 'env':
-        return new GitHubClient(
-          'token',
-          host,
-          credential.credential.token,
-          deps
-        );
-      case 'stored':
-        return new GitHubClient('token', host, credential.token, deps);
-      case 'failure':
-        throw new GitHubAuthError(
-          host,
-          credential.code,
-          credential.reason,
-          request.account
-        );
-      case 'missing':
-      case 'unreachable':
-        throw new GitHubAuthError(
-          host,
-          'not-configured',
-          undefined,
-          request.account
-        );
-    }
+    return createGitHubClient(opts);
   }
 
   // ===========================================================================

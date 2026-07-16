@@ -7,6 +7,7 @@ import {
   type AideAuthInputField,
   type AideAuthLoginRequest,
   type AideAuthLogoutRequest,
+  type AideAuthScope,
   type AidePullRequestAddCommentRequest,
   type AidePullRequestBranchLookupRequest,
   type AidePullRequestBranchLookupResult,
@@ -64,7 +65,6 @@ import {
   resolveGitHubAuthRequest,
   type CanonicalGitHubAuthRequest,
 } from '@lib/github-auth.js';
-import { githubRepositoryAuthScope } from '@lib/repository-auth-scope.js';
 import { StoredGithubSchema } from '@schemas/config.js';
 import {
   formatMigrationError,
@@ -76,6 +76,10 @@ import {
   discoverGitHubAuthAccountsEffect,
   discoverGitHubAuthStatusEffect,
 } from './auth-discovery.js';
+import {
+  createProductionGitHubPullRequestClient,
+  createSelectedGitHubPullRequestClient,
+} from './pull-request-client.js';
 
 type ProbeGithubConfig = (options: {
   readonly host?: string;
@@ -345,6 +349,21 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
   const createClient =
     opts.createClient ??
     ((options) => GitHubClient.create({ ...options, ghAuthProbe }));
+  const usesOnlyProductionClientDependencies =
+    opts.createClient === undefined &&
+    opts.ghAuthProbe === undefined &&
+    opts.probeConfig === undefined;
+  const createPullRequestClient = (
+    repositoryHost: string,
+    authScope: AideAuthScope | undefined
+  ): Promise<GitHubPullRequestClient> =>
+    usesOnlyProductionClientDependencies
+      ? createProductionGitHubPullRequestClient(repositoryHost, authScope)
+      : createSelectedGitHubPullRequestClient(
+          repositoryHost,
+          authScope,
+          createClient
+        );
   const authStatus = (request?: { readonly scope?: AuthStoreScope }) => {
     const authRequest = resolveGitHubAuthRequest({ scope: request?.scope });
     if (!authRequest.ok) {
@@ -387,10 +406,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({
-          host: repository.host,
-          scope: githubRepositoryAuthScope(repository.host),
-        });
+        const client = await createPullRequestClient(
+          repository.host,
+          request.authScope
+        );
         const options: GitHubListPROptions = {
           state: mapStatusToGitHubState(request.status),
           per_page: request.limit,
@@ -439,10 +458,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({
-          host: repository.host,
-          scope: githubRepositoryAuthScope(repository.host),
-        });
+        const client = await createPullRequestClient(
+          repository.host,
+          request.authScope
+        );
         const pr = await client.getPullRequest(
           repository.owner,
           repository.repo,
@@ -471,10 +490,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({
-          host: repository.host,
-          scope: githubRepositoryAuthScope(repository.host),
-        });
+        const client = await createPullRequestClient(
+          repository.host,
+          request.authScope
+        );
         if (client.createPullRequest === undefined) {
           throw new Error(
             'GitHub client does not support creating pull requests'
@@ -552,10 +571,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({
-          host: repository.host,
-          scope: githubRepositoryAuthScope(repository.host),
-        });
+        const client = await createPullRequestClient(
+          repository.host,
+          request.authScope
+        );
         const warnings: string[] = [];
         const updates = {
           ...(request.title === undefined ? {} : { title: request.title }),
@@ -681,10 +700,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({
-          host: repository.host,
-          scope: githubRepositoryAuthScope(repository.host),
-        });
+        const client = await createPullRequestClient(
+          repository.host,
+          request.authScope
+        );
         const [pr, files] = await Promise.all([
           client.getPullRequest(
             repository.owner,
@@ -722,10 +741,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({
-          host: repository.host,
-          scope: githubRepositoryAuthScope(repository.host),
-        });
+        const client = await createPullRequestClient(
+          repository.host,
+          request.authScope
+        );
         const [issueComments, reviewComments] = await Promise.all([
           client.getIssueComments(
             repository.owner,
@@ -763,10 +782,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({
-          host: repository.host,
-          scope: githubRepositoryAuthScope(repository.host),
-        });
+        const client = await createPullRequestClient(
+          repository.host,
+          request.authScope
+        );
         const comment =
           request.position === undefined
             ? await (async () => {
@@ -840,10 +859,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({
-          host: repository.host,
-          scope: githubRepositoryAuthScope(repository.host),
-        });
+        const client = await createPullRequestClient(
+          repository.host,
+          request.authScope
+        );
         if (client.replyToReviewComment === undefined) {
           throw new Error(
             'GitHub client does not support replying to review comments'
@@ -893,10 +912,10 @@ export function createGitHubPlugin(opts: GitHubPluginOptions = {}) {
           );
         }
 
-        const client = await createClient({
-          host: repository.host,
-          scope: githubRepositoryAuthScope(repository.host),
-        });
+        const client = await createPullRequestClient(
+          repository.host,
+          request.authScope
+        );
         const prs = await client.listPullRequests(
           repository.owner,
           repository.repo,
