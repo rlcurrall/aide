@@ -3,8 +3,18 @@ import { Effect } from 'effect';
 import * as publicPluginApi from '@aide/plugin-api';
 
 import type {
+  AideAuthScope,
   AideHostServices,
   AidePublicPluginDescriptor,
+  AidePullRequestAddCommentRequest,
+  AidePullRequestBranchLookupRequest,
+  AidePullRequestCommentsRequest,
+  AidePullRequestCreateRequest,
+  AidePullRequestDiffRequest,
+  AidePullRequestListRequest,
+  AidePullRequestReplyCommentRequest,
+  AidePullRequestUpdateRequest,
+  AidePullRequestViewRequest,
 } from '@aide/plugin-api';
 import {
   getAuthProviderStatus,
@@ -34,6 +44,12 @@ export type { GitHubAuthCatalogLive as _NoGitHubCatalogLiveExport } from '@aide/
 export type { GitHubAuthCatalogExecutor as _NoGitHubCatalogExecutorExport } from '@aide/plugin-api';
 // @ts-expect-error The subprocess ownership seam is not exported by @aide/plugin-api.
 export type { GitHubAuthCatalogChild as _NoGitHubCatalogChildExport } from '@aide/plugin-api';
+// @ts-expect-error PR auth-scope selectors are source-internal host authority.
+export type { PullRequestProviderAuthScopeSelector as _NoPrAuthSelectorExport } from '@aide/plugin-api';
+// @ts-expect-error PR auth-scope selection errors are source-internal diagnostic authority.
+export type { PullRequestAuthScopeSelectionError as _NoPrAuthSelectionErrorExport } from '@aide/plugin-api';
+// @ts-expect-error PR invocation selection timeouts are source-internal host authority.
+export type { AideInternalPullRequestInvocationOptions as _NoInternalPrInvocationOptionsExport } from '@aide/plugin-api';
 
 type PublicCapabilities = NonNullable<
   AidePublicPluginDescriptor['capabilities']
@@ -51,8 +67,17 @@ type PublicPullRequestOperations = NonNullable<
 >;
 
 type IsNever<T> = [T] extends [never] ? true : false;
+type IsExactly<TLeft, TRight> =
+  (<T>() => T extends TLeft ? 1 : 2) extends <T>() => T extends TRight ? 1 : 2
+    ? (<T>() => T extends TRight ? 1 : 2) extends <T>() => T extends TLeft
+        ? 1
+        : 2
+      ? true
+      : false
+    : false;
 type Environment<T extends Effect.Effect<unknown, unknown, unknown>> =
   Effect.Effect.Context<T>;
+type HasAuthScope<T> = 'authScope' extends keyof T ? true : false;
 
 const publicAuthIsServiceFree: IsNever<
   Environment<ReturnType<PublicAuth['status']>>
@@ -158,6 +183,39 @@ const publicCapabilityChecks = [
   publicPrBranchLookupIsServiceFree,
 ] satisfies readonly true[];
 
+const publicProviderRequestsCarryDetachedScopes = [
+  true as HasAuthScope<AidePullRequestListRequest>,
+  true as HasAuthScope<AidePullRequestViewRequest>,
+  true as HasAuthScope<AidePullRequestCreateRequest>,
+  true as HasAuthScope<AidePullRequestUpdateRequest>,
+  true as HasAuthScope<AidePullRequestDiffRequest>,
+  true as HasAuthScope<AidePullRequestCommentsRequest>,
+  true as HasAuthScope<AidePullRequestAddCommentRequest>,
+  true as HasAuthScope<AidePullRequestReplyCommentRequest>,
+  true as HasAuthScope<AidePullRequestBranchLookupRequest>,
+] satisfies readonly true[];
+
+type PublicListInvocationRequest = NonNullable<
+  Parameters<AideHostServices['listPullRequestsForRemote']>[1]
+>;
+type PublicListInvocationOptions = NonNullable<
+  Parameters<AideHostServices['listPullRequestsForRemote']>[2]
+>;
+const publicInvocationOmitsAuthScope: HasAuthScope<PublicListInvocationRequest> = false;
+const publicOptionsAreDeadlineOnly: IsExactly<
+  keyof PublicListInvocationOptions,
+  'operationTimeout' | 'matcherTimeout'
+> = true;
+const publicHostOmitsSelector: 'withPullRequestAuthScopeSelector' extends keyof AideHostServices
+  ? true
+  : false = false;
+const detachedScopeShape: AideAuthScope = Object.freeze({
+  id: 'external:host:example.test:account:ada',
+  providerId: 'external',
+  host: 'example.test',
+  account: 'ada',
+});
+
 describe('@aide/plugin-api Effect boundary', () => {
   test('does not export GitHub auth catalog services, layers, executors, or process seams', () => {
     expect(
@@ -175,6 +233,24 @@ describe('@aide/plugin-api Effect boundary', () => {
   test('keeps every public capability operation service-free', () => {
     expect(publicCapabilityChecks).toEqual(
       Array(publicCapabilityChecks.length).fill(true)
+    );
+  });
+
+  test('exports detached provider request scopes without public selection authority', () => {
+    expect(publicProviderRequestsCarryDetachedScopes).toEqual(
+      Array(9).fill(true)
+    );
+    expect(publicInvocationOmitsAuthScope).toBe(false);
+    expect(publicOptionsAreDeadlineOnly).toBe(true);
+    expect(publicHostOmitsSelector).toBe(false);
+    expect(detachedScopeShape.account).toBe('ada');
+    expect(publicPluginApi.AIDE_PLUGIN_API_VERSION).toBe(1);
+    expect('PullRequestProviderAuthScopeSelector' in publicPluginApi).toBe(
+      false
+    );
+    expect('PullRequestAuthScopeSelectionError' in publicPluginApi).toBe(false);
+    expect('AideInternalPullRequestInvocationOptions' in publicPluginApi).toBe(
+      false
     );
   });
 

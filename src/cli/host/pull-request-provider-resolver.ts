@@ -13,6 +13,7 @@ import {
   type PluginCapability,
 } from './command-registry.js';
 import type {
+  AideAuthScope,
   AideInternalPullRequestProviderCapability as AideInternalPullRequestProviderCapabilityShape,
   AidePullRequestAddCommentRequest,
   AidePullRequestBranchLookupRequest,
@@ -70,11 +71,32 @@ const arrayIsArray = Array.isArray;
 const objectCreate = Object.create;
 const objectDefineProperty = Object.defineProperty;
 const objectFreeze = Object.freeze;
+const objectGetOwnPropertyDescriptors = Object.getOwnPropertyDescriptors;
 const objectHasOwn = Object.hasOwn;
 const reflectGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
 const reflectGetPrototypeOf = Reflect.getPrototypeOf;
 const reflectOwnKeys = Reflect.ownKeys;
 const hostUrlConstructor = URL;
+
+function frozenHostRecord<T extends object>(properties: T): T {
+  return objectFreeze(
+    objectCreate(null, objectGetOwnPropertyDescriptors(properties)) as T
+  );
+}
+
+function ownDataPropertyValue<T>(
+  value: object,
+  key: PropertyKey
+): T | undefined {
+  try {
+    const descriptor = reflectGetOwnPropertyDescriptor(value, key);
+    return descriptor !== undefined && objectHasOwn(descriptor, 'value')
+      ? (descriptor.value as T)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 const REDACTED_PULL_REQUEST_PROVIDER_LOOKUP = '<redacted>';
 const MAX_PULL_REQUEST_PROVIDER_LOOKUP_LENGTH = 4_096;
@@ -419,6 +441,20 @@ export interface PullRequestProviderOperationOptions {
   readonly matcherTimeout?: Duration.DurationInput;
 }
 
+export type PullRequestProviderAuthScopeSelector = (
+  provider: ResolvedPullRequestProvider
+) => Effect.Effect<
+  AideAuthScope | undefined,
+  PullRequestAuthScopeSelectionError,
+  never
+>;
+
+/** @internal Trusted host invocation settings. Never export from plugin-api. */
+export interface AideInternalPullRequestInvocationOptions extends PullRequestProviderOperationOptions {
+  readonly authScopeSelector?: PullRequestProviderAuthScopeSelector;
+  readonly selectionTimeout?: Duration.DurationInput;
+}
+
 export interface PullRequestProviderOperationContext<
   TMatch extends AidePullRequestProviderMatch,
   TResult,
@@ -430,40 +466,46 @@ export interface PullRequestProviderOperationContext<
     options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
   ) => Effect.Effect<
     AidePullRequestDiffResult,
-    PullRequestProviderOperationExecutionError<'getPullRequestDiff'>
+    | PullRequestProviderOperationExecutionError<'getPullRequestDiff'>
+    | PullRequestAuthScopeSelectionError
   >;
   readonly updatePullRequest: (
-    request: Omit<AidePullRequestUpdateRequest, 'match'>,
+    request: Omit<AidePullRequestUpdateRequest, 'match' | 'authScope'>,
     options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
   ) => Effect.Effect<
     AidePullRequestUpdateResult,
-    PullRequestProviderOperationExecutionError<'updatePullRequest'>
+    | PullRequestProviderOperationExecutionError<'updatePullRequest'>
+    | PullRequestAuthScopeSelectionError
   >;
   readonly listPullRequestComments: (
     request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
     options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
   ) => Effect.Effect<
     AidePullRequestCommentsResult,
-    PullRequestProviderOperationExecutionError<'listPullRequestComments'>
+    | PullRequestProviderOperationExecutionError<'listPullRequestComments'>
+    | PullRequestAuthScopeSelectionError
   >;
   readonly addPullRequestComment: (
-    request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+    request: Omit<AidePullRequestAddCommentRequest, 'match' | 'authScope'>,
     options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
-    PullRequestProviderOperationExecutionError<'addPullRequestComment'>
+    | PullRequestProviderOperationExecutionError<'addPullRequestComment'>
+    | PullRequestAuthScopeSelectionError
   >;
   readonly replyToPullRequestComment: (
-    request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+    request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'authScope'>,
     options?: Pick<PullRequestProviderOperationOptions, 'operationTimeout'>
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
-    PullRequestProviderOperationExecutionError<'replyToPullRequestComment'>
+    | PullRequestProviderOperationExecutionError<'replyToPullRequestComment'>
+    | PullRequestAuthScopeSelectionError
   >;
 }
 
 const MAX_HOST_PULL_REQUEST_DIAGNOSTIC_LENGTH = 16_384;
 const hostPullRequestProviderDiagnostics = new WeakMap<object, string>();
+const pullRequestAuthScopeSelectionDiagnostics = new WeakMap<object, string>();
 const pullRequestProviderFailureCauses = new WeakMap<object, unknown>();
 const hostPullRequestProviderMatcherFailureReasons = new WeakMap<
   object,
@@ -504,6 +546,66 @@ function hostPullRequestProviderMatcherFailureCause(message: string): object {
   const cause = objectFreeze(objectCreate(null) as object);
   hostPullRequestProviderMatcherFailureReasons.set(cause, message);
   return cause;
+}
+
+function hostPullRequestProviderOperationFailureCause(): object {
+  return objectFreeze(objectCreate(null) as object);
+}
+
+const GENERIC_PULL_REQUEST_AUTH_SELECTION_DIAGNOSTIC =
+  'Pull request authentication selection failed.';
+const TIMEOUT_PULL_REQUEST_AUTH_SELECTION_DIAGNOSTIC =
+  'Pull request authentication selection timed out.';
+const unsafePullRequestAuthSelectionDiagnostic =
+  // oxlint-disable-next-line no-control-regex -- source-internal diagnostics reject control text
+  /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/u;
+
+/** @internal Source-owned typed failure with WeakMap-certified display text. */
+export class PullRequestAuthScopeSelectionError extends Data.TaggedError(
+  'PullRequestAuthScopeSelectionError'
+)<Record<never, never>> {
+  constructor() {
+    super();
+  }
+}
+
+/** @internal Install already-safe selection-domain text without public fields. */
+export function certifiedPullRequestAuthScopeSelectionError(
+  diagnostic: string
+): PullRequestAuthScopeSelectionError {
+  if (
+    typeof diagnostic !== 'string' ||
+    diagnostic.length === 0 ||
+    diagnostic.length > MAX_HOST_PULL_REQUEST_DIAGNOSTIC_LENGTH ||
+    diagnostic.trim().length === 0 ||
+    unsafePullRequestAuthSelectionDiagnostic.test(diagnostic)
+  ) {
+    throw new Error('Invalid pull request authentication selection diagnostic');
+  }
+  const error = new PullRequestAuthScopeSelectionError();
+  pullRequestAuthScopeSelectionDiagnostics.set(error, diagnostic);
+  return error;
+}
+
+function genericPullRequestAuthScopeSelectionError(): PullRequestAuthScopeSelectionError {
+  return certifiedPullRequestAuthScopeSelectionError(
+    GENERIC_PULL_REQUEST_AUTH_SELECTION_DIAGNOSTIC
+  );
+}
+
+function timeoutPullRequestAuthScopeSelectionError(): PullRequestAuthScopeSelectionError {
+  return certifiedPullRequestAuthScopeSelectionError(
+    TIMEOUT_PULL_REQUEST_AUTH_SELECTION_DIAGNOSTIC
+  );
+}
+
+function certifiedPullRequestAuthSelectionDiagnostic(
+  value: unknown
+): string | undefined {
+  return (typeof value === 'object' && value !== null) ||
+    typeof value === 'function'
+    ? pullRequestAuthScopeSelectionDiagnostics.get(value)
+    : undefined;
 }
 
 export class UnsupportedPullRequestProviderError extends Data.TaggedError(
@@ -737,7 +839,9 @@ export class PullRequestProviderOperationError<
 export function pullRequestProviderErrorMessage(
   error: unknown
 ): string | undefined {
-  const message = hostPullRequestProviderDiagnostics.get(error as object);
+  const message =
+    certifiedPullRequestAuthSelectionDiagnostic(error) ??
+    hostPullRequestProviderDiagnostics.get(error as object);
   return typeof message === 'string' &&
     message.length > 0 &&
     message.length <= MAX_HOST_PULL_REQUEST_DIAGNOSTIC_LENGTH
@@ -898,11 +1002,19 @@ function hostPullRequestProviderOperationError<
   TOperation extends PullRequestProviderOperationName,
 >(
   args: OperationFailureArgs<TOperation>,
-  entry?: PluginCapability<AidePullRequestProviderCapability>
+  entry?: PluginCapability<AidePullRequestProviderCapability>,
+  sanitizeCause = false
 ): PullRequestProviderOperationError<TOperation> {
   const certified = certifiedPullRequestProviderDiagnostic(entry, args.cause);
   return captureHostPullRequestDiagnostic(
-    new PullRequestProviderOperationError(args),
+    new PullRequestProviderOperationError(
+      sanitizeCause
+        ? {
+            ...args,
+            cause: hostPullRequestProviderOperationFailureCause(),
+          }
+        : args
+    ),
     certified ??
       `Pull request provider '${args.providerId}' from plugin '${args.pluginId}' failed during ${args.operation}`
   );
@@ -951,12 +1063,245 @@ export type PullRequestProviderOperationInvocationError<
     PullRequestProviderOperationName,
 > =
   | PullRequestProviderResolutionError
+  | PullRequestAuthScopeSelectionError
   | PullRequestProviderOperationExecutionError<TOperation>;
 
 const defaultMatcherTimeout = '2 seconds' satisfies Duration.DurationInput;
 const defaultOperationTimeout = '10 seconds' satisfies Duration.DurationInput;
+const defaultSelectionTimeout = '10 seconds' satisfies Duration.DurationInput;
 
 const isNodeProxy = nodeUtilTypes.isProxy;
+const MAX_PULL_REQUEST_AUTH_SCOPE_ID_LENGTH = 1_024;
+const MAX_PULL_REQUEST_AUTH_SCOPE_HOST_LENGTH = 253;
+const MAX_PULL_REQUEST_AUTH_SCOPE_IDENTITY_LENGTH = 256;
+const unsafePullRequestAuthScopeIdentity =
+  // oxlint-disable-next-line no-control-regex -- identity snapshots reject control and bidi text
+  /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/u;
+
+type AuthScopeStringSnapshot =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'value'; readonly value: string }
+  | { readonly kind: 'invalid' };
+
+function isWellFormedPullRequestAuthScopeText(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      if (index + 1 >= value.length) return false;
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return false;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function snapshotAuthScopeString(
+  value: object,
+  field: 'id' | 'providerId' | 'host' | 'org' | 'account',
+  maximumLength: number
+): AuthScopeStringSnapshot {
+  try {
+    const descriptor = reflectGetOwnPropertyDescriptor(value, field);
+    if (descriptor === undefined) return { kind: 'absent' };
+    if (!objectHasOwn(descriptor, 'value')) return { kind: 'invalid' };
+    if (descriptor.value === undefined && field !== 'id') {
+      return { kind: 'absent' };
+    }
+    if (
+      typeof descriptor.value !== 'string' ||
+      descriptor.value.length === 0 ||
+      descriptor.value.length > maximumLength ||
+      descriptor.value.trim() !== descriptor.value ||
+      !isWellFormedPullRequestAuthScopeText(descriptor.value) ||
+      unsafePullRequestAuthScopeIdentity.test(descriptor.value)
+    ) {
+      return { kind: 'invalid' };
+    }
+    return { kind: 'value', value: descriptor.value };
+  } catch {
+    return { kind: 'invalid' };
+  }
+}
+
+/** Pure hostile-input snapshot used only after provider resolution. */
+function snapshotPullRequestAuthScope(
+  value: unknown,
+  providerId: string
+): AideAuthScope | undefined | null {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    isNodeProxy(value) ||
+    arrayIsArray(value)
+  ) {
+    return null;
+  }
+  try {
+    const prototype = reflectGetPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+  } catch {
+    return null;
+  }
+
+  const id = snapshotAuthScopeString(
+    value,
+    'id',
+    MAX_PULL_REQUEST_AUTH_SCOPE_ID_LENGTH
+  );
+  const selectedProviderId = snapshotAuthScopeString(
+    value,
+    'providerId',
+    MAX_PULL_REQUEST_AUTH_SCOPE_IDENTITY_LENGTH
+  );
+  const host = snapshotAuthScopeString(
+    value,
+    'host',
+    MAX_PULL_REQUEST_AUTH_SCOPE_HOST_LENGTH
+  );
+  const org = snapshotAuthScopeString(
+    value,
+    'org',
+    MAX_PULL_REQUEST_AUTH_SCOPE_IDENTITY_LENGTH
+  );
+  const account = snapshotAuthScopeString(
+    value,
+    'account',
+    MAX_PULL_REQUEST_AUTH_SCOPE_IDENTITY_LENGTH
+  );
+  if (
+    id.kind !== 'value' ||
+    selectedProviderId.kind === 'invalid' ||
+    host.kind === 'invalid' ||
+    org.kind === 'invalid' ||
+    account.kind === 'invalid' ||
+    (selectedProviderId.kind === 'value' &&
+      selectedProviderId.value !== providerId)
+  ) {
+    return null;
+  }
+
+  return frozenHostRecord({
+    id: id.value,
+    ...(selectedProviderId.kind === 'value'
+      ? { providerId: selectedProviderId.value }
+      : {}),
+    ...(host.kind === 'value' ? { host: host.value } : {}),
+    ...(org.kind === 'value' ? { org: org.value } : {}),
+    ...(account.kind === 'value' ? { account: account.value } : {}),
+  });
+}
+
+function selectionErrorFromCause(
+  cause: Cause.Cause<unknown>
+): PullRequestAuthScopeSelectionError {
+  const failures = Cause.failures(cause);
+  const defects = Cause.defects(cause);
+  if (
+    !Cause.isInterrupted(cause) &&
+    failures.length === 1 &&
+    defects.length === 0
+  ) {
+    let failure: unknown;
+    for (const candidate of failures) {
+      failure = candidate;
+      break;
+    }
+    if (certifiedPullRequestAuthSelectionDiagnostic(failure) !== undefined) {
+      return failure as PullRequestAuthScopeSelectionError;
+    }
+  }
+  return genericPullRequestAuthScopeSelectionError();
+}
+
+export function selectAndSnapshotPullRequestAuthScope(
+  provider: ResolvedPullRequestProviderCandidate,
+  options: AideInternalPullRequestInvocationOptions = {}
+): Effect.Effect<
+  AideAuthScope | undefined,
+  PullRequestAuthScopeSelectionError,
+  never
+> {
+  const selector = ownDataPropertyValue<PullRequestProviderAuthScopeSelector>(
+    options,
+    'authScopeSelector'
+  );
+  if (selector === undefined) return Effect.succeed(undefined);
+  const selectionTimeout = ownDataPropertyValue<Duration.DurationInput>(
+    options,
+    'selectionTimeout'
+  );
+
+  return invokePublicCapabilityEffect<
+    AideAuthScope | undefined,
+    PullRequestAuthScopeSelectionError,
+    AideAuthScope | undefined,
+    PullRequestAuthScopeSelectionError,
+    PullRequestAuthScopeSelectionError
+  >(
+    () => selector(stripProviderCapability(provider)),
+    {
+      onCallbackThrow: genericPullRequestAuthScopeSelectionError,
+      onInvalidReturn: genericPullRequestAuthScopeSelectionError,
+      onCompositionFailure: genericPullRequestAuthScopeSelectionError,
+      onLaunchFailure: genericPullRequestAuthScopeSelectionError,
+    },
+    (effect) =>
+      Effect.matchCauseEffect(effect, {
+        onFailure: (cause) => Effect.fail(selectionErrorFromCause(cause)),
+        onSuccess: (selected) => {
+          const snapshot = snapshotPullRequestAuthScope(
+            selected,
+            provider.providerId
+          );
+          return snapshot === null
+            ? Effect.fail(genericPullRequestAuthScopeSelectionError())
+            : Effect.succeed(snapshot);
+        },
+      })
+  ).pipe(
+    Effect.timeoutFail({
+      duration: selectionTimeout ?? defaultSelectionTimeout,
+      onTimeout: timeoutPullRequestAuthScopeSelectionError,
+    })
+  );
+}
+
+/**
+ * Reject public request/option smuggling using descriptors only. Proxies fail
+ * without invoking traps; inherited lookalikes are intentionally ignored.
+ */
+export function rejectPublicPullRequestAuthSelectionInput(
+  ...values: readonly unknown[]
+): PullRequestAuthScopeSelectionError | undefined {
+  for (const value of values) {
+    if (
+      (typeof value !== 'object' && typeof value !== 'function') ||
+      value === null
+    ) {
+      continue;
+    }
+    try {
+      if (isNodeProxy(value)) {
+        return genericPullRequestAuthScopeSelectionError();
+      }
+      if (
+        reflectGetOwnPropertyDescriptor(value, 'authScope') !== undefined ||
+        reflectGetOwnPropertyDescriptor(value, 'authScopeSelector') !==
+          undefined
+      ) {
+        return genericPullRequestAuthScopeSelectionError();
+      }
+    } catch {
+      return genericPullRequestAuthScopeSelectionError();
+    }
+  }
+  return undefined;
+}
+
 const MAX_PR_RESULT_DEPTH = 8;
 const MAX_PR_RESULT_ARRAY_LENGTH = 1_000;
 const MAX_PR_RESULT_RECORD_FIELDS = 128;
@@ -1936,8 +2281,8 @@ function snapshotRepositoryRef(
       ) {
         return null;
       }
-      return Object.freeze({
-        kind: 'github',
+      return frozenHostRecord({
+        kind: 'github' as const,
         host: value.host,
         owner: value.owner,
         repo: value.repo,
@@ -1950,8 +2295,8 @@ function snapshotRepositoryRef(
       ) {
         return null;
       }
-      return Object.freeze({
-        kind: 'azure-devops',
+      return frozenHostRecord({
+        kind: 'azure-devops' as const,
         org: value.org,
         project: value.project,
         repo: value.repo,
@@ -1965,8 +2310,8 @@ function snapshotRepositoryRef(
       ) {
         return null;
       }
-      return Object.freeze({
-        kind: 'external',
+      return frozenHostRecord({
+        kind: 'external' as const,
         providerId: value.providerId,
         displayName: value.displayName,
         ...(metadata === undefined ? {} : { metadata }),
@@ -2058,7 +2403,7 @@ function snapshotPullRequestRef(value: unknown): AidePullRequestRef | null {
     return null;
   }
 
-  return Object.freeze({ number: value.number });
+  return frozenHostRecord({ number: value.number });
 }
 
 function snapshotPullRequestAuthor(
@@ -3042,7 +3387,7 @@ function validateProviderMatch<TMatch extends AidePullRequestProviderMatch>(
       return invalid(`${source} match must not include pull request ref`);
     }
     return Effect.succeed(
-      Object.freeze({
+      frozenHostRecord({
         source,
         repository,
         ...(hasPriority ? { priority } : {}),
@@ -3061,7 +3406,7 @@ function validateProviderMatch<TMatch extends AidePullRequestProviderMatch>(
   }
 
   return Effect.succeed(
-    Object.freeze({
+    frozenHostRecord({
       source,
       repository,
       pullRequest,
@@ -3124,6 +3469,10 @@ function collectMatches<TMatch extends AidePullRequestProviderMatch>(
   | PullRequestProviderInvocationError
   | PullRequestProviderTimeoutError
 > {
+  const matcherTimeout = ownDataPropertyValue<Duration.DurationInput>(
+    options,
+    'matcherTimeout'
+  );
   return Effect.forEach(
     providers,
     (entry) => {
@@ -3148,7 +3497,7 @@ function collectMatches<TMatch extends AidePullRequestProviderMatch>(
         })
       ).pipe(
         Effect.timeoutFail({
-          duration: options.matcherTimeout ?? defaultMatcherTimeout,
+          duration: matcherTimeout ?? defaultMatcherTimeout,
           onTimeout: () =>
             hostPullRequestProviderTimeoutError({
               source,
@@ -3227,10 +3576,11 @@ function selectProvider<TMatch extends AidePullRequestProviderMatch>(
     );
   }
 
+  const preferred = ownDataPropertyValue<
+    PullRequestProviderResolutionOptions<TMatch>['preferred']
+  >(options, 'preferred');
   const preferredMatches =
-    options.preferred === undefined
-      ? []
-      : filterHostArray(matches, options.preferred);
+    preferred === undefined ? [] : filterHostArray(matches, preferred);
   const selectable =
     (hostArrayLength(preferredMatches) ?? 0) > 0 ? preferredMatches : matches;
   const { winner, tied } = selectHighestPriorityHostArray(
@@ -3260,7 +3610,7 @@ function selectProvider<TMatch extends AidePullRequestProviderMatch>(
 function stripProviderCapability<TMatch extends AidePullRequestProviderMatch>(
   provider: ResolvedPullRequestProviderCandidate<TMatch>
 ): ResolvedPullRequestProvider<TMatch> {
-  return Object.freeze({
+  return frozenHostRecord({
     pluginId: provider.pluginId,
     providerId: provider.providerId,
     features: provider.features,
@@ -3269,14 +3619,26 @@ function stripProviderCapability<TMatch extends AidePullRequestProviderMatch>(
   });
 }
 
+function invokeBoundPullRequestOperation<A, E>(
+  request: unknown,
+  options: unknown,
+  invoke: () => Effect.Effect<A, E, never>
+): Effect.Effect<A, E | PullRequestAuthScopeSelectionError, never> {
+  const rejection = rejectPublicPullRequestAuthSelectionInput(request, options);
+  return rejection === undefined
+    ? Effect.suspend(invoke)
+    : Effect.fail(rejection);
+}
+
 function bindProviderOperationContext<
   TMatch extends AidePullRequestProviderMatch,
   TResult,
 >(
   provider: ResolvedPullRequestProviderCandidate<TMatch>,
-  result: TResult
+  result: TResult,
+  authScope: AideAuthScope | undefined
 ): PullRequestProviderOperationContext<TMatch, TResult> {
-  return Object.freeze({
+  return frozenHostRecord({
     provider: stripProviderCapability(provider),
     result,
     getPullRequestDiff: (
@@ -3285,35 +3647,60 @@ function bindProviderOperationContext<
         PullRequestProviderOperationOptions,
         'operationTimeout'
       > = {}
-    ) => getPullRequestDiffWithProvider(provider, request, options),
+    ) =>
+      invokeBoundPullRequestOperation(request, options, () =>
+        getPullRequestDiffWithProvider(provider, request, options, authScope)
+      ),
     updatePullRequest: (
-      request: Omit<AidePullRequestUpdateRequest, 'match'>,
+      request: Omit<AidePullRequestUpdateRequest, 'match' | 'authScope'>,
       options: Pick<
         PullRequestProviderOperationOptions,
         'operationTimeout'
       > = {}
-    ) => updatePullRequestWithProvider(provider, request, options),
+    ) =>
+      invokeBoundPullRequestOperation(request, options, () =>
+        updatePullRequestWithProvider(provider, request, options, authScope)
+      ),
     listPullRequestComments: (
       request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
       options: Pick<
         PullRequestProviderOperationOptions,
         'operationTimeout'
       > = {}
-    ) => listPullRequestCommentsWithProvider(provider, request, options),
+    ) =>
+      invokeBoundPullRequestOperation(request, options, () =>
+        listPullRequestCommentsWithProvider(
+          provider,
+          request,
+          options,
+          authScope
+        )
+      ),
     addPullRequestComment: (
-      request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+      request: Omit<AidePullRequestAddCommentRequest, 'match' | 'authScope'>,
       options: Pick<
         PullRequestProviderOperationOptions,
         'operationTimeout'
       > = {}
-    ) => addPullRequestCommentWithProvider(provider, request, options),
+    ) =>
+      invokeBoundPullRequestOperation(request, options, () =>
+        addPullRequestCommentWithProvider(provider, request, options, authScope)
+      ),
     replyToPullRequestComment: (
-      request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+      request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'authScope'>,
       options: Pick<
         PullRequestProviderOperationOptions,
         'operationTimeout'
       > = {}
-    ) => replyToPullRequestCommentWithProvider(provider, request, options),
+    ) =>
+      invokeBoundPullRequestOperation(request, options, () =>
+        replyToPullRequestCommentWithProvider(
+          provider,
+          request,
+          options,
+          authScope
+        )
+      ),
   });
 }
 
@@ -3381,6 +3768,10 @@ function invokeRepositoryMatcher(
   | PullRequestProviderInvocationError
   | PullRequestProviderTimeoutError
 > {
+  const matcherTimeout = ownDataPropertyValue<Duration.DurationInput>(
+    options,
+    'matcherTimeout'
+  );
   const matchRepository = capability.matchRepository;
   if (matchRepository === undefined) {
     return Effect.succeed(null);
@@ -3447,7 +3838,7 @@ function invokeRepositoryMatcher(
       )
   ).pipe(
     Effect.timeoutFail({
-      duration: options.matcherTimeout ?? defaultMatcherTimeout,
+      duration: matcherTimeout ?? defaultMatcherTimeout,
       onTimeout: () =>
         hostPullRequestProviderTimeoutError({
           source: 'repository-ref',
@@ -3600,7 +3991,7 @@ function collectRepositoryRefMatches(
       return Effect.succeed([]);
     }
 
-    const match = Object.freeze({
+    const match = frozenHostRecord({
       source: 'repository-ref' as const,
       repository,
     });
@@ -3750,6 +4141,40 @@ export function resolvePullRequestProviderForRepositoryInput(
   ).pipe(Effect.map(stripProviderCapability));
 }
 
+function mapPullRequestProviderOperationCause<
+  TOperation extends PullRequestOperationCaptureSchemaName,
+>(
+  cause: Cause.Cause<unknown>,
+  provider: ResolvedPullRequestProviderCandidate,
+  operation: TOperation,
+  sanitizeFailureCause: boolean
+): Cause.Cause<PullRequestProviderOperationError<TOperation>> {
+  const wrapFailure = (failure: unknown) =>
+    hostPullRequestProviderOperationError(
+      {
+        pluginId: provider.pluginId,
+        providerId: provider.providerId,
+        operation,
+        cause: failure,
+      },
+      pullRequestProviderCandidateEntries.get(provider),
+      sanitizeFailureCause
+    );
+
+  if (!sanitizeFailureCause) {
+    return Cause.map(cause, wrapFailure);
+  }
+
+  return Cause.match(cause, {
+    onEmpty: Cause.empty,
+    onFail: (failure) => Cause.fail(wrapFailure(failure)),
+    onDie: () => Cause.die(hostPullRequestProviderOperationFailureCause()),
+    onInterrupt: (fiberId) => Cause.interrupt(fiberId),
+    onSequential: (left, right) => Cause.sequential(left, right),
+    onParallel: (left, right) => Cause.parallel(left, right),
+  });
+}
+
 function invokePullRequestProviderOperation<
   A,
   B,
@@ -3769,7 +4194,8 @@ function invokePullRequestProviderOperation<
     B,
     InvalidPullRequestProviderOperationResultError<TOperation>
   >,
-  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {},
+  sanitizeFailureCause = false
 ): Effect.Effect<
   B,
   | UnsupportedPullRequestProviderOperationError<TOperation>
@@ -3823,16 +4249,11 @@ function invokePullRequestProviderOperation<
     (effect) =>
       Effect.flatMap(
         Effect.mapErrorCause(effect, (cause) =>
-          Cause.map(cause, (failure) =>
-            hostPullRequestProviderOperationError(
-              {
-                pluginId: provider.pluginId,
-                providerId: provider.providerId,
-                operation: operationName,
-                cause: failure,
-              },
-              pullRequestProviderCandidateEntries.get(provider)
-            )
+          mapPullRequestProviderOperationCause(
+            cause,
+            provider,
+            operationName,
+            sanitizeFailureCause
           )
         ),
         (result) => {
@@ -3857,7 +4278,11 @@ function invokePullRequestProviderOperation<
       )
   ).pipe(
     Effect.timeoutFail({
-      duration: options.operationTimeout ?? defaultOperationTimeout,
+      duration:
+        ownDataPropertyValue<Duration.DurationInput>(
+          options,
+          'operationTimeout'
+        ) ?? defaultOperationTimeout,
       onTimeout: () =>
         deadlineError({
           pluginId: provider.pluginId,
@@ -3873,13 +4298,22 @@ export function listPullRequestsWithProvider(
   provider: ResolvedPullRequestProviderCandidate<
     AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
   >,
-  request: Omit<AidePullRequestListRequest, 'match'>,
-  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+  request: Omit<AidePullRequestListRequest, 'match' | 'authScope'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {},
+  authScope?: AideAuthScope
 ): Effect.Effect<
   AidePullRequestListResult,
   PullRequestProviderOperationExecutionError<'listPullRequests'>
 > {
-  const operationRequest = Object.freeze({ ...request, match: provider.match });
+  const operationRequest = frozenHostRecord({
+    match: provider.match,
+    ...(authScope === undefined ? {} : { authScope }),
+    ...(request.status === undefined ? {} : { status: request.status }),
+    ...(request.limit === undefined ? {} : { limit: request.limit }),
+    ...(request.createdBy === undefined
+      ? {}
+      : { createdBy: request.createdBy }),
+  });
   return invokePullRequestProviderOperation(
     provider,
     'listPullRequests',
@@ -3887,7 +4321,8 @@ export function listPullRequestsWithProvider(
     provider.capability.operations?.listPullRequests,
     operationRequest,
     (result) => validatePullRequestListResult(provider, result),
-    options
+    options,
+    authScope !== undefined
   );
 }
 
@@ -3895,14 +4330,16 @@ export function createPullRequestWithProvider(
   provider: ResolvedPullRequestProviderCandidate<
     AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
   >,
-  request: Omit<AidePullRequestCreateRequest, 'match'>,
-  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+  request: Omit<AidePullRequestCreateRequest, 'match' | 'authScope'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {},
+  authScope?: AideAuthScope
 ): Effect.Effect<
   AidePullRequestCreateResult,
   PullRequestProviderOperationExecutionError<'createPullRequest'>
 > {
-  const operationRequest = Object.freeze({
+  const operationRequest = frozenHostRecord({
     match: provider.match,
+    ...(authScope === undefined ? {} : { authScope }),
     title: request.title,
     ...(request.description === undefined
       ? {}
@@ -3921,21 +4358,24 @@ export function createPullRequestWithProvider(
     provider.capability.operations?.createPullRequest,
     operationRequest,
     (result) => validatePullRequestCreateResult(provider, result),
-    options
+    options,
+    authScope !== undefined
   );
 }
 
 export function getPullRequestWithProvider(
   provider: ResolvedPullRequestProviderCandidate,
   request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
-  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {},
+  authScope?: AideAuthScope
 ): Effect.Effect<
   AidePullRequestViewResult,
   PullRequestProviderOperationExecutionError<'getPullRequest'>
 > {
-  const operationRequest = Object.freeze({
+  const operationRequest = frozenHostRecord({
     match: provider.match,
-    pullRequest: Object.freeze({
+    ...(authScope === undefined ? {} : { authScope }),
+    pullRequest: frozenHostRecord({
       number: request.pullRequest.number,
     }),
   });
@@ -3947,21 +4387,24 @@ export function getPullRequestWithProvider(
     operationRequest,
     (result) =>
       validatePullRequestViewResult(provider, operationRequest, result),
-    options
+    options,
+    authScope !== undefined
   );
 }
 
 export function updatePullRequestWithProvider(
   provider: ResolvedPullRequestProviderCandidate,
-  request: Omit<AidePullRequestUpdateRequest, 'match'>,
-  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+  request: Omit<AidePullRequestUpdateRequest, 'match' | 'authScope'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {},
+  authScope?: AideAuthScope
 ): Effect.Effect<
   AidePullRequestUpdateResult,
   PullRequestProviderOperationExecutionError<'updatePullRequest'>
 > {
-  const operationRequest = Object.freeze({
+  const operationRequest = frozenHostRecord({
     match: provider.match,
-    pullRequest: Object.freeze({
+    ...(authScope === undefined ? {} : { authScope }),
+    pullRequest: frozenHostRecord({
       number: request.pullRequest.number,
     }),
     ...(request.title === undefined ? {} : { title: request.title }),
@@ -3990,21 +4433,24 @@ export function updatePullRequestWithProvider(
     operationRequest,
     (result) =>
       validatePullRequestUpdateResult(provider, operationRequest, result),
-    options
+    options,
+    authScope !== undefined
   );
 }
 
 export function getPullRequestDiffWithProvider(
   provider: ResolvedPullRequestProviderCandidate,
   request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
-  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {},
+  authScope?: AideAuthScope
 ): Effect.Effect<
   AidePullRequestDiffResult,
   PullRequestProviderOperationExecutionError<'getPullRequestDiff'>
 > {
-  const operationRequest = Object.freeze({
+  const operationRequest = frozenHostRecord({
     match: provider.match,
-    pullRequest: Object.freeze({
+    ...(authScope === undefined ? {} : { authScope }),
+    pullRequest: frozenHostRecord({
       number: request.pullRequest.number,
     }),
   });
@@ -4016,21 +4462,24 @@ export function getPullRequestDiffWithProvider(
     operationRequest,
     (result) =>
       validatePullRequestDiffResult(provider, operationRequest, result),
-    options
+    options,
+    authScope !== undefined
   );
 }
 
 export function listPullRequestCommentsWithProvider(
   provider: ResolvedPullRequestProviderCandidate,
   request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
-  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {},
+  authScope?: AideAuthScope
 ): Effect.Effect<
   AidePullRequestCommentsResult,
   PullRequestProviderOperationExecutionError<'listPullRequestComments'>
 > {
-  const operationRequest = Object.freeze({
+  const operationRequest = frozenHostRecord({
     match: provider.match,
-    pullRequest: Object.freeze({
+    ...(authScope === undefined ? {} : { authScope }),
+    pullRequest: frozenHostRecord({
       number: request.pullRequest.number,
     }),
   });
@@ -4042,21 +4491,24 @@ export function listPullRequestCommentsWithProvider(
     operationRequest,
     (result) =>
       validatePullRequestCommentsResult(provider, operationRequest, result),
-    options
+    options,
+    authScope !== undefined
   );
 }
 
 export function addPullRequestCommentWithProvider(
   provider: ResolvedPullRequestProviderCandidate,
-  request: Omit<AidePullRequestAddCommentRequest, 'match'>,
-  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+  request: Omit<AidePullRequestAddCommentRequest, 'match' | 'authScope'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {},
+  authScope?: AideAuthScope
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
   PullRequestProviderOperationExecutionError<'addPullRequestComment'>
 > {
-  const operationRequest = Object.freeze({
+  const operationRequest = frozenHostRecord({
     match: provider.match,
-    pullRequest: Object.freeze({
+    ...(authScope === undefined ? {} : { authScope }),
+    pullRequest: frozenHostRecord({
       number: request.pullRequest.number,
     }),
     body: request.body,
@@ -4077,21 +4529,24 @@ export function addPullRequestCommentWithProvider(
         operationRequest,
         result
       ),
-    options
+    options,
+    authScope !== undefined
   );
 }
 
 export function replyToPullRequestCommentWithProvider(
   provider: ResolvedPullRequestProviderCandidate,
-  request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
-  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+  request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'authScope'>,
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {},
+  authScope?: AideAuthScope
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
   PullRequestProviderOperationExecutionError<'replyToPullRequestComment'>
 > {
-  const operationRequest = Object.freeze({
+  const operationRequest = frozenHostRecord({
     match: provider.match,
-    pullRequest: Object.freeze({
+    ...(authScope === undefined ? {} : { authScope }),
+    pullRequest: frozenHostRecord({
       number: request.pullRequest.number,
     }),
     threadId: request.threadId,
@@ -4113,7 +4568,8 @@ export function replyToPullRequestCommentWithProvider(
         operationRequest,
         result
       ),
-    options
+    options,
+    authScope !== undefined
   );
 }
 
@@ -4122,14 +4578,16 @@ export function findPullRequestForBranchWithProvider(
     AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch
   >,
   request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
-  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {}
+  options: Pick<PullRequestProviderOperationOptions, 'operationTimeout'> = {},
+  authScope?: AideAuthScope
 ): Effect.Effect<
   AidePullRequestBranchLookupResult,
   PullRequestProviderOperationExecutionError<'findPullRequestForBranch'>
 > {
-  const operationRequest = Object.freeze({
+  const operationRequest = frozenHostRecord({
     branch: request.branch,
     match: provider.match,
+    ...(authScope === undefined ? {} : { authScope }),
   });
   return invokePullRequestProviderOperation(
     provider,
@@ -4139,15 +4597,26 @@ export function findPullRequestForBranchWithProvider(
     operationRequest,
     (result) =>
       validatePullRequestBranchLookupResult(provider, operationRequest, result),
-    options
+    options,
+    authScope !== undefined
+  );
+}
+
+function selectPullRequestAuthScopeAndThen<A, E>(
+  provider: ResolvedPullRequestProviderCandidate,
+  options: AideInternalPullRequestInvocationOptions,
+  invoke: (authScope: AideAuthScope | undefined) => Effect.Effect<A, E, never>
+): Effect.Effect<A, E | PullRequestAuthScopeSelectionError, never> {
+  return selectAndSnapshotPullRequestAuthScope(provider, options).pipe(
+    Effect.flatMap(invoke)
   );
 }
 
 export function listPullRequestsForRemote(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
-  request: Omit<AidePullRequestListRequest, 'match'> = {},
-  options: PullRequestProviderOperationOptions = {}
+  request: Omit<AidePullRequestListRequest, 'match' | 'authScope'> = {},
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestListResult,
   PullRequestProviderOperationInvocationError<'listPullRequests'>
@@ -4162,7 +4631,9 @@ export function listPullRequestsForRemote(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      listPullRequestsWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        listPullRequestsWithProvider(provider, request, options, authScope)
+      )
     )
   );
 }
@@ -4170,8 +4641,8 @@ export function listPullRequestsForRemote(
 export function listPullRequestsForRepository(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
-  request: Omit<AidePullRequestListRequest, 'match'> = {},
-  options: PullRequestProviderOperationOptions = {}
+  request: Omit<AidePullRequestListRequest, 'match' | 'authScope'> = {},
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestListResult,
   PullRequestProviderOperationInvocationError<'listPullRequests'>
@@ -4184,7 +4655,9 @@ export function listPullRequestsForRepository(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      listPullRequestsWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        listPullRequestsWithProvider(provider, request, options, authScope)
+      )
     )
   );
 }
@@ -4192,8 +4665,8 @@ export function listPullRequestsForRepository(
 export function createPullRequestForRemote(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
-  request: Omit<AidePullRequestCreateRequest, 'match'>,
-  options: PullRequestProviderOperationOptions = {}
+  request: Omit<AidePullRequestCreateRequest, 'match' | 'authScope'>,
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestCreateResult,
   PullRequestProviderOperationInvocationError<'createPullRequest'>
@@ -4208,7 +4681,9 @@ export function createPullRequestForRemote(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      createPullRequestWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        createPullRequestWithProvider(provider, request, options, authScope)
+      )
     )
   );
 }
@@ -4216,8 +4691,8 @@ export function createPullRequestForRemote(
 export function createPullRequestForRepository(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
-  request: Omit<AidePullRequestCreateRequest, 'match'>,
-  options: PullRequestProviderOperationOptions = {}
+  request: Omit<AidePullRequestCreateRequest, 'match' | 'authScope'>,
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestCreateResult,
   PullRequestProviderOperationInvocationError<'createPullRequest'>
@@ -4230,7 +4705,9 @@ export function createPullRequestForRepository(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      createPullRequestWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        createPullRequestWithProvider(provider, request, options, authScope)
+      )
     )
   );
 }
@@ -4239,7 +4716,7 @@ export function findPullRequestForBranchForRemote(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestBranchLookupResult,
   PullRequestProviderOperationInvocationError<'findPullRequestForBranch'>
@@ -4254,7 +4731,14 @@ export function findPullRequestForBranchForRemote(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      findPullRequestForBranchWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        findPullRequestForBranchWithProvider(
+          provider,
+          request,
+          options,
+          authScope
+        )
+      )
     )
   );
 }
@@ -4263,7 +4747,7 @@ export function findPullRequestForBranchForRepository(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestBranchLookupResult,
   PullRequestProviderOperationInvocationError<'findPullRequestForBranch'>
@@ -4276,7 +4760,14 @@ export function findPullRequestForBranchForRepository(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      findPullRequestForBranchWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        findPullRequestForBranchWithProvider(
+          provider,
+          request,
+          options,
+          authScope
+        )
+      )
     )
   );
 }
@@ -4285,7 +4776,7 @@ export function findPullRequestForBranchContextForRemote(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   PullRequestProviderOperationContext<
     AidePullRequestRemoteMatch,
@@ -4303,8 +4794,17 @@ export function findPullRequestForBranchContextForRemote(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      findPullRequestForBranchWithProvider(provider, request, options).pipe(
-        Effect.map((result) => bindProviderOperationContext(provider, result))
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        findPullRequestForBranchWithProvider(
+          provider,
+          request,
+          options,
+          authScope
+        ).pipe(
+          Effect.map((result) =>
+            bindProviderOperationContext(provider, result, authScope)
+          )
+        )
       )
     )
   );
@@ -4314,7 +4814,7 @@ export function findPullRequestForBranchContextForRepository(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   PullRequestProviderOperationContext<
     AidePullRequestRepositoryMatch,
@@ -4330,8 +4830,17 @@ export function findPullRequestForBranchContextForRepository(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      findPullRequestForBranchWithProvider(provider, request, options).pipe(
-        Effect.map((result) => bindProviderOperationContext(provider, result))
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        findPullRequestForBranchWithProvider(
+          provider,
+          request,
+          options,
+          authScope
+        ).pipe(
+          Effect.map((result) =>
+            bindProviderOperationContext(provider, result, authScope)
+          )
+        )
       )
     )
   );
@@ -4341,7 +4850,7 @@ export function getPullRequestForRemote(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestViewResult,
   PullRequestProviderOperationInvocationError<'getPullRequest'>
@@ -4355,7 +4864,9 @@ export function getPullRequestForRemote(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      getPullRequestWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        getPullRequestWithProvider(provider, request, options, authScope)
+      )
     )
   );
 }
@@ -4364,7 +4875,7 @@ export function getPullRequestForRepository(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestViewResult,
   PullRequestProviderOperationInvocationError<'getPullRequest'>
@@ -4376,7 +4887,9 @@ export function getPullRequestForRepository(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      getPullRequestWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        getPullRequestWithProvider(provider, request, options, authScope)
+      )
     )
   );
 }
@@ -4384,8 +4897,8 @@ export function getPullRequestForRepository(
 export function updatePullRequestForRemote(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
-  request: Omit<AidePullRequestUpdateRequest, 'match'>,
-  options: PullRequestProviderOperationOptions = {}
+  request: Omit<AidePullRequestUpdateRequest, 'match' | 'authScope'>,
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestUpdateResult,
   PullRequestProviderOperationInvocationError<'updatePullRequest'>
@@ -4400,7 +4913,9 @@ export function updatePullRequestForRemote(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      updatePullRequestWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        updatePullRequestWithProvider(provider, request, options, authScope)
+      )
     )
   );
 }
@@ -4408,8 +4923,8 @@ export function updatePullRequestForRemote(
 export function updatePullRequestForRepository(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
-  request: Omit<AidePullRequestUpdateRequest, 'match'>,
-  options: PullRequestProviderOperationOptions = {}
+  request: Omit<AidePullRequestUpdateRequest, 'match' | 'authScope'>,
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestUpdateResult,
   PullRequestProviderOperationInvocationError<'updatePullRequest'>
@@ -4422,7 +4937,9 @@ export function updatePullRequestForRepository(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      updatePullRequestWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        updatePullRequestWithProvider(provider, request, options, authScope)
+      )
     )
   );
 }
@@ -4430,8 +4947,11 @@ export function updatePullRequestForRepository(
 export function updatePullRequestForUrl(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
-  request: Omit<AidePullRequestUpdateRequest, 'match' | 'pullRequest'>,
-  options: PullRequestProviderOperationOptions = {}
+  request: Omit<
+    AidePullRequestUpdateRequest,
+    'match' | 'pullRequest' | 'authScope'
+  >,
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestUpdateResult,
   PullRequestProviderOperationInvocationError<'updatePullRequest'>
@@ -4446,13 +4966,16 @@ export function updatePullRequestForUrl(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      updatePullRequestWithProvider(
-        provider,
-        {
-          ...request,
-          pullRequest: provider.match.pullRequest,
-        },
-        options
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        updatePullRequestWithProvider(
+          provider,
+          {
+            ...request,
+            pullRequest: provider.match.pullRequest,
+          },
+          options,
+          authScope
+        )
       )
     )
   );
@@ -4462,7 +4985,7 @@ export function getPullRequestContextForRemote(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   PullRequestProviderOperationContext<
     AidePullRequestRemoteMatch,
@@ -4479,8 +5002,12 @@ export function getPullRequestContextForRemote(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      getPullRequestWithProvider(provider, request, options).pipe(
-        Effect.map((result) => bindProviderOperationContext(provider, result))
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        getPullRequestWithProvider(provider, request, options, authScope).pipe(
+          Effect.map((result) =>
+            bindProviderOperationContext(provider, result, authScope)
+          )
+        )
       )
     )
   );
@@ -4490,7 +5017,7 @@ export function getPullRequestContextForRepository(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   PullRequestProviderOperationContext<
     AidePullRequestRepositoryMatch,
@@ -4505,8 +5032,12 @@ export function getPullRequestContextForRepository(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      getPullRequestWithProvider(provider, request, options).pipe(
-        Effect.map((result) => bindProviderOperationContext(provider, result))
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        getPullRequestWithProvider(provider, request, options, authScope).pipe(
+          Effect.map((result) =>
+            bindProviderOperationContext(provider, result, authScope)
+          )
+        )
       )
     )
   );
@@ -4516,7 +5047,7 @@ export function getPullRequestDiffForRemote(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestDiffResult,
   PullRequestProviderOperationInvocationError<'getPullRequestDiff'>
@@ -4531,7 +5062,9 @@ export function getPullRequestDiffForRemote(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      getPullRequestDiffWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        getPullRequestDiffWithProvider(provider, request, options, authScope)
+      )
     )
   );
 }
@@ -4540,7 +5073,7 @@ export function getPullRequestDiffForRepository(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestDiffResult,
   PullRequestProviderOperationInvocationError<'getPullRequestDiff'>
@@ -4553,7 +5086,9 @@ export function getPullRequestDiffForRepository(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      getPullRequestDiffWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        getPullRequestDiffWithProvider(provider, request, options, authScope)
+      )
     )
   );
 }
@@ -4562,7 +5097,7 @@ export function listPullRequestCommentsForRemote(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
   request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentsResult,
   PullRequestProviderOperationInvocationError<'listPullRequestComments'>
@@ -4577,7 +5112,14 @@ export function listPullRequestCommentsForRemote(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      listPullRequestCommentsWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        listPullRequestCommentsWithProvider(
+          provider,
+          request,
+          options,
+          authScope
+        )
+      )
     )
   );
 }
@@ -4586,7 +5128,7 @@ export function listPullRequestCommentsForRepository(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
   request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentsResult,
   PullRequestProviderOperationInvocationError<'listPullRequestComments'>
@@ -4599,7 +5141,14 @@ export function listPullRequestCommentsForRepository(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      listPullRequestCommentsWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        listPullRequestCommentsWithProvider(
+          provider,
+          request,
+          options,
+          authScope
+        )
+      )
     )
   );
 }
@@ -4607,8 +5156,8 @@ export function listPullRequestCommentsForRepository(
 export function addPullRequestCommentForRemote(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
-  request: Omit<AidePullRequestAddCommentRequest, 'match'>,
-  options: PullRequestProviderOperationOptions = {}
+  request: Omit<AidePullRequestAddCommentRequest, 'match' | 'authScope'>,
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
   PullRequestProviderOperationInvocationError<'addPullRequestComment'>
@@ -4623,7 +5172,9 @@ export function addPullRequestCommentForRemote(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      addPullRequestCommentWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        addPullRequestCommentWithProvider(provider, request, options, authScope)
+      )
     )
   );
 }
@@ -4631,8 +5182,8 @@ export function addPullRequestCommentForRemote(
 export function addPullRequestCommentForRepository(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
-  request: Omit<AidePullRequestAddCommentRequest, 'match'>,
-  options: PullRequestProviderOperationOptions = {}
+  request: Omit<AidePullRequestAddCommentRequest, 'match' | 'authScope'>,
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
   PullRequestProviderOperationInvocationError<'addPullRequestComment'>
@@ -4645,7 +5196,9 @@ export function addPullRequestCommentForRepository(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      addPullRequestCommentWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        addPullRequestCommentWithProvider(provider, request, options, authScope)
+      )
     )
   );
 }
@@ -4653,8 +5206,8 @@ export function addPullRequestCommentForRepository(
 export function replyToPullRequestCommentForRemote(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   remoteUrl: string,
-  request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
-  options: PullRequestProviderOperationOptions = {}
+  request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'authScope'>,
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
   PullRequestProviderOperationInvocationError<'replyToPullRequestComment'>
@@ -4669,7 +5222,14 @@ export function replyToPullRequestCommentForRemote(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      replyToPullRequestCommentWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        replyToPullRequestCommentWithProvider(
+          provider,
+          request,
+          options,
+          authScope
+        )
+      )
     )
   );
 }
@@ -4677,8 +5237,8 @@ export function replyToPullRequestCommentForRemote(
 export function replyToPullRequestCommentForRepository(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   repository: AidePullRequestRepositoryRef,
-  request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
-  options: PullRequestProviderOperationOptions = {}
+  request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'authScope'>,
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
   PullRequestProviderOperationInvocationError<'replyToPullRequestComment'>
@@ -4691,7 +5251,14 @@ export function replyToPullRequestCommentForRepository(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      replyToPullRequestCommentWithProvider(provider, request, options)
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        replyToPullRequestCommentWithProvider(
+          provider,
+          request,
+          options,
+          authScope
+        )
+      )
     )
   );
 }
@@ -4699,7 +5266,7 @@ export function replyToPullRequestCommentForRepository(
 export function getPullRequestForUrl(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestViewResult,
   PullRequestProviderOperationInvocationError<'getPullRequest'>
@@ -4713,10 +5280,13 @@ export function getPullRequestForUrl(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      getPullRequestWithProvider(
-        provider,
-        { pullRequest: provider.match.pullRequest },
-        options
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        getPullRequestWithProvider(
+          provider,
+          { pullRequest: provider.match.pullRequest },
+          options,
+          authScope
+        )
       )
     )
   );
@@ -4725,7 +5295,7 @@ export function getPullRequestForUrl(
 export function getPullRequestContextForUrl(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   PullRequestProviderOperationContext<
     AidePullRequestUrlMatch,
@@ -4742,12 +5312,17 @@ export function getPullRequestContextForUrl(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      getPullRequestWithProvider(
-        provider,
-        { pullRequest: provider.match.pullRequest },
-        options
-      ).pipe(
-        Effect.map((result) => bindProviderOperationContext(provider, result))
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        getPullRequestWithProvider(
+          provider,
+          { pullRequest: provider.match.pullRequest },
+          options,
+          authScope
+        ).pipe(
+          Effect.map((result) =>
+            bindProviderOperationContext(provider, result, authScope)
+          )
+        )
       )
     )
   );
@@ -4756,7 +5331,7 @@ export function getPullRequestContextForUrl(
 export function getPullRequestDiffForUrl(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestDiffResult,
   PullRequestProviderOperationInvocationError<'getPullRequestDiff'>
@@ -4771,10 +5346,13 @@ export function getPullRequestDiffForUrl(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      getPullRequestDiffWithProvider(
-        provider,
-        { pullRequest: provider.match.pullRequest },
-        options
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        getPullRequestDiffWithProvider(
+          provider,
+          { pullRequest: provider.match.pullRequest },
+          options,
+          authScope
+        )
       )
     )
   );
@@ -4783,7 +5361,7 @@ export function getPullRequestDiffForUrl(
 export function listPullRequestCommentsForUrl(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
-  options: PullRequestProviderOperationOptions = {}
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentsResult,
   PullRequestProviderOperationInvocationError<'listPullRequestComments'>
@@ -4798,10 +5376,13 @@ export function listPullRequestCommentsForUrl(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      listPullRequestCommentsWithProvider(
-        provider,
-        { pullRequest: provider.match.pullRequest },
-        options
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        listPullRequestCommentsWithProvider(
+          provider,
+          { pullRequest: provider.match.pullRequest },
+          options,
+          authScope
+        )
       )
     )
   );
@@ -4810,8 +5391,11 @@ export function listPullRequestCommentsForUrl(
 export function addPullRequestCommentForUrl(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
-  request: Omit<AidePullRequestAddCommentRequest, 'match' | 'pullRequest'>,
-  options: PullRequestProviderOperationOptions = {}
+  request: Omit<
+    AidePullRequestAddCommentRequest,
+    'match' | 'pullRequest' | 'authScope'
+  >,
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
   PullRequestProviderOperationInvocationError<'addPullRequestComment'>
@@ -4826,10 +5410,13 @@ export function addPullRequestCommentForUrl(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      addPullRequestCommentWithProvider(
-        provider,
-        { ...request, pullRequest: provider.match.pullRequest },
-        options
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        addPullRequestCommentWithProvider(
+          provider,
+          { ...request, pullRequest: provider.match.pullRequest },
+          options,
+          authScope
+        )
       )
     )
   );
@@ -4838,8 +5425,11 @@ export function addPullRequestCommentForUrl(
 export function replyToPullRequestCommentForUrl(
   providers: readonly PluginCapability<AidePullRequestProviderCapability>[],
   url: string,
-  request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'pullRequest'>,
-  options: PullRequestProviderOperationOptions = {}
+  request: Omit<
+    AidePullRequestReplyCommentRequest,
+    'match' | 'pullRequest' | 'authScope'
+  >,
+  options: AideInternalPullRequestInvocationOptions = {}
 ): Effect.Effect<
   AidePullRequestCommentMutationResult,
   PullRequestProviderOperationInvocationError<'replyToPullRequestComment'>
@@ -4854,10 +5444,13 @@ export function replyToPullRequestCommentForUrl(
     options
   ).pipe(
     Effect.flatMap((provider) =>
-      replyToPullRequestCommentWithProvider(
-        provider,
-        { ...request, pullRequest: provider.match.pullRequest },
-        options
+      selectPullRequestAuthScopeAndThen(provider, options, (authScope) =>
+        replyToPullRequestCommentWithProvider(
+          provider,
+          { ...request, pullRequest: provider.match.pullRequest },
+          options,
+          authScope
+        )
       )
     )
   );

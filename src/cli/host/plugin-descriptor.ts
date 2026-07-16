@@ -378,6 +378,7 @@ export type AidePullRequestListItemStatus =
 
 export interface AidePullRequestListRequest {
   readonly match: AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch;
+  readonly authScope?: AideAuthScope;
   readonly status?: AidePullRequestListFilterStatus;
   readonly limit?: number;
   readonly createdBy?: string;
@@ -408,6 +409,7 @@ export interface AidePullRequestListResult {
 
 export interface AidePullRequestViewRequest {
   readonly match: AidePullRequestProviderMatch;
+  readonly authScope?: AideAuthScope;
   readonly pullRequest: AidePullRequestRef;
 }
 
@@ -425,6 +427,7 @@ export interface AidePullRequestViewResult {
 
 export interface AidePullRequestCreateRequest {
   readonly match: AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch;
+  readonly authScope?: AideAuthScope;
   readonly title: string;
   readonly description?: string;
   readonly sourceBranch: string;
@@ -441,6 +444,7 @@ export type AidePullRequestUpdateStatus = 'active' | 'abandoned';
 
 export interface AidePullRequestUpdateRequest {
   readonly match: AidePullRequestProviderMatch;
+  readonly authScope?: AideAuthScope;
   readonly pullRequest: AidePullRequestRef;
   readonly title?: string;
   readonly description?: string;
@@ -477,6 +481,7 @@ export interface AidePullRequestDiffFile {
 
 export interface AidePullRequestDiffRequest {
   readonly match: AidePullRequestProviderMatch;
+  readonly authScope?: AideAuthScope;
   readonly pullRequest: AidePullRequestRef;
 }
 
@@ -522,6 +527,7 @@ export interface AidePullRequestCommentThread {
 
 export interface AidePullRequestCommentsRequest {
   readonly match: AidePullRequestProviderMatch;
+  readonly authScope?: AideAuthScope;
   readonly pullRequest: AidePullRequestRef;
 }
 
@@ -540,6 +546,7 @@ export interface AidePullRequestCommentPosition {
 
 export interface AidePullRequestAddCommentRequest {
   readonly match: AidePullRequestProviderMatch;
+  readonly authScope?: AideAuthScope;
   readonly pullRequest: AidePullRequestRef;
   readonly body: string;
   readonly position?: AidePullRequestCommentPosition;
@@ -547,6 +554,7 @@ export interface AidePullRequestAddCommentRequest {
 
 export interface AidePullRequestReplyCommentRequest {
   readonly match: AidePullRequestProviderMatch;
+  readonly authScope?: AideAuthScope;
   readonly pullRequest: AidePullRequestRef;
   readonly threadId: number;
   readonly body: string;
@@ -563,6 +571,7 @@ export interface AidePullRequestCommentMutationResult {
 
 export interface AidePullRequestBranchLookupRequest {
   readonly match: AidePullRequestRemoteMatch | AidePullRequestRepositoryMatch;
+  readonly authScope?: AideAuthScope;
   readonly branch: string;
 }
 

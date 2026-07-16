@@ -200,11 +200,18 @@ function makeExternalProvider(
   constructions: string[],
   observations: Map<string, AuthorityObservation>,
   authStatusCalls: { count: number },
-  synchronousMatcherArguments: Map<string, readonly unknown[]> = new Map()
+  synchronousMatcherArguments: Map<string, readonly unknown[]> = new Map(),
+  operationRequests: Map<string, unknown[]> = new Map()
 ): AidePullRequestProviderCapability {
   const constructed = <A>(name: string, result: A): Effect.Effect<A> => {
     constructions.push(name);
     return ambientAuthority(observations, name, result);
+  };
+  const observed = <A>(name: string, request: unknown, result: A) => {
+    const requests = operationRequests.get(name) ?? [];
+    requests.push(request);
+    operationRequests.set(name, requests);
+    return constructed(name, result);
   };
 
   return {
@@ -236,7 +243,7 @@ function makeExternalProvider(
     },
     operations: {
       listPullRequests: (request: AidePullRequestListRequest) =>
-        constructed<AidePullRequestListResult>('listPullRequests', {
+        observed<AidePullRequestListResult>('listPullRequests', request, {
           repository: request.match.repository,
           pullRequests: [
             {
@@ -249,35 +256,41 @@ function makeExternalProvider(
           ],
         }),
       getPullRequest: (request: AidePullRequestViewRequest) =>
-        constructed('getPullRequest', viewResult(request)),
+        observed('getPullRequest', request, viewResult(request)),
       createPullRequest: (request: AidePullRequestCreateRequest) =>
-        constructed<AidePullRequestCreateResult>('createPullRequest', {
+        observed<AidePullRequestCreateResult>('createPullRequest', request, {
           repository: request.match.repository,
           pullRequest: pullRequestItem(request.sourceBranch),
         }),
       updatePullRequest: (request: AidePullRequestUpdateRequest) =>
-        constructed<AidePullRequestUpdateResult>(
+        observed<AidePullRequestUpdateResult>(
           'updatePullRequest',
+          request,
           viewResult(request)
         ),
       getPullRequestDiff: (request: AidePullRequestDiffRequest) =>
-        constructed<AidePullRequestDiffResult>('getPullRequestDiff', {
+        observed<AidePullRequestDiffResult>('getPullRequestDiff', request, {
           ...viewResult(request),
           files: [],
         }),
       listPullRequestComments: (request: AidePullRequestCommentsRequest) =>
-        constructed<AidePullRequestCommentsResult>('listPullRequestComments', {
-          repository: request.match.repository,
-          pullRequest: request.pullRequest,
-          threads: [],
-        }),
+        observed<AidePullRequestCommentsResult>(
+          'listPullRequestComments',
+          request,
+          {
+            repository: request.match.repository,
+            pullRequest: request.pullRequest,
+            threads: [],
+          }
+        ),
       addPullRequestComment: (request: AidePullRequestAddCommentRequest) =>
-        constructed('addPullRequestComment', mutationResult(request)),
+        observed('addPullRequestComment', request, mutationResult(request)),
       replyToPullRequestComment: (
         request: AidePullRequestReplyCommentRequest
-      ) => constructed('replyToPullRequestComment', mutationResult(request)),
+      ) =>
+        observed('replyToPullRequestComment', request, mutationResult(request)),
       findPullRequestForBranch: (request: AidePullRequestBranchLookupRequest) =>
-        constructed('findPullRequestForBranch', {
+        observed('findPullRequestForBranch', request, {
           branch: request.branch,
           repository: request.match.repository,
           pullRequest: pullRequestItem(request.branch),
@@ -1428,6 +1441,154 @@ describe('public Prime and PR runtime context isolation', () => {
         'findPullRequestForBranch',
       ])
     );
+  });
+
+  test('lets an external provider observe only detached identity scopes on all nine request shapes and reuses the bound scope', async () => {
+    const constructions: string[] = [];
+    const observations = new Map<string, AuthorityObservation>();
+    const operationRequests = new Map<string, unknown[]>();
+    const registry = createKeyringCommandRegistry();
+    registry.registerExternalPlugin(
+      definePublicAidePlugin({
+        id: 'external-pr-selected-scope',
+        summary: 'External selected-scope observation probe',
+        commands: [],
+        capabilities: {
+          pullRequestProvider: makeExternalProvider(
+            constructions,
+            observations,
+            { count: 0 },
+            new Map(),
+            operationRequests
+          ),
+        },
+      }),
+      { manifest: externalManifest('external-pr-selected-scope') }
+    );
+    const internal = createAideInternalHostServices(
+      registry,
+      makeTestKeyring().layer,
+      testGitHubAuthCatalogLayer
+    );
+    let selectorCalls = 0;
+    const rawScope = {
+      id: 'external-isolation:host:example.test:org:acme:account:ada',
+      providerId,
+      host: 'example.test',
+      org: 'acme',
+      account: 'ada',
+      label: 'must not cross the provider boundary',
+      sourceKind: 'external' as const,
+      metadata: { secretPresentationField: 'must not cross' },
+    };
+    const services = internal.withPullRequestAuthScopeSelector((resolved) => {
+      selectorCalls += 1;
+      expect(resolved.providerId).toBe(providerId);
+      expect(Object.isFrozen(resolved)).toBe(true);
+      expect('capability' in resolved).toBe(false);
+      expect('authScope' in resolved).toBe(false);
+      return Effect.succeed(rawScope);
+    });
+    const run = <A, E>(effect: Effect.Effect<A, E, never>) =>
+      Effect.runPromise(effect);
+    const remote = 'https://example.test/acme/widgets.git';
+    const createRequest = {
+      title: 'Selected scope',
+      sourceBranch: 'feature',
+      targetBranch: 'main',
+    };
+    const updateRequest = { pullRequest, title: 'Updated selected scope' };
+    const commentRequest = { pullRequest, body: 'selected scope comment' };
+    const replyRequest = {
+      pullRequest,
+      threadId: 12,
+      body: 'selected scope reply',
+    };
+    const branchRequest = { branch: 'feature' };
+
+    await run(services.listPullRequestsForRemote(remote));
+    await run(services.getPullRequestForRemote(remote, { pullRequest }));
+    await run(services.createPullRequestForRemote(remote, createRequest));
+    await run(services.updatePullRequestForRemote(remote, updateRequest));
+    await run(services.getPullRequestDiffForRemote(remote, { pullRequest }));
+    await run(
+      services.listPullRequestCommentsForRemote(remote, { pullRequest })
+    );
+    await run(services.addPullRequestCommentForRemote(remote, commentRequest));
+    await run(
+      services.replyToPullRequestCommentForRemote(remote, replyRequest)
+    );
+    await run(
+      services.findPullRequestForBranchForRemote(remote, branchRequest)
+    );
+
+    rawScope.label = 'mutated after the first snapshots';
+    rawScope.metadata.secretPresentationField = 'mutated';
+    const context = await run(
+      services.getPullRequestContextForRemote(remote, { pullRequest })
+    );
+    expect('authScope' in context).toBe(false);
+    expect('authScopeSelector' in context).toBe(false);
+    await run(context.getPullRequestDiff({ pullRequest }));
+    await run(context.updatePullRequest(updateRequest));
+    await run(context.listPullRequestComments({ pullRequest }));
+    await run(context.addPullRequestComment(commentRequest));
+    await run(context.replyToPullRequestComment(replyRequest));
+
+    expect(selectorCalls).toBe(10);
+    expect(new Set(operationRequests.keys())).toEqual(
+      new Set([
+        'listPullRequests',
+        'getPullRequest',
+        'createPullRequest',
+        'updatePullRequest',
+        'getPullRequestDiff',
+        'listPullRequestComments',
+        'addPullRequestComment',
+        'replyToPullRequestComment',
+        'findPullRequestForBranch',
+      ])
+    );
+    const requests = [...operationRequests.values()].flat() as Array<{
+      readonly authScope?: object;
+    }>;
+    expect(requests).toHaveLength(15);
+    for (const request of requests) {
+      expect(Object.isFrozen(request)).toBe(true);
+      expect(request.authScope).toEqual({
+        id: rawScope.id,
+        providerId,
+        host: 'example.test',
+        org: 'acme',
+        account: 'ada',
+      });
+      expect(request.authScope).not.toBe(rawScope);
+      expect(Object.isFrozen(request.authScope)).toBe(true);
+      expect(Reflect.ownKeys(request.authScope ?? {})).toEqual([
+        'id',
+        'providerId',
+        'host',
+        'org',
+        'account',
+      ]);
+    }
+
+    const contextRequest = operationRequests.get('getPullRequest')?.at(-1);
+    expect(contextRequest).toBeDefined();
+    const contextScope = (contextRequest as { readonly authScope: object })
+      .authScope;
+    for (const operation of [
+      'getPullRequestDiff',
+      'updatePullRequest',
+      'listPullRequestComments',
+      'addPullRequestComment',
+      'replyToPullRequestComment',
+    ]) {
+      const bound = operationRequests.get(operation)?.at(-1) as {
+        readonly authScope: object;
+      };
+      expect(bound.authScope, operation).toBe(contextScope);
+    }
   });
 
   test('runs PR acquisition and release under empty context and restores caller context after interruption', async () => {

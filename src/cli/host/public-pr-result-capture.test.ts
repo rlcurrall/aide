@@ -20,6 +20,7 @@ import {
   listPullRequestsForRepository,
   PullRequestProviderInvocationError,
   PullRequestProviderOperationError,
+  pullRequestProviderErrorMessage,
   replyToPullRequestCommentForRepository,
   UnsupportedPullRequestProviderError,
   resolvePullRequestProviderForRemote,
@@ -27,7 +28,12 @@ import {
   resolvePullRequestProviderForUrl,
   updatePullRequestForRepository,
 } from './pull-request-provider-resolver.js';
-import { createAideHostServices } from './runtime-context.js';
+import {
+  createAideHostServices,
+  createAideInternalHostServices,
+} from './runtime-context.js';
+import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 
 const pluginId = 'external-pr-result-capture';
 const providerId = 'external-pr-capture';
@@ -941,6 +947,39 @@ async function expectContractFailure(
 }
 
 describe('public PR result structural capture', () => {
+  test('fails closed when a provider tries to reflect request auth-scope material through a public result', async () => {
+    const sentinel = 'SECRET-PROVIDER-REQUEST-AUTH-SCOPE';
+    for (const operation of operationCases) {
+      const harness = registryHarness();
+      harness.values[operation.name] = {
+        ...(harness.values[operation.name] as Record<string, unknown>),
+        authScope: {
+          id: sentinel,
+          providerId: providerId,
+          host: 'example.test',
+          account: 'ada',
+        },
+      };
+
+      const exit = await Effect.runPromiseExit(operation.invoke(harness));
+      expect(Exit.isFailure(exit), operation.name).toBe(true);
+      if (Exit.isSuccess(exit)) {
+        throw new Error(`expected ${operation.name} structural rejection`);
+      }
+      const failure = Cause.failureOption(exit.cause);
+      expect(Option.isSome(failure), operation.name).toBe(true);
+      if (Option.isNone(failure)) {
+        throw new Error(`expected ${operation.name} typed failure`);
+      }
+      expect(failure.value, operation.name).toBeInstanceOf(
+        InvalidPullRequestProviderOperationResultError
+      );
+      expect(inspect(exit, { depth: 12 }), operation.name).not.toContain(
+        sentinel
+      );
+    }
+  });
+
   for (const boundary of [
     'direct-resolver',
     'external-registry-host',
@@ -1158,6 +1197,389 @@ describe('public PR result structural capture', () => {
       expect(messageReads).toBe(0);
     }
   });
+
+  for (const failureShape of [
+    'selected-scope',
+    'hostile-wrapper',
+    'hostile-proxy',
+  ] as const) {
+    test(`replaces ${failureShape} provider failures with a fresh fixed public cause when a host-selected scope is attached`, async () => {
+      const selectedScopeId = `${providerId}:host:selected.example.test:account:selected-account`;
+      const nestedIdentitySentinel = `SECRET-NESTED-SELECTED-IDENTITY-${failureShape}`;
+      const failurePluginId = `external-pr-selected-failure-${failureShape}`;
+      const providerFailures: unknown[] = [];
+      const observedScopes: unknown[] = [];
+      let trapReads = 0;
+      const capability: AidePullRequestProviderCapability = {
+        providerId,
+        priority: 100,
+        features: {},
+        authStatus: () => Effect.succeed({ state: 'configured' }),
+        matchRemote: () => null,
+        matchRepository: () =>
+          Effect.succeed({ source: 'repository-ref', repository }),
+        matchPullRequestUrl: () => null,
+        operations: {
+          listPullRequests: (request) => {
+            const selectedScope = request.authScope;
+            observedScopes.push(selectedScope);
+            let providerFailure: unknown = selectedScope;
+            if (failureShape !== 'selected-scope') {
+              const wrapper = Object.create(null) as Record<string, unknown>;
+              Object.defineProperty(wrapper, 'nested', {
+                enumerable: true,
+                value: Object.freeze({
+                  identity: selectedScope,
+                  id: selectedScope?.id,
+                  sentinel: nestedIdentitySentinel,
+                }),
+              });
+              for (const field of ['message', 'cause', 'authScope', '_tag']) {
+                Object.defineProperty(wrapper, field, {
+                  get() {
+                    trapReads += 1;
+                    throw new Error(`SECRET-SELECTED-FAILURE-${field}`);
+                  },
+                });
+              }
+              providerFailure =
+                failureShape === 'hostile-proxy'
+                  ? new Proxy(wrapper, {
+                      get() {
+                        trapReads += 1;
+                        throw new Error('SECRET-SELECTED-FAILURE-PROXY');
+                      },
+                      getOwnPropertyDescriptor() {
+                        trapReads += 1;
+                        throw new Error('SECRET-SELECTED-FAILURE-PROXY');
+                      },
+                      getPrototypeOf() {
+                        trapReads += 1;
+                        throw new Error('SECRET-SELECTED-FAILURE-PROXY');
+                      },
+                      ownKeys() {
+                        trapReads += 1;
+                        throw new Error('SECRET-SELECTED-FAILURE-PROXY');
+                      },
+                    })
+                  : wrapper;
+            }
+            providerFailures.push(providerFailure);
+            return Effect.fail(providerFailure);
+          },
+        },
+      };
+      const registry = createKeyringCommandRegistry();
+      registry.registerExternalPlugin(
+        definePublicAidePlugin({
+          id: failurePluginId,
+          summary: 'Selected-scope failure reflection probe',
+          commands: [],
+          capabilities: { pullRequestProvider: capability },
+        }),
+        { manifest: { ...manifest(), id: failurePluginId } }
+      );
+      const services = createAideInternalHostServices(
+        registry,
+        makeTestKeyring().layer,
+        testGitHubAuthCatalogLayer
+      ).withPullRequestAuthScopeSelector(() =>
+        Effect.succeed({
+          id: selectedScopeId,
+          providerId,
+          host: 'selected.example.test',
+          account: 'selected-account',
+        })
+      );
+
+      const publicFailures: PullRequestProviderOperationError[] = [];
+      const publicCauses: unknown[] = [];
+      const effectCauses: Cause.Cause<unknown>[] = [];
+      for (let invocation = 0; invocation < 2; invocation += 1) {
+        const exit = await Effect.runPromiseExit(
+          services.listPullRequestsForRepository(repository)
+        );
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isSuccess(exit)) throw new Error('expected provider failure');
+        const failure = Cause.failureOption(exit.cause);
+        expect(Option.isSome(failure)).toBe(true);
+        if (Option.isNone(failure)) throw new Error('expected typed failure');
+        expect(failure.value).toBeInstanceOf(PullRequestProviderOperationError);
+        const publicFailure =
+          failure.value as PullRequestProviderOperationError;
+        const publicCause = publicFailure.cause;
+        expect(publicCause).not.toBe(providerFailures.at(-1));
+        expect(publicCause).not.toBe(observedScopes.at(-1));
+        expect(Object.getPrototypeOf(publicCause)).toBe(null);
+        expect(Reflect.ownKeys(publicCause as object)).toEqual([]);
+        expect(pullRequestProviderErrorMessage(publicFailure)).toBe(
+          `Pull request provider '${providerId}' from plugin '${failurePluginId}' failed during listPullRequests`
+        );
+        publicFailures.push(publicFailure);
+        publicCauses.push(publicCause);
+        effectCauses.push(exit.cause);
+      }
+
+      expect(publicCauses[0]).not.toBe(publicCauses[1]);
+      expect(observedScopes).toHaveLength(2);
+      expect(observedScopes[0]).not.toBe(observedScopes[1]);
+      expect(trapReads).toBe(0);
+      const inspectable = inspect(
+        { publicFailures, publicCauses, effectCauses },
+        { depth: 12, getters: true }
+      );
+      for (const secret of [
+        selectedScopeId,
+        'selected.example.test',
+        'selected-account',
+        nestedIdentitySentinel,
+      ]) {
+        expect(inspectable).not.toContain(secret);
+      }
+      expect(trapReads).toBe(0);
+    });
+  }
+
+  for (const causeShape of [
+    'die-selected-scope',
+    'parallel-fail-die',
+    'sequential-fail-die',
+    'parallel-fail-die-interrupt',
+    'finalizer-die-selected-scope',
+    'finalizer-die-hostile-wrapper',
+    'finalizer-die-hostile-proxy',
+  ] as const) {
+    test(`sanitizes the complete selected-scope provider Cause for ${causeShape}`, async () => {
+      const selectedScopeId = `${providerId}:host:selected-cause.example.test:account:selected-cause-account`;
+      const nestedIdentitySentinel = `SECRET-SELECTED-CAUSE-${causeShape}`;
+      const failurePluginId = `external-pr-complete-cause-${causeShape}`;
+      const interruptor = FiberId.make(73, 17);
+      const observedScopes: unknown[] = [];
+      const rawDefects: unknown[] = [];
+      let trapReads = 0;
+
+      const hostileDefect = (
+        selectedScope: unknown,
+        proxy: boolean
+      ): unknown => {
+        const hostilePrototype = Object.freeze({
+          inheritedScope: selectedScope,
+          inheritedSentinel: nestedIdentitySentinel,
+        });
+        const wrapper = Object.create(hostilePrototype) as Record<
+          PropertyKey,
+          unknown
+        >;
+        Object.defineProperty(wrapper, 'nested', {
+          enumerable: true,
+          value: Object.freeze({
+            identity: selectedScope,
+            sentinel: nestedIdentitySentinel,
+          }),
+        });
+        for (const field of [
+          'message',
+          'cause',
+          'authScope',
+          '_tag',
+          'toJSON',
+          Symbol.for('nodejs.util.inspect.custom'),
+        ]) {
+          Object.defineProperty(wrapper, field, {
+            get() {
+              trapReads += 1;
+              throw new Error('SECRET-SELECTED-CAUSE-GETTER');
+            },
+          });
+        }
+        if (!proxy) return wrapper;
+        return new Proxy(wrapper, {
+          get() {
+            trapReads += 1;
+            throw new Error('SECRET-SELECTED-CAUSE-PROXY');
+          },
+          getOwnPropertyDescriptor() {
+            trapReads += 1;
+            throw new Error('SECRET-SELECTED-CAUSE-PROXY');
+          },
+          getPrototypeOf() {
+            trapReads += 1;
+            throw new Error('SECRET-SELECTED-CAUSE-PROXY');
+          },
+          ownKeys() {
+            trapReads += 1;
+            throw new Error('SECRET-SELECTED-CAUSE-PROXY');
+          },
+        });
+      };
+
+      const capability: AidePullRequestProviderCapability = {
+        providerId,
+        priority: 100,
+        features: {},
+        authStatus: () => Effect.succeed({ state: 'configured' }),
+        matchRemote: () => null,
+        matchRepository: () =>
+          Effect.succeed({ source: 'repository-ref', repository }),
+        matchPullRequestUrl: () => null,
+        operations: {
+          listPullRequests: (request) => {
+            const selectedScope = request.authScope;
+            observedScopes.push(selectedScope);
+            switch (causeShape) {
+              case 'die-selected-scope':
+                rawDefects.push(selectedScope);
+                return Effect.die(selectedScope);
+              case 'parallel-fail-die':
+                rawDefects.push(selectedScope);
+                return Effect.failCause(
+                  Cause.parallel(
+                    Cause.fail(selectedScope),
+                    Cause.die(selectedScope)
+                  )
+                );
+              case 'sequential-fail-die':
+                rawDefects.push(selectedScope);
+                return Effect.failCause(
+                  Cause.sequential(
+                    Cause.fail(selectedScope),
+                    Cause.die(selectedScope)
+                  )
+                );
+              case 'parallel-fail-die-interrupt':
+                rawDefects.push(selectedScope);
+                return Effect.failCause(
+                  Cause.parallel(
+                    Cause.sequential(
+                      Cause.fail(selectedScope),
+                      Cause.die(selectedScope)
+                    ),
+                    Cause.interrupt(interruptor)
+                  )
+                );
+              case 'finalizer-die-selected-scope':
+                rawDefects.push(selectedScope);
+                return Effect.fail(selectedScope).pipe(
+                  Effect.ensuring(Effect.die(selectedScope))
+                );
+              case 'finalizer-die-hostile-wrapper': {
+                const defect = hostileDefect(selectedScope, false);
+                rawDefects.push(defect);
+                return Effect.fail(selectedScope).pipe(
+                  Effect.ensuring(Effect.die(defect))
+                );
+              }
+              case 'finalizer-die-hostile-proxy': {
+                const defect = hostileDefect(selectedScope, true);
+                rawDefects.push(defect);
+                return Effect.fail(selectedScope).pipe(
+                  Effect.ensuring(Effect.die(defect))
+                );
+              }
+            }
+          },
+        },
+      };
+      const registry = createKeyringCommandRegistry();
+      registry.registerExternalPlugin(
+        definePublicAidePlugin({
+          id: failurePluginId,
+          summary: 'Complete selected-scope Cause sanitization probe',
+          commands: [],
+          capabilities: { pullRequestProvider: capability },
+        }),
+        { manifest: { ...manifest(), id: failurePluginId } }
+      );
+      const services = createAideInternalHostServices(
+        registry,
+        makeTestKeyring().layer,
+        testGitHubAuthCatalogLayer
+      ).withPullRequestAuthScopeSelector(() =>
+        Effect.succeed({
+          id: selectedScopeId,
+          providerId,
+          host: 'selected-cause.example.test',
+          account: 'selected-cause-account',
+        })
+      );
+
+      const publicDefects: unknown[][] = [];
+      for (let invocation = 0; invocation < 2; invocation += 1) {
+        const exit = await Effect.runPromiseExit(
+          services.listPullRequestsForRepository(repository)
+        );
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isSuccess(exit)) throw new Error('expected provider Cause');
+
+        const expectedTopTag =
+          causeShape === 'die-selected-scope'
+            ? 'Die'
+            : causeShape.startsWith('parallel-')
+              ? 'Parallel'
+              : 'Sequential';
+        expect(exit.cause._tag).toBe(expectedTopTag);
+
+        const failures = Array.from(Cause.failures(exit.cause));
+        const defects = Array.from(Cause.defects(exit.cause));
+        const expectedFailureCount =
+          causeShape === 'die-selected-scope' ? 0 : 1;
+        expect(failures).toHaveLength(expectedFailureCount);
+        expect(defects).toHaveLength(1);
+        expect(defects[0]).not.toBe(rawDefects.at(-1));
+        expect(defects[0]).not.toBe(observedScopes.at(-1));
+        expect(Object.getPrototypeOf(defects[0] as object)).toBe(null);
+        expect(Reflect.ownKeys(defects[0] as object)).toEqual([]);
+        publicDefects.push(defects);
+
+        for (const failure of failures) {
+          expect(failure).toBeInstanceOf(PullRequestProviderOperationError);
+          const publicFailure = failure as PullRequestProviderOperationError;
+          expect(Object.getPrototypeOf(publicFailure.cause)).toBe(null);
+          expect(Reflect.ownKeys(publicFailure.cause as object)).toEqual([]);
+          expect(pullRequestProviderErrorMessage(publicFailure)).toBe(
+            `Pull request provider '${providerId}' from plugin '${failurePluginId}' failed during listPullRequests`
+          );
+        }
+
+        const interruptors = Array.from(Cause.interruptors(exit.cause));
+        if (causeShape === 'parallel-fail-die-interrupt') {
+          expect(interruptors).toEqual([interruptor]);
+        } else {
+          expect(interruptors).toEqual([]);
+        }
+
+        const inspectionSurfaces = [
+          JSON.stringify(failures),
+          JSON.stringify(defects),
+          JSON.stringify(exit.cause),
+          inspect(failures, { depth: 20, getters: true, customInspect: true }),
+          inspect(defects, { depth: 20, getters: true, customInspect: true }),
+          inspect(exit.cause, {
+            depth: 20,
+            getters: true,
+            customInspect: true,
+          }),
+          Cause.pretty(exit.cause),
+        ];
+        for (const secret of [
+          selectedScopeId,
+          'selected-cause.example.test',
+          'selected-cause-account',
+          nestedIdentitySentinel,
+        ]) {
+          for (const inspection of inspectionSurfaces) {
+            expect(inspection).not.toContain(secret);
+          }
+        }
+        expect(trapReads).toBe(0);
+      }
+
+      expect(publicDefects[0]![0]).not.toBe(publicDefects[1]![0]);
+      expect(observedScopes).toHaveLength(2);
+      expect(observedScopes[0]).not.toBe(observedScopes[1]);
+      expect(trapReads).toBe(0);
+    });
+  }
 
   test('fails closed for malformed DNS lookup values crossing the public provider boundary', async () => {
     const lookupSecrets = [

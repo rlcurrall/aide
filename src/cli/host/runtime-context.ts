@@ -79,6 +79,10 @@ import {
   updatePullRequestForRemote,
   updatePullRequestForRepository,
   updatePullRequestForUrl,
+  rejectPublicPullRequestAuthSelectionInput,
+  type AideInternalPullRequestInvocationOptions,
+  type PullRequestAuthScopeSelectionError,
+  type PullRequestProviderAuthScopeSelector,
   type PullRequestProviderOperationInvocationError,
   type PullRequestProviderOperationContext,
   resolvePullRequestProviderForRemote,
@@ -92,6 +96,31 @@ import {
 } from './pull-request-provider-resolver.js';
 
 const aideHostContexts = new WeakMap<object, AideHostContext>();
+const objectCreate = Object.create;
+const objectFreeze = Object.freeze;
+const objectGetOwnPropertyDescriptors = Object.getOwnPropertyDescriptors;
+const objectHasOwn = Object.hasOwn;
+const reflectGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
+
+function frozenHostRecord<T extends object>(properties: T): T {
+  return objectFreeze(
+    objectCreate(null, objectGetOwnPropertyDescriptors(properties)) as T
+  );
+}
+
+function ownDataPropertyValue<T>(
+  value: object,
+  key: PropertyKey
+): T | undefined {
+  try {
+    const descriptor = reflectGetOwnPropertyDescriptor(value, key);
+    return descriptor !== undefined && objectHasOwn(descriptor, 'value')
+      ? (descriptor.value as T)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export interface AideHostServices {
   readonly authProviders: () => readonly AideDiscoveredCapability<AidePublicAuthProviderSnapshot>[];
@@ -101,32 +130,32 @@ export interface AideHostServices {
     options?: PullRequestProviderResolutionOptions<AidePullRequestRemoteMatch>
   ) => Effect.Effect<
     ResolvedPullRequestProvider<AidePullRequestRemoteMatch>,
-    PullRequestProviderResolutionError
+    PullRequestProviderResolutionError | PullRequestAuthScopeSelectionError
   >;
   readonly resolvePullRequestProviderForUrl: (
     url: string,
     options?: PullRequestProviderResolutionOptions<AidePullRequestUrlMatch>
   ) => Effect.Effect<
     ResolvedPullRequestProvider<AidePullRequestUrlMatch>,
-    PullRequestProviderResolutionError
+    PullRequestProviderResolutionError | PullRequestAuthScopeSelectionError
   >;
   readonly resolvePullRequestProviderForRepository: (
     repository: AidePullRequestRepositoryRef,
     options?: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch>
   ) => Effect.Effect<
     ResolvedPullRequestProvider<AidePullRequestRepositoryMatch>,
-    PullRequestProviderResolutionError
+    PullRequestProviderResolutionError | PullRequestAuthScopeSelectionError
   >;
   readonly resolvePullRequestProviderForRepositoryInput: (
     input: AidePullRequestRepositoryInput,
     options?: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch>
   ) => Effect.Effect<
     ResolvedPullRequestProvider<AidePullRequestRepositoryMatch>,
-    PullRequestProviderResolutionError
+    PullRequestProviderResolutionError | PullRequestAuthScopeSelectionError
   >;
   readonly listPullRequestsForRemote: (
     remoteUrl: string,
-    request?: Omit<AidePullRequestListRequest, 'match'>,
+    request?: Omit<AidePullRequestListRequest, 'match' | 'authScope'>,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestListResult,
@@ -134,7 +163,7 @@ export interface AideHostServices {
   >;
   readonly listPullRequestsForRepository: (
     repository: AidePullRequestRepositoryRef,
-    request?: Omit<AidePullRequestListRequest, 'match'>,
+    request?: Omit<AidePullRequestListRequest, 'match' | 'authScope'>,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestListResult,
@@ -158,7 +187,7 @@ export interface AideHostServices {
   >;
   readonly createPullRequestForRemote: (
     remoteUrl: string,
-    request: Omit<AidePullRequestCreateRequest, 'match'>,
+    request: Omit<AidePullRequestCreateRequest, 'match' | 'authScope'>,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCreateResult,
@@ -166,7 +195,7 @@ export interface AideHostServices {
   >;
   readonly createPullRequestForRepository: (
     repository: AidePullRequestRepositoryRef,
-    request: Omit<AidePullRequestCreateRequest, 'match'>,
+    request: Omit<AidePullRequestCreateRequest, 'match' | 'authScope'>,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCreateResult,
@@ -174,7 +203,7 @@ export interface AideHostServices {
   >;
   readonly updatePullRequestForRemote: (
     remoteUrl: string,
-    request: Omit<AidePullRequestUpdateRequest, 'match'>,
+    request: Omit<AidePullRequestUpdateRequest, 'match' | 'authScope'>,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestUpdateResult,
@@ -182,7 +211,7 @@ export interface AideHostServices {
   >;
   readonly updatePullRequestForRepository: (
     repository: AidePullRequestRepositoryRef,
-    request: Omit<AidePullRequestUpdateRequest, 'match'>,
+    request: Omit<AidePullRequestUpdateRequest, 'match' | 'authScope'>,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestUpdateResult,
@@ -190,7 +219,10 @@ export interface AideHostServices {
   >;
   readonly updatePullRequestForUrl: (
     url: string,
-    request: Omit<AidePullRequestUpdateRequest, 'match' | 'pullRequest'>,
+    request: Omit<
+      AidePullRequestUpdateRequest,
+      'match' | 'pullRequest' | 'authScope'
+    >,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestUpdateResult,
@@ -276,7 +308,7 @@ export interface AideHostServices {
   >;
   readonly addPullRequestCommentForRemote: (
     remoteUrl: string,
-    request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+    request: Omit<AidePullRequestAddCommentRequest, 'match' | 'authScope'>,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
@@ -284,7 +316,7 @@ export interface AideHostServices {
   >;
   readonly addPullRequestCommentForRepository: (
     repository: AidePullRequestRepositoryRef,
-    request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+    request: Omit<AidePullRequestAddCommentRequest, 'match' | 'authScope'>,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
@@ -292,7 +324,10 @@ export interface AideHostServices {
   >;
   readonly addPullRequestCommentForUrl: (
     url: string,
-    request: Omit<AidePullRequestAddCommentRequest, 'match' | 'pullRequest'>,
+    request: Omit<
+      AidePullRequestAddCommentRequest,
+      'match' | 'pullRequest' | 'authScope'
+    >,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
@@ -300,7 +335,7 @@ export interface AideHostServices {
   >;
   readonly replyToPullRequestCommentForRemote: (
     remoteUrl: string,
-    request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+    request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'authScope'>,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
@@ -308,7 +343,7 @@ export interface AideHostServices {
   >;
   readonly replyToPullRequestCommentForRepository: (
     repository: AidePullRequestRepositoryRef,
-    request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+    request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'authScope'>,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
@@ -316,7 +351,10 @@ export interface AideHostServices {
   >;
   readonly replyToPullRequestCommentForUrl: (
     url: string,
-    request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'pullRequest'>,
+    request: Omit<
+      AidePullRequestReplyCommentRequest,
+      'match' | 'pullRequest' | 'authScope'
+    >,
     options?: PullRequestProviderOperationOptions
   ) => Effect.Effect<
     AidePullRequestCommentMutationResult,
@@ -432,6 +470,10 @@ export type AidePrimeContributionRegistration =
 /** Trusted in-process services. Never export this contract from plugin-api. */
 export interface AideInternalHostServices extends AideHostServices {
   readonly publicServices: AideHostServices;
+  readonly withPullRequestAuthScopeSelector: (
+    selector: PullRequestProviderAuthScopeSelector,
+    options?: Pick<AideInternalPullRequestInvocationOptions, 'selectionTimeout'>
+  ) => AideHostServices;
   readonly authProviderRegistrations: () => readonly AideAuthProviderRegistration[];
   readonly primeContributionRegistrations: () => readonly AidePrimeContributionRegistration[];
   readonly trustedAuthProviders: () => readonly AideDiscoveredCapability<
@@ -526,7 +568,102 @@ export function getAideHostContext(argv: unknown): AideHostContext | null {
   return aideHostContexts.get(argv) ?? null;
 }
 
-export function createAideHostServices<
+interface PullRequestInvocationSelection {
+  readonly authScopeSelector?: PullRequestProviderAuthScopeSelector;
+  readonly selectionTimeout?: AideInternalPullRequestInvocationOptions['selectionTimeout'];
+}
+
+function invokePublicPullRequestHostBoundary<A, E>(
+  request: unknown,
+  options: PullRequestProviderOperationOptions,
+  selection: PullRequestInvocationSelection,
+  invoke: (
+    options: AideInternalPullRequestInvocationOptions
+  ) => Effect.Effect<A, E, never>
+): Effect.Effect<A, E | PullRequestAuthScopeSelectionError, never> {
+  const rejection = rejectPublicPullRequestAuthSelectionInput(request, options);
+  if (rejection !== undefined) return Effect.fail(rejection);
+  const operationTimeout = ownDataPropertyValue<
+    PullRequestProviderOperationOptions['operationTimeout']
+  >(options, 'operationTimeout');
+  const matcherTimeout = ownDataPropertyValue<
+    PullRequestProviderOperationOptions['matcherTimeout']
+  >(options, 'matcherTimeout');
+  const authScopeSelector = ownDataPropertyValue<
+    PullRequestInvocationSelection['authScopeSelector']
+  >(selection, 'authScopeSelector');
+  const selectionTimeout = ownDataPropertyValue<
+    PullRequestInvocationSelection['selectionTimeout']
+  >(selection, 'selectionTimeout');
+  return Effect.suspend(() =>
+    invoke(
+      frozenHostRecord({
+        ...(operationTimeout === undefined ? {} : { operationTimeout }),
+        ...(matcherTimeout === undefined ? {} : { matcherTimeout }),
+        ...(authScopeSelector === undefined ? {} : { authScopeSelector }),
+        ...(selectionTimeout === undefined ? {} : { selectionTimeout }),
+      })
+    )
+  );
+}
+
+function snapshotPublicPullRequestResolutionOptions<
+  TMatch extends
+    | AidePullRequestRemoteMatch
+    | AidePullRequestRepositoryMatch
+    | AidePullRequestUrlMatch,
+>(options: unknown): PullRequestProviderResolutionOptions<TMatch> {
+  if (
+    (typeof options !== 'object' && typeof options !== 'function') ||
+    options === null
+  ) {
+    return frozenHostRecord({});
+  }
+  const preferred = Reflect.getOwnPropertyDescriptor(options, 'preferred');
+  const matcherTimeout = Reflect.getOwnPropertyDescriptor(
+    options,
+    'matcherTimeout'
+  );
+  return frozenHostRecord({
+    ...(preferred !== undefined && Object.hasOwn(preferred, 'value')
+      ? {
+          preferred:
+            preferred.value as PullRequestProviderResolutionOptions<TMatch>['preferred'],
+        }
+      : {}),
+    ...(matcherTimeout !== undefined && Object.hasOwn(matcherTimeout, 'value')
+      ? {
+          matcherTimeout:
+            matcherTimeout.value as PullRequestProviderResolutionOptions<TMatch>['matcherTimeout'],
+        }
+      : {}),
+  });
+}
+
+function invokePublicPullRequestResolutionBoundary<
+  TMatch extends
+    | AidePullRequestRemoteMatch
+    | AidePullRequestRepositoryMatch
+    | AidePullRequestUrlMatch,
+  A,
+>(
+  options: PullRequestProviderResolutionOptions<TMatch>,
+  invoke: (
+    options: PullRequestProviderResolutionOptions<TMatch>
+  ) => Effect.Effect<A, PullRequestProviderResolutionError, never>
+): Effect.Effect<
+  A,
+  PullRequestProviderResolutionError | PullRequestAuthScopeSelectionError,
+  never
+> {
+  const rejection = rejectPublicPullRequestAuthSelectionInput(options);
+  if (rejection !== undefined) return Effect.fail(rejection);
+  return Effect.suspend(() =>
+    invoke(snapshotPublicPullRequestResolutionOptions<TMatch>(options))
+  );
+}
+
+function createPullRequestInvocationServices<
   RAuth,
   RAuthStatus,
   RAuthAccounts,
@@ -543,7 +680,8 @@ export function createAideHostServices<
     RAuthLogout,
     RPrimeStatus,
     RPullRequestAuthStatus
-  >
+  >,
+  selection: PullRequestInvocationSelection = frozenHostRecord({})
 ): AideHostServices {
   const discoveredAuthProviders = discoveredCapabilities(
     registry.capabilities.authProviders()
@@ -636,325 +774,446 @@ export function createAideHostServices<
   }
   Object.freeze(primeContributions);
   const pullRequestProviders = registry.capabilities.pullRequestProviders();
-  const publicServices: AideHostServices = Object.freeze({
+  const invokePullRequest = <A, E>(
+    request: unknown,
+    options: PullRequestProviderOperationOptions,
+    invoke: (
+      internalOptions: AideInternalPullRequestInvocationOptions
+    ) => Effect.Effect<A, E, never>
+  ) => invokePublicPullRequestHostBoundary(request, options, selection, invoke);
+  const publicServices: AideHostServices = frozenHostRecord({
     authProviders: () => authProviders,
     primeContributions: () => primeContributions,
     resolvePullRequestProviderForRemote: (
       remoteUrl: string,
       options: PullRequestProviderResolutionOptions<AidePullRequestRemoteMatch> = {}
     ) =>
-      resolvePullRequestProviderForRemote(
-        pullRequestProviders,
-        remoteUrl,
-        options
+      invokePublicPullRequestResolutionBoundary(options, (safeOptions) =>
+        resolvePullRequestProviderForRemote(
+          pullRequestProviders,
+          remoteUrl,
+          safeOptions
+        )
       ),
     resolvePullRequestProviderForUrl: (
       url: string,
       options: PullRequestProviderResolutionOptions<AidePullRequestUrlMatch> = {}
-    ) => resolvePullRequestProviderForUrl(pullRequestProviders, url, options),
+    ) =>
+      invokePublicPullRequestResolutionBoundary(options, (safeOptions) =>
+        resolvePullRequestProviderForUrl(pullRequestProviders, url, safeOptions)
+      ),
     resolvePullRequestProviderForRepository: (
       repository: AidePullRequestRepositoryRef,
       options: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch> = {}
     ) =>
-      resolvePullRequestProviderForRepository(
-        pullRequestProviders,
-        repository,
-        options
+      invokePublicPullRequestResolutionBoundary(options, (safeOptions) =>
+        resolvePullRequestProviderForRepository(
+          pullRequestProviders,
+          repository,
+          safeOptions
+        )
       ),
     resolvePullRequestProviderForRepositoryInput: (
       input: AidePullRequestRepositoryInput,
       options: PullRequestProviderResolutionOptions<AidePullRequestRepositoryMatch> = {}
     ) =>
-      resolvePullRequestProviderForRepositoryInput(
-        pullRequestProviders,
-        input,
-        options
+      invokePublicPullRequestResolutionBoundary(options, (safeOptions) =>
+        resolvePullRequestProviderForRepositoryInput(
+          pullRequestProviders,
+          input,
+          safeOptions
+        )
       ),
     listPullRequestsForRemote: (
       remoteUrl: string,
-      request: Omit<AidePullRequestListRequest, 'match'> = {},
+      request: Omit<AidePullRequestListRequest, 'match' | 'authScope'> = {},
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      listPullRequestsForRemote(
-        pullRequestProviders,
-        remoteUrl,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        listPullRequestsForRemote(
+          pullRequestProviders,
+          remoteUrl,
+          request,
+          internalOptions
+        )
       ),
     listPullRequestsForRepository: (
       repository: AidePullRequestRepositoryRef,
-      request: Omit<AidePullRequestListRequest, 'match'> = {},
+      request: Omit<AidePullRequestListRequest, 'match' | 'authScope'> = {},
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      listPullRequestsForRepository(
-        pullRequestProviders,
-        repository,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        listPullRequestsForRepository(
+          pullRequestProviders,
+          repository,
+          request,
+          internalOptions
+        )
       ),
     getPullRequestForRemote: (
       remoteUrl: string,
       request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      getPullRequestForRemote(
-        pullRequestProviders,
-        remoteUrl,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        getPullRequestForRemote(
+          pullRequestProviders,
+          remoteUrl,
+          request,
+          internalOptions
+        )
       ),
     getPullRequestForRepository: (
       repository: AidePullRequestRepositoryRef,
       request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      getPullRequestForRepository(
-        pullRequestProviders,
-        repository,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        getPullRequestForRepository(
+          pullRequestProviders,
+          repository,
+          request,
+          internalOptions
+        )
       ),
     createPullRequestForRemote: (
       remoteUrl: string,
-      request: Omit<AidePullRequestCreateRequest, 'match'>,
+      request: Omit<AidePullRequestCreateRequest, 'match' | 'authScope'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      createPullRequestForRemote(
-        pullRequestProviders,
-        remoteUrl,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        createPullRequestForRemote(
+          pullRequestProviders,
+          remoteUrl,
+          request,
+          internalOptions
+        )
       ),
     createPullRequestForRepository: (
       repository: AidePullRequestRepositoryRef,
-      request: Omit<AidePullRequestCreateRequest, 'match'>,
+      request: Omit<AidePullRequestCreateRequest, 'match' | 'authScope'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      createPullRequestForRepository(
-        pullRequestProviders,
-        repository,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        createPullRequestForRepository(
+          pullRequestProviders,
+          repository,
+          request,
+          internalOptions
+        )
       ),
     updatePullRequestForRemote: (
       remoteUrl: string,
-      request: Omit<AidePullRequestUpdateRequest, 'match'>,
+      request: Omit<AidePullRequestUpdateRequest, 'match' | 'authScope'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      updatePullRequestForRemote(
-        pullRequestProviders,
-        remoteUrl,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        updatePullRequestForRemote(
+          pullRequestProviders,
+          remoteUrl,
+          request,
+          internalOptions
+        )
       ),
     updatePullRequestForRepository: (
       repository: AidePullRequestRepositoryRef,
-      request: Omit<AidePullRequestUpdateRequest, 'match'>,
+      request: Omit<AidePullRequestUpdateRequest, 'match' | 'authScope'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      updatePullRequestForRepository(
-        pullRequestProviders,
-        repository,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        updatePullRequestForRepository(
+          pullRequestProviders,
+          repository,
+          request,
+          internalOptions
+        )
       ),
     updatePullRequestForUrl: (
       url: string,
-      request: Omit<AidePullRequestUpdateRequest, 'match' | 'pullRequest'>,
+      request: Omit<
+        AidePullRequestUpdateRequest,
+        'match' | 'pullRequest' | 'authScope'
+      >,
       options: PullRequestProviderOperationOptions = {}
-    ) => updatePullRequestForUrl(pullRequestProviders, url, request, options),
+    ) =>
+      invokePullRequest(request, options, (internalOptions) =>
+        updatePullRequestForUrl(
+          pullRequestProviders,
+          url,
+          request,
+          internalOptions
+        )
+      ),
     getPullRequestContextForRemote: (
       remoteUrl: string,
       request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      getPullRequestContextForRemote(
-        pullRequestProviders,
-        remoteUrl,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        getPullRequestContextForRemote(
+          pullRequestProviders,
+          remoteUrl,
+          request,
+          internalOptions
+        )
       ),
     getPullRequestContextForRepository: (
       repository: AidePullRequestRepositoryRef,
       request: Pick<AidePullRequestViewRequest, 'pullRequest'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      getPullRequestContextForRepository(
-        pullRequestProviders,
-        repository,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        getPullRequestContextForRepository(
+          pullRequestProviders,
+          repository,
+          request,
+          internalOptions
+        )
       ),
     getPullRequestContextForUrl: (
       url: string,
       options: PullRequestProviderOperationOptions = {}
-    ) => getPullRequestContextForUrl(pullRequestProviders, url, options),
+    ) =>
+      invokePullRequest(undefined, options, (internalOptions) =>
+        getPullRequestContextForUrl(pullRequestProviders, url, internalOptions)
+      ),
     getPullRequestDiffForRemote: (
       remoteUrl: string,
       request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      getPullRequestDiffForRemote(
-        pullRequestProviders,
-        remoteUrl,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        getPullRequestDiffForRemote(
+          pullRequestProviders,
+          remoteUrl,
+          request,
+          internalOptions
+        )
       ),
     getPullRequestDiffForRepository: (
       repository: AidePullRequestRepositoryRef,
       request: Pick<AidePullRequestDiffRequest, 'pullRequest'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      getPullRequestDiffForRepository(
-        pullRequestProviders,
-        repository,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        getPullRequestDiffForRepository(
+          pullRequestProviders,
+          repository,
+          request,
+          internalOptions
+        )
       ),
     getPullRequestDiffForUrl: (
       url: string,
       options: PullRequestProviderOperationOptions = {}
-    ) => getPullRequestDiffForUrl(pullRequestProviders, url, options),
+    ) =>
+      invokePullRequest(undefined, options, (internalOptions) =>
+        getPullRequestDiffForUrl(pullRequestProviders, url, internalOptions)
+      ),
     listPullRequestCommentsForRemote: (
       remoteUrl: string,
       request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      listPullRequestCommentsForRemote(
-        pullRequestProviders,
-        remoteUrl,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        listPullRequestCommentsForRemote(
+          pullRequestProviders,
+          remoteUrl,
+          request,
+          internalOptions
+        )
       ),
     listPullRequestCommentsForRepository: (
       repository: AidePullRequestRepositoryRef,
       request: Pick<AidePullRequestCommentsRequest, 'pullRequest'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      listPullRequestCommentsForRepository(
-        pullRequestProviders,
-        repository,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        listPullRequestCommentsForRepository(
+          pullRequestProviders,
+          repository,
+          request,
+          internalOptions
+        )
       ),
     listPullRequestCommentsForUrl: (
       url: string,
       options: PullRequestProviderOperationOptions = {}
-    ) => listPullRequestCommentsForUrl(pullRequestProviders, url, options),
+    ) =>
+      invokePullRequest(undefined, options, (internalOptions) =>
+        listPullRequestCommentsForUrl(
+          pullRequestProviders,
+          url,
+          internalOptions
+        )
+      ),
     addPullRequestCommentForRemote: (
       remoteUrl: string,
-      request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+      request: Omit<AidePullRequestAddCommentRequest, 'match' | 'authScope'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      addPullRequestCommentForRemote(
-        pullRequestProviders,
-        remoteUrl,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        addPullRequestCommentForRemote(
+          pullRequestProviders,
+          remoteUrl,
+          request,
+          internalOptions
+        )
       ),
     addPullRequestCommentForRepository: (
       repository: AidePullRequestRepositoryRef,
-      request: Omit<AidePullRequestAddCommentRequest, 'match'>,
+      request: Omit<AidePullRequestAddCommentRequest, 'match' | 'authScope'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      addPullRequestCommentForRepository(
-        pullRequestProviders,
-        repository,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        addPullRequestCommentForRepository(
+          pullRequestProviders,
+          repository,
+          request,
+          internalOptions
+        )
       ),
     addPullRequestCommentForUrl: (
       url: string,
-      request: Omit<AidePullRequestAddCommentRequest, 'match' | 'pullRequest'>,
+      request: Omit<
+        AidePullRequestAddCommentRequest,
+        'match' | 'pullRequest' | 'authScope'
+      >,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      addPullRequestCommentForUrl(pullRequestProviders, url, request, options),
+      invokePullRequest(request, options, (internalOptions) =>
+        addPullRequestCommentForUrl(
+          pullRequestProviders,
+          url,
+          request,
+          internalOptions
+        )
+      ),
     replyToPullRequestCommentForRemote: (
       remoteUrl: string,
-      request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+      request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'authScope'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      replyToPullRequestCommentForRemote(
-        pullRequestProviders,
-        remoteUrl,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        replyToPullRequestCommentForRemote(
+          pullRequestProviders,
+          remoteUrl,
+          request,
+          internalOptions
+        )
       ),
     replyToPullRequestCommentForRepository: (
       repository: AidePullRequestRepositoryRef,
-      request: Omit<AidePullRequestReplyCommentRequest, 'match'>,
+      request: Omit<AidePullRequestReplyCommentRequest, 'match' | 'authScope'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      replyToPullRequestCommentForRepository(
-        pullRequestProviders,
-        repository,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        replyToPullRequestCommentForRepository(
+          pullRequestProviders,
+          repository,
+          request,
+          internalOptions
+        )
       ),
     replyToPullRequestCommentForUrl: (
       url: string,
       request: Omit<
         AidePullRequestReplyCommentRequest,
-        'match' | 'pullRequest'
+        'match' | 'pullRequest' | 'authScope'
       >,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      replyToPullRequestCommentForUrl(
-        pullRequestProviders,
-        url,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        replyToPullRequestCommentForUrl(
+          pullRequestProviders,
+          url,
+          request,
+          internalOptions
+        )
       ),
     findPullRequestForBranchForRemote: (
       remoteUrl: string,
       request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      findPullRequestForBranchForRemote(
-        pullRequestProviders,
-        remoteUrl,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        findPullRequestForBranchForRemote(
+          pullRequestProviders,
+          remoteUrl,
+          request,
+          internalOptions
+        )
       ),
     findPullRequestForBranchForRepository: (
       repository: AidePullRequestRepositoryRef,
       request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      findPullRequestForBranchForRepository(
-        pullRequestProviders,
-        repository,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        findPullRequestForBranchForRepository(
+          pullRequestProviders,
+          repository,
+          request,
+          internalOptions
+        )
       ),
     findPullRequestForBranchContextForRemote: (
       remoteUrl: string,
       request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      findPullRequestForBranchContextForRemote(
-        pullRequestProviders,
-        remoteUrl,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        findPullRequestForBranchContextForRemote(
+          pullRequestProviders,
+          remoteUrl,
+          request,
+          internalOptions
+        )
       ),
     findPullRequestForBranchContextForRepository: (
       repository: AidePullRequestRepositoryRef,
       request: Pick<AidePullRequestBranchLookupRequest, 'branch'>,
       options: PullRequestProviderOperationOptions = {}
     ) =>
-      findPullRequestForBranchContextForRepository(
-        pullRequestProviders,
-        repository,
-        request,
-        options
+      invokePullRequest(request, options, (internalOptions) =>
+        findPullRequestForBranchContextForRepository(
+          pullRequestProviders,
+          repository,
+          request,
+          internalOptions
+        )
       ),
     getPullRequestForUrl: (
       url: string,
       options: PullRequestProviderOperationOptions = {}
-    ) => getPullRequestForUrl(pullRequestProviders, url, options),
+    ) =>
+      invokePullRequest(undefined, options, (internalOptions) =>
+        getPullRequestForUrl(pullRequestProviders, url, internalOptions)
+      ),
   });
   return publicServices;
+}
+
+export function createAideHostServices<
+  RAuth,
+  RAuthStatus,
+  RAuthAccounts,
+  RAuthLogin,
+  RAuthLogout,
+  RPrimeStatus,
+  RPullRequestAuthStatus,
+>(
+  registry: CommandRegistry<
+    RAuth,
+    RAuthStatus,
+    RAuthAccounts,
+    RAuthLogin,
+    RAuthLogout,
+    RPrimeStatus,
+    RPullRequestAuthStatus
+  >
+): AideHostServices {
+  return createPullRequestInvocationServices(registry);
 }
 
 export function createAideInternalHostServices(
@@ -1028,9 +1287,27 @@ export function createAideInternalHostServices(
   }
   Object.freeze(primeContributionRegistrations);
 
-  return Object.freeze({
+  return frozenHostRecord({
     ...publicServices,
     publicServices,
+    withPullRequestAuthScopeSelector: (
+      selector: PullRequestProviderAuthScopeSelector,
+      options: Pick<
+        AideInternalPullRequestInvocationOptions,
+        'selectionTimeout'
+      > = {}
+    ) => {
+      const selectionTimeout = ownDataPropertyValue<
+        AideInternalPullRequestInvocationOptions['selectionTimeout']
+      >(options, 'selectionTimeout');
+      return createPullRequestInvocationServices(
+        registry,
+        frozenHostRecord({
+          authScopeSelector: selector,
+          ...(selectionTimeout === undefined ? {} : { selectionTimeout }),
+        })
+      );
+    },
     authProviderRegistrations: () => authProviderRegistrations,
     primeContributionRegistrations: () => primeContributionRegistrations,
     trustedAuthProviders: () => trustedAuthProviders,

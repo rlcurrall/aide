@@ -9,11 +9,13 @@ import {
 } from '@cli/host/command-registry.js';
 import {
   createAideHostServices,
+  createAideInternalHostServices,
   type AideHostServices,
 } from '@cli/host/runtime-context.js';
 import {
   defineAidePlugin,
   type AidePullRequestProviderCapability as AidePullRequestProviderCapabilityShape,
+  type AidePullRequestListRequest,
   type AidePullRequestRemoteMatch,
   type AidePullRequestUrlMatch,
 } from '@cli/host/plugin-descriptor.js';
@@ -23,6 +25,7 @@ import { createGitHubPlugin } from '@cli/plugins/github/plugin.js';
 import type { AzureDevOpsClient } from '@lib/azure-devops-client.js';
 import type { GitHubClient } from '@lib/github-client.js';
 import { makeTestKeyring } from '@lib/auth-keyring.test-helper.js';
+import { testGitHubAuthCatalogLayer } from '@lib/github-auth-catalog.test-helper.js';
 import { loadAzureDevOpsConfig } from '@lib/config.js';
 import {
   installMockSecrets,
@@ -7925,5 +7928,76 @@ describe('host mutation timeout policy and genuine interruption', () => {
     if (Exit.isSuccess(exit)) throw new Error('Expected interruption');
     expect(Cause.isInterruptedOnly(exit.cause)).toBe(true);
     expect(finalized).toBe(1);
+  });
+});
+
+describe('pull request provider authentication scope transport', () => {
+  test('resolves the provider before one selector invocation and invokes the operation with a detached scope', async () => {
+    const order: string[] = [];
+    let observedRequest: AidePullRequestListRequest | undefined;
+    const repository = externalRepository('selector-order');
+    const registry = createKeyringCommandRegistry().registerPlugin(
+      defineAidePlugin({
+        id: 'selector-order',
+        summary: 'Selector ordering provider',
+        commands: [],
+        capabilities: {
+          pullRequestProvider: {
+            providerId: 'selector-order',
+            priority: 100,
+            features: {},
+            authStatus: () => Effect.succeed({ state: 'configured' }),
+            matchRemote: () => {
+              order.push('resolve');
+              return { source: 'git-remote', repository };
+            },
+            matchPullRequestUrl: () => null,
+            operations: {
+              listPullRequests: (request) => {
+                order.push('operate');
+                observedRequest = request;
+                return Effect.succeed({ repository, pullRequests: [] });
+              },
+            },
+          },
+        },
+      })
+    );
+    const services = createAideInternalHostServices(
+      registry,
+      makeTestKeyring().layer,
+      testGitHubAuthCatalogLayer
+    ).withPullRequestAuthScopeSelector((provider) => {
+      order.push('select');
+      expect(provider.providerId).toBe('selector-order');
+      return Effect.succeed({
+        id: 'selector-order:host:example.test:account:ada',
+        providerId: 'selector-order',
+        host: 'example.test',
+        account: 'ada',
+        label: 'must be reduced',
+        sourceKind: 'external',
+        metadata: { mustNotReachProvider: true },
+      });
+    });
+
+    await Effect.runPromise(
+      services.listPullRequestsForRemote('ssh://example.test/acme/widgets.git')
+    );
+
+    expect(order).toEqual(['resolve', 'select', 'operate']);
+    expect(observedRequest?.authScope).toEqual({
+      id: 'selector-order:host:example.test:account:ada',
+      providerId: 'selector-order',
+      host: 'example.test',
+      account: 'ada',
+    });
+    expect(Object.keys(observedRequest?.authScope ?? {})).toEqual([
+      'id',
+      'providerId',
+      'host',
+      'account',
+    ]);
+    expect(Object.isFrozen(observedRequest?.authScope)).toBe(true);
   });
 });

@@ -9,6 +9,7 @@ import {
   defineAidePlugin,
   type AidePluginDescriptor,
   type AidePluginAuthStatus,
+  type AidePullRequestListRequest,
 } from './plugin-descriptor.js';
 import {
   createAideHostServices,
@@ -70,6 +71,7 @@ describe('public AideHostServices construction', () => {
     expect(publicKeys).not.toContain('provideTrustedAuthDiscovery');
     expect(publicKeys).not.toContain('keyringLayer');
     expect(publicKeys).not.toContain('githubAuthCatalogLayer');
+    expect(publicKeys).not.toContain('withPullRequestAuthScopeSelector');
     expect(missingCatalogLayerDoesNotCompile).toBeFunction();
     expect(JSON.stringify(internal.publicServices)).not.toContain(
       'GitHubAuthCatalog'
@@ -81,6 +83,89 @@ describe('public AideHostServices construction', () => {
     expect(indexSource).toContain(
       'githubAuthCatalogLayer: GitHubAuthCatalogLive'
     );
+  });
+
+  test('keeps synthetic PR auth selection on an internal closure-only invocation wrapper', async () => {
+    const order: string[] = [];
+    let observedRequest: AidePullRequestListRequest | undefined;
+    const repository = Object.freeze({
+      kind: 'external' as const,
+      providerId: 'internal-selection',
+      displayName: 'Internal selection',
+    });
+    const registry = createKeyringCommandRegistry().registerPlugin(
+      defineAidePlugin({
+        id: 'internal-selection',
+        summary: 'Internal selection provider',
+        commands: [],
+        capabilities: {
+          pullRequestProvider: {
+            providerId: 'internal-selection',
+            priority: 100,
+            features: {},
+            authStatus: () => Effect.succeed({ state: 'configured' }),
+            matchRemote: () => {
+              order.push('provider-resolution');
+              return { source: 'git-remote', repository };
+            },
+            matchPullRequestUrl: () => null,
+            operations: {
+              listPullRequests: (request) => {
+                order.push('provider-operation');
+                observedRequest = request;
+                return Effect.succeed({ repository, pullRequests: [] });
+              },
+            },
+          },
+        },
+      })
+    );
+    const internal = createAideInternalHostServices(
+      registry,
+      makeTestKeyring().layer,
+      testGitHubAuthCatalogLayer
+    );
+    const publicServices = createAideHostServices(registry);
+    const publicSelectorDoesNotCompile = () => {
+      // @ts-expect-error Public host services cannot install authentication selectors.
+      publicServices.withPullRequestAuthScopeSelector(() =>
+        Effect.succeed(undefined)
+      );
+    };
+    const selected = internal.withPullRequestAuthScopeSelector((provider) => {
+      order.push('auth-selection');
+      expect(provider.providerId).toBe('internal-selection');
+      expect(Object.isFrozen(provider)).toBe(true);
+      expect('capability' in provider).toBe(false);
+      return Effect.succeed({
+        id: 'internal-selection:host:example.test:account:ada',
+        providerId: 'internal-selection',
+        host: 'example.test',
+        account: 'ada',
+      });
+    });
+
+    await Effect.runPromise(
+      selected.listPullRequestsForRemote('ssh://example.test/acme/widgets.git')
+    );
+
+    expect(order).toEqual([
+      'provider-resolution',
+      'auth-selection',
+      'provider-operation',
+    ]);
+    expect(observedRequest?.authScope).toEqual({
+      id: 'internal-selection:host:example.test:account:ada',
+      providerId: 'internal-selection',
+      host: 'example.test',
+      account: 'ada',
+    });
+    expect(Object.isFrozen(observedRequest?.authScope)).toBe(true);
+    expect('withPullRequestAuthScopeSelector' in selected).toBe(false);
+    expect('withPullRequestAuthScopeSelector' in internal.publicServices).toBe(
+      false
+    );
+    expect(publicSelectorDoesNotCompile).toBeFunction();
   });
 
   test('resolves PR providers from service-free registries', async () => {
